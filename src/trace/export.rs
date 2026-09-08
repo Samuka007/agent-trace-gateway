@@ -10,11 +10,13 @@ use tokio::sync::mpsc;
 const QUEUE_CAPACITY: usize = 1024;
 const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Langfuse vocabulary constants, aligned with sub2api modeltrace
-/// (backend/internal/modeltrace/middleware.go): same attribute keys and the
-/// line tag let Langfuse-side queries aggregate both producers identically.
-const LANGFUSE_TRACE_NAME: &str = "agent.turn";
-const LANGFUSE_TRACE_TAG: &str = "line:atg";
+/// Distinct span-id derivation seed for the generation child span.
+const GEN_SPAN_ID_SEED: &str = "\u{0}gen";
+
+use crate::trace::adaptor::{
+    usage_details_json, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, GENERATION_SPAN_NAME,
+    LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
+};
 
 #[derive(Default)]
 pub struct ExportHealth {
@@ -186,10 +188,12 @@ fn display_endpoint(endpoint: &str) -> String {
 fn build_otlp_json(batch: &[TurnRecord]) -> String {
     let spans: Vec<serde_json::Value> = batch
         .iter()
-        .map(|r| {
+        .flat_map(|r| {
             // Explicit session only: modeltrace never writes session
             // attributes when no id exists (middleware.go session == ""), so
             // empty-session turns must not invent one on either line.
+            // Trace-level attributes (session/tags/name) are copied onto
+            // every span in the trace (spec section 3).
             let mut attributes = Vec::new();
             if !r.session_id.is_empty() {
                 attributes.push(kv("session.id", &r.session_id));
@@ -199,6 +203,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 kv("protocol", &r.protocol),
                 kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
                 kv_array("langfuse.trace.tags", &[LANGFUSE_TRACE_TAG]),
+                kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_AGENT),
                 kv("user_input", &r.user_input),
                 kv("final_output", &r.final_output),
                 kv("raw_request", &r.raw_request),
@@ -209,7 +214,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 let tool_calls_json = serde_json::to_string(&r.tool_calls).unwrap_or_default();
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
-            serde_json::json!({
+            let agent_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
                 "spanId": span_id_for(&r.session_id, &r.user_input, &r.raw_request),
                 "name": "agent.turn",
@@ -217,7 +222,36 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 "startTimeUnixNano": r.start_ns.to_string(),
                 "endTimeUnixNano": r.end_ns.to_string(),
                 "attributes": attributes
-            })
+            });
+            // Generation child span: carries the usage_details (exclusive
+            // buckets) — the only span type Langfuse reads usage from. The
+            // child span id is derived with a distinct seed so it never
+            // collides with the parent.
+            let usage_attrs: Vec<serde_json::Value> = match &r.usage {
+                Some(u) if !u.is_empty() => {
+                    vec![kv(ATTR_USAGE_DETAILS, &usage_details_json(u))]
+                }
+                _ => Vec::new(),
+            };
+            let generation_attributes: Vec<serde_json::Value> = [
+                kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
+                kv_array("langfuse.trace.tags", &[LANGFUSE_TRACE_TAG]),
+                kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
+            ]
+            .into_iter()
+            .chain(usage_attrs)
+            .collect();
+            let generation_span = serde_json::json!({
+                "traceId": trace_id_for(&r.session_id),
+                "spanId": span_id_for(&r.session_id, GEN_SPAN_ID_SEED, &r.raw_request),
+                "parentSpanId": span_id_for(&r.session_id, &r.user_input, &r.raw_request),
+                "name": GENERATION_SPAN_NAME,
+                "kind": 3,
+                "startTimeUnixNano": r.start_ns.to_string(),
+                "endTimeUnixNano": r.end_ns.to_string(),
+                "attributes": generation_attributes
+            });
+            vec![agent_span, generation_span]
         })
         .collect();
     serde_json::json!({
@@ -411,10 +445,37 @@ mod tests {
         assert_eq!(value("session.id"), "sess-1");
         assert_eq!(value("langfuse.session.id"), "sess-1");
         assert_eq!(value("langfuse.trace.name"), "agent.turn");
+        assert_eq!(value("langfuse.observation.type"), "agent");
+        // An agent-type span must not carry generation-exclusive usage keys.
+        assert!(
+            span_attr(span, "langfuse.observation.usage_details").is_none(),
+            "agent span must not carry usage_details"
+        );
         let tags = span_attr(span, "langfuse.trace.tags")
             .and_then(|v| v["arrayValue"]["values"].as_array())
             .unwrap_or_else(|| panic!("tags must be an OTLP array: {span}"));
         assert_eq!(tags[0]["stringValue"], "line:atg");
+
+        // The generation child span carries the usage_details.
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        let generation = spans
+            .iter()
+            .find(|s| s["name"] == "agent.turn.generation")
+            .expect("generation child span must exist");
+        assert_eq!(
+            span_attr(generation, "langfuse.observation.type").unwrap()["stringValue"],
+            "generation"
+        );
+        // Without usage the child carries no usage_details.
+        assert!(span_attr(generation, "langfuse.observation.usage_details").is_none());
+        // Parent link.
+        assert_eq!(
+            generation["parentSpanId"], span["spanId"],
+            "generation must be a child of agent.turn"
+        );
+        assert_ne!(generation["spanId"], span["spanId"]);
     }
 
     /// G1 (empty-session variant): session attributes are omitted entirely.
@@ -430,6 +491,40 @@ mod tests {
             span_attr(span, "langfuse.trace.name").unwrap()["stringValue"],
             "agent.turn"
         );
+    }
+
+    /// Generation child span carries usage_details when usage is present.
+    #[test]
+    fn generation_span_carries_usage_details() {
+        let mut r = record("sess-usage");
+        r.usage = Some(crate::trace::adaptor::TurnUsage {
+            input_tokens: Some(12),
+            output_tokens: Some(7),
+            cache_read_tokens: Some(3),
+            cache_creation_tokens: Some(4),
+            total_tokens: None,
+        });
+        let payload: serde_json::Value =
+            serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        let generation = spans
+            .iter()
+            .find(|s| s["name"] == "agent.turn.generation")
+            .expect("generation child span");
+        let value = |k: &str| {
+            span_attr(generation, k)
+                .and_then(|v| v["stringValue"].as_str())
+                .unwrap_or_else(|| panic!("{k} missing: {generation}"))
+        };
+        assert_eq!(
+            value("langfuse.observation.usage_details"),
+            r#"{"cache_creation_input_tokens":4,"cache_read_input_tokens":3,"input":12,"output":7}"#
+        );
+        // total omitted: derived server-side as bucket sum.
+        let agent = &spans[0];
+        assert!(span_attr(agent, "langfuse.observation.usage_details").is_none());
     }
 
     /// G2: two session-less turns must not collapse into one trace.

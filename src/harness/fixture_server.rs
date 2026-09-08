@@ -66,7 +66,7 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                         "content": format!("echo:{user_text} sess:{session}")
                     }
                 }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+                "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
             });
             let mut r = Response::new(full(resp.to_string()));
             r.headers_mut().insert(
@@ -89,14 +89,17 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 // the block, outer content_block_delta events carry
                 // delta.type=input_json_delta fragments, content_block_stop
                 // closes it.
+                // Real anthropic usage: message_start reports the input side,
+                // message_delta the output side.
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(8);
                 tokio::spawn(async move {
                     let events = [
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_usage\",\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":4}}}\n\n",
                         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\"}}\n\n",
                         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"\"}}\n\n",
                         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Tokyo\\\"}\"}}\n\n",
                         "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-                        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+                        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n",
                         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
                     ];
                     for ev in events {
@@ -120,7 +123,12 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 "model": v.get("model").cloned().unwrap_or_default(),
                 "content": [{"type": "text", "text": format!("echo:{user_text}")}],
                 "stop_reason": "end_turn",
-                "usage": {"input_tokens": 1, "output_tokens": 1}
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "cache_creation_input_tokens": 4
+                }
             });
             let mut r = Response::new(full(resp.to_string()));
             r.headers_mut().insert(
@@ -143,7 +151,7 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                         "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_sse_1\",\"name\":\"read_file\",\"arguments\":\"\"}}\n\n",
                         "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\\\"/tmp/x\\\"}\"}\n\n",
                         "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_sse_1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/x\\\"}\"}}\n\n",
-                        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+                        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":11,\"output_tokens\":22,\"total_tokens\":33}}}\n\n",
                     ];
                     for ev in events {
                         let _ = tx.send(Ok(Frame::data(Bytes::from(ev)))).await;
@@ -162,6 +170,7 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
             let resp = serde_json::json!({
                 "id": "resp_fixture",
                 "status": "completed",
+                "usage": {"input_tokens": 11, "output_tokens": 22, "total_tokens": 33},
                 "output": [{
                     "type": "message",
                     "role": "assistant",

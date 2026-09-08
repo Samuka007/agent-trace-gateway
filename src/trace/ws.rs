@@ -146,6 +146,7 @@ impl WsTurnState {
             // Timing is filled by the gateway (Ctx) after take_record.
             start_ns: 0,
             end_ns: 0,
+            usage: None,
         }
     }
 }

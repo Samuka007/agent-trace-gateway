@@ -131,7 +131,7 @@ async fn otlp_export() {
         .and_then(|ss| ss.first())
         .and_then(|s| s["spans"].as_array())
         .unwrap_or_else(|| panic!("OTLP spans missing: {payload}"));
-    assert_eq!(spans.len(), 2, "two turn spans expected: {spans:?}");
+    assert_eq!(spans.len(), 4, "two turns, each with agent+generation span: {spans:?}");
     let span = &spans[0];
     // Session id present as an attribute; turn content carried verbatim.
     let attrs = span["attributes"].as_array().expect("span attributes");
@@ -157,6 +157,42 @@ async fn otlp_export() {
         attr("raw_request").contains("otlp-turn"),
         "verbatim request must be exported: {attrs:?}"
     );
+    // Usage attributes (adaptor): the chat fixture reports 8/2/10. They live
+    // on the generation child span only — the agent root span must stay
+    // usage-free (generation-exclusive fields are ignored on agent type).
+    assert_eq!(attr("langfuse.observation.type"), "agent");
+    assert!(attr("langfuse.observation.usage_details").is_empty());
+    let generation = spans
+        .iter()
+        .find(|s| s["name"] == "agent.turn.generation")
+        .unwrap_or_else(|| panic!("generation child span missing: {spans:?}"));
+    let gen_value = |k: &str| {
+        generation["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["key"] == k)
+            .and_then(|a| a["value"]["stringValue"].as_str())
+            .unwrap_or_default()
+    };
+    assert_eq!(gen_value("langfuse.observation.type"), "generation");
+    assert_eq!(
+        gen_value("langfuse.observation.usage_details"),
+        r#"{"input":8,"output":2,"total":10}"#,
+        "usage_details must be the flat snake_case JSON: {generation}"
+    );
+    // No gen_ai.* keys anywhere (inclusive-normalized keys must not mix with
+    // exclusive usage_details).
+    for s in spans {
+        assert!(
+            !s["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["key"].as_str().unwrap_or("").starts_with("gen_ai.usage.")),
+            "gen_ai.usage.* must not be mixed with usage_details: {s}"
+        );
+    }
 
     // Timestamps must be real (non-zero nanoseconds), not placeholders.
     for s in spans {
@@ -253,7 +289,9 @@ async fn otlp_export() {
         })
         .collect();
     // The streaming turn from the first scenario is also openai.responses —
-    // its span carries a session attribute; the two anon spans must not.
+    // its agent span carries a session attribute; the two anon agent spans
+    // must not. (Generation children carry no protocol attr and stay out of
+    // anon_spans.)
     let anon_only: Vec<_> = anon_spans
         .iter()
         .filter(|s| {
@@ -267,7 +305,7 @@ async fn otlp_export() {
     assert_eq!(
         anon_only.len(),
         2,
-        "exactly two session-less responses spans expected: {anon_spans:?}"
+        "exactly two session-less responses agent spans expected: {anon_spans:?}"
     );
     let trace_ids: Vec<String> = anon_only
         .iter()

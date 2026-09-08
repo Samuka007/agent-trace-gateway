@@ -1,3 +1,4 @@
+pub mod adaptor;
 pub mod capture;
 pub mod export;
 pub mod prefix;

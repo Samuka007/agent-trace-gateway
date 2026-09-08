@@ -25,6 +25,9 @@ pub struct TurnRecord {
     pub start_ns: u64,
     #[serde(default)]
     pub end_ns: u64,
+    /// Token usage reported by the model protocol (None = not reported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::trace::adaptor::TurnUsage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
