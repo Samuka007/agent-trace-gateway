@@ -504,8 +504,7 @@ mod tests {
             cache_creation_tokens: Some(4),
             total_tokens: None,
         });
-        let payload: serde_json::Value =
-            serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();

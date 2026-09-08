@@ -131,7 +131,11 @@ async fn otlp_export() {
         .and_then(|ss| ss.first())
         .and_then(|s| s["spans"].as_array())
         .unwrap_or_else(|| panic!("OTLP spans missing: {payload}"));
-    assert_eq!(spans.len(), 4, "two turns, each with agent+generation span: {spans:?}");
+    assert_eq!(
+        spans.len(),
+        4,
+        "two turns, each with agent+generation span: {spans:?}"
+    );
     let span = &spans[0];
     // Session id present as an attribute; turn content carried verbatim.
     let attrs = span["attributes"].as_array().expect("span attributes");
