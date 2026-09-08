@@ -48,7 +48,8 @@ impl SseAccum {
             }
         } else if strategy == ToolCallStrategy::ChunkedToolCalls {
             self.chat_tools.sort_by_key(|(i, _)| *i);
-            self.tools.extend(self.chat_tools.into_iter().map(|(_, c)| c));
+            self.tools
+                .extend(self.chat_tools.into_iter().map(|(_, c)| c));
         }
         self.tools
     }
@@ -174,10 +175,13 @@ pub fn apply_sse_rule(
                         let entry = match acc.chat_tools.iter_mut().find(|(i, _)| *i == idx) {
                             Some(e) => e,
                             None => {
-                                acc.chat_tools.push((idx, ToolCall {
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                }));
+                                acc.chat_tools.push((
+                                    idx,
+                                    ToolCall {
+                                        name: String::new(),
+                                        arguments: String::new(),
+                                    },
+                                ));
                                 acc.chat_tools.last_mut().unwrap()
                             }
                         };
