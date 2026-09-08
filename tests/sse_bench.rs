@@ -44,7 +44,10 @@ fn median_of3<T: Ord + Copy>(mut f: impl FnMut() -> T) -> T {
     v[1]
 }
 
+/// Release-mode only: run with `--release`. Debug builds are ~8x slower by
+/// nature and would false-fail the timing gate.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "bench gate is release-mode only")]
 fn bench_sse_reassembly_256k() {
     let d = ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
     let body = make_sse_body(256, 1024); // ~272KB
@@ -63,7 +66,9 @@ fn bench_sse_reassembly_256k() {
     );
 }
 
+/// Release-mode only (see bench_sse_reassembly_256k).
 #[test]
+#[cfg_attr(debug_assertions, ignore = "bench gate is release-mode only")]
 fn bench_anthropic_tool_stream() {
     let d = ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
     let body = make_anthropic_tool_body(3000, 50);
