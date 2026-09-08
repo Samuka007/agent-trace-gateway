@@ -106,7 +106,7 @@ pub fn apply_sse_rule(
                         if !usage.is_null() {
                             crate::trace::adaptor::merge_usage(
                                 &mut acc.usage,
-                                crate::trace::adaptor::usage_from_obj(d.name, usage),
+                                crate::trace::adaptor::usage_from_obj(d, usage),
                             );
                         }
                     }
@@ -229,7 +229,7 @@ pub fn nonstreaming(
 ) -> Option<crate::trace::store::TurnRecord> {
     let user_input = d.user_input(req)?;
     let final_output = d.final_output(resp).unwrap_or_default();
-    let usage = crate::trace::adaptor::usage_from_nonstreaming(d.name, resp);
+    let usage = crate::trace::adaptor::usage_from_nonstreaming(d, resp);
     Some(crate::trace::store::TurnRecord {
         protocol: d.name.to_string(),
         user_input,
