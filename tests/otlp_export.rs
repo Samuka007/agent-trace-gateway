@@ -133,7 +133,7 @@ async fn otlp_export() {
         "otlp-session-1",
         "session attribute: {attrs:?}"
     );
-    assert_eq!(attr("protocol"), "openai_chat");
+    assert_eq!(attr("protocol"), "openai.chat_completions");
     assert!(
         attr("user_input").contains("otlp-turn"),
         "user input must be exported: {attrs:?}"
@@ -165,12 +165,12 @@ async fn otlp_export() {
                 .as_array()
                 .map(|a| {
                     a.iter().any(|x| {
-                        x["key"] == "protocol" && x["value"]["stringValue"] == "openai_responses"
+                        x["key"] == "protocol" && x["value"]["stringValue"] == "openai.responses"
                     })
                 })
                 .unwrap_or(false)
         })
-        .unwrap_or_else(|| panic!("openai_responses span missing: {spans:?}"));
+        .unwrap_or_else(|| panic!("openai.responses span missing: {spans:?}"));
     let tool_attrs = tool_span["attributes"]
         .as_array()
         .expect("tool span attributes");
@@ -197,4 +197,78 @@ async fn otlp_export() {
     // The record store still holds the record (export does not mutate it).
     let recs = records(gw).await;
     assert_eq!(recs.len(), 2, "both turns must remain in the record store");
+
+    // G1+G2: session-less responses turns (no session id anywhere, no
+    // messages array) must not share one trace id and must carry no session
+    // attributes — matching modeltrace's "no id, no session attribute".
+    for i in 0..2 {
+        let body = format!(r#"{{"model":"m","input":"anon-turn-{i}"}}"#);
+        let req = Request::post(format!("http://127.0.0.1:{gw}/v1/responses"))
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap();
+        let resp = client().request(req).await.expect("anon request");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let _ = resp.collect().await.unwrap();
+    }
+    // Wait past the batch flush interval so the two anon turns are exported.
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let exported_anon = received.lock().clone();
+    let anon_spans: Vec<serde_json::Value> = exported_anon
+        .iter()
+        .filter_map(|p| serde_json::from_slice::<serde_json::Value>(p).ok())
+        .flat_map(|payload| {
+            payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|s| {
+            s["attributes"]
+                .as_array()
+                .map(|a| {
+                    a.iter().any(|x| {
+                        x["key"] == "protocol" && x["value"]["stringValue"] == "openai.responses"
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    // The streaming turn from the first scenario is also openai.responses —
+    // its span carries a session attribute; the two anon spans must not.
+    let anon_only: Vec<_> = anon_spans
+        .iter()
+        .filter(|s| {
+            !s["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["key"] == "session.id")
+        })
+        .collect();
+    assert_eq!(
+        anon_only.len(),
+        2,
+        "exactly two session-less responses spans expected: {anon_spans:?}"
+    );
+    let trace_ids: Vec<String> = anon_only
+        .iter()
+        .map(|s| s["traceId"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_ne!(
+        trace_ids[0], trace_ids[1],
+        "session-less turns collapsed into one trace"
+    );
+    for span in &anon_only {
+        let has_session_attr = span["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["key"] == "session.id" || a["key"] == "langfuse.session.id");
+        assert!(
+            !has_session_attr,
+            "empty-session span must omit session attributes: {span}"
+        );
+        assert_eq!(span["name"], "agent.turn");
+    }
 }

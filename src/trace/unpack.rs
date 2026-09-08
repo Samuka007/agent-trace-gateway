@@ -5,12 +5,12 @@ use crate::trace::store::{ToolCall, TurnRecord};
 
 pub fn detect_protocol(path: &str) -> Option<&'static str> {
     if path.starts_with("/v1/chat") || path.starts_with("/compatible-mode/v1/chat") {
-        Some("openai_chat")
+        Some("openai.chat_completions")
     } else if path.starts_with("/v1/messages") {
-        Some("anthropic_messages")
+        Some("anthropic.messages")
     } else if path.starts_with("/v1/responses") || path.starts_with("/compatible-mode/v1/responses")
     {
-        Some("openai_responses")
+        Some("openai.responses")
     } else {
         None
     }
@@ -42,21 +42,21 @@ pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
             continue;
         };
         match protocol {
-            "openai_responses" => {
+            "openai.responses" => {
                 if v["type"] == "response.output_text.delta" {
                     if let Some(d) = v["delta"].as_str() {
                         out.push_str(d);
                     }
                 }
             }
-            "anthropic_messages" => {
+            "anthropic.messages" => {
                 if v["type"] == "content_block_delta" {
                     if let Some(d) = v["delta"]["text"].as_str() {
                         out.push_str(d);
                     }
                 }
             }
-            "openai_chat" => {
+            "openai.chat_completions" => {
                 if let Some(choices) = v["choices"].as_array() {
                     if let Some(d) = choices.first().and_then(|c| c["delta"]["content"].as_str()) {
                         out.push_str(d);
@@ -78,7 +78,7 @@ pub fn extract_sse_tool_calls(
     response_body: &[u8],
 ) -> Vec<crate::trace::store::ToolCall> {
     let mut out = Vec::new();
-    if protocol != "openai_responses" {
+    if protocol != "openai.responses" {
         return out;
     }
     let text = String::from_utf8_lossy(response_body);
@@ -115,7 +115,7 @@ pub fn unpack_nonstreaming(
     let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
     let resp: serde_json::Value = serde_json::from_slice(response_body).ok()?;
     match protocol {
-        "openai_chat" => {
+        "openai.chat_completions" => {
             let user_input = req["messages"]
                 .as_array()?
                 .iter()
@@ -134,7 +134,7 @@ pub fn unpack_nonstreaming(
                 ..Default::default()
             })
         }
-        "anthropic_messages" => {
+        "anthropic.messages" => {
             let user_input = req["messages"]
                 .as_array()?
                 .iter()
@@ -160,7 +160,7 @@ pub fn unpack_nonstreaming(
                 ..Default::default()
             })
         }
-        "openai_responses" => {
+        "openai.responses" => {
             let user_input = responses_user_input(&req)?;
             let final_output = resp["output"]
                 .as_array()
@@ -194,13 +194,13 @@ pub fn unpack_nonstreaming(
 pub fn extract_user_input(protocol: &str, request_body: &[u8]) -> Option<String> {
     let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
     match protocol {
-        "openai_chat" | "anthropic_messages" => req["messages"]
+        "openai.chat_completions" | "anthropic.messages" => req["messages"]
             .as_array()?
             .iter()
             .rev()
             .find(|m| m["role"] == "user")
             .and_then(|m| content_text(&m["content"])),
-        "openai_responses" => responses_user_input(&req),
+        "openai.responses" => responses_user_input(&req),
         _ => None,
     }
 }

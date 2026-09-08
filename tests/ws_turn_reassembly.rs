@@ -71,7 +71,7 @@ async fn ws_turn_reassembly() {
     let arr = recs.as_array().expect("records array");
     let rec = arr
         .iter()
-        .find(|r| r["protocol"] == "openai_responses_ws")
+        .find(|r| r["protocol"] == "openai.live")
         .unwrap_or_else(|| panic!("no WS turn record in {arr:?}"));
 
     // Input comes from the response.create frame.

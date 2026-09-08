@@ -44,7 +44,10 @@ async fn records() -> Vec<serde_json::Value> {
 async fn prefix_stitch() {
     start_stack(&[]).await;
 
-    let fixture_dir = format!("{}/xtask/harness/fixtures/openai_chat", manifest_dir());
+    let fixture_dir = format!(
+        "{}/xtask/harness/fixtures/openai.chat_completions",
+        manifest_dir()
+    );
     // Real omp tool-loop samples: turn4 (5 messages) then turn5 (7 messages).
     // turn5's first 5 messages are byte-identical to turn4 -> strict prefix.
     for name in ["omp_tool_turn4.json", "omp_tool_turn5.json"] {
@@ -71,9 +74,13 @@ async fn prefix_stitch() {
     let recs = records().await;
     let chat: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "openai_chat")
+        .filter(|r| r["protocol"] == "openai.chat_completions")
         .collect();
-    assert_eq!(chat.len(), 5, "five openai_chat records expected: {recs:?}");
+    assert_eq!(
+        chat.len(),
+        5,
+        "five openai.chat_completions records expected: {recs:?}"
+    );
 
     let s4 = chat[0]["session_id"].as_str().unwrap_or("");
     let s5 = chat[1]["session_id"].as_str().unwrap_or("");

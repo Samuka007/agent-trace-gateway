@@ -135,7 +135,7 @@ impl WsTurnState {
 
     pub fn take_record(&mut self) -> TurnRecord {
         TurnRecord {
-            protocol: "openai_responses_ws".to_string(),
+            protocol: "openai.live".to_string(),
             session_id: std::mem::take(&mut self.session_id),
             user_input: self.input.take().unwrap_or_default(),
             final_output: std::mem::take(&mut self.output),

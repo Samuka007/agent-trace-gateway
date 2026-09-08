@@ -71,7 +71,7 @@ async fn bounded_stitch_state() {
     let recs = records().await;
     let chat: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "openai_chat")
+        .filter(|r| r["protocol"] == "openai.chat_completions")
         .collect();
     assert_eq!(chat.len(), 4);
 
@@ -108,7 +108,7 @@ async fn bounded_stitch_state() {
     let recs = records().await;
     let chat: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "openai_chat")
+        .filter(|r| r["protocol"] == "openai.chat_completions")
         .collect();
     assert_eq!(chat.len(), 5);
     let ids: Vec<&str> = chat
