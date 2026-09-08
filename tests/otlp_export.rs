@@ -31,8 +31,12 @@ async fn fake_collector(port: u16, received: Arc<Mutex<Vec<Vec<u8>>>>) {
                     move |req: hyper::Request<hyper::body::Incoming>| {
                         let received = received.clone();
                         async move {
+                            let uri = req.uri().to_string();
                             let body = req.collect().await.unwrap().to_bytes();
-                            received.lock().push(body.to_vec());
+                            let mut frame = uri.into_bytes();
+                            frame.push(b'\n');
+                            frame.extend_from_slice(&body);
+                            received.lock().push(frame);
                             Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(
                                 Bytes::from("{}"),
                             )))
@@ -107,8 +111,19 @@ async fn otlp_export() {
     assert!(!exported.is_empty(), "collector received nothing");
 
     // Parse the OTLP JSON payload: session -> turn span structure.
-    let payload: serde_json::Value =
-        serde_json::from_slice(&exported[0]).expect("OTLP payload must be JSON");
+    let payload: serde_json::Value = serde_json::from_slice(
+        &exported[0][exported[0].iter().position(|b| *b == b'\n').unwrap() + 1..],
+    )
+    .expect("OTLP payload must be JSON");
+    // The POST must hit the OTLP HTTP receiver path. The test stack configures
+    // a bare host endpoint; the exporter must append /v1/traces itself.
+    let uri =
+        std::str::from_utf8(&exported[0][..exported[0].iter().position(|b| *b == b'\n').unwrap()])
+            .unwrap();
+    assert!(
+        uri.ends_with("/v1/traces"),
+        "OTLP export must target /v1/traces, got {uri}"
+    );
     let spans = payload["resourceSpans"]
         .as_array()
         .and_then(|rs| rs.first())
@@ -216,7 +231,10 @@ async fn otlp_export() {
     let exported_anon = received.lock().clone();
     let anon_spans: Vec<serde_json::Value> = exported_anon
         .iter()
-        .filter_map(|p| serde_json::from_slice::<serde_json::Value>(p).ok())
+        .filter_map(|p| {
+            let split = p.iter().position(|b| *b == b'\n')?;
+            serde_json::from_slice::<serde_json::Value>(&p[split + 1..]).ok()
+        })
         .flat_map(|payload| {
             payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
                 .as_array()
