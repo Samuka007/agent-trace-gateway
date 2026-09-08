@@ -1,8 +1,8 @@
 //! Descriptor-engine micro-benchmarks (std Instant, 3 rounds, median) —
 //! performance gate for the protocol-descriptor rewrite. Run:
 //! `cargo test --test sse_bench --release -- --nocapture`
+use agent_trace_gateway::trace::descriptor::ProtocolDescriptor;
 use agent_trace_gateway::trace::engine::stream_response;
-use agent_trace_gateway::trace::ProtocolDescriptor;
 use std::time::Instant;
 
 fn make_sse_body(n_frames: usize, text_per_frame: usize) -> Vec<u8> {
@@ -17,24 +17,28 @@ fn make_sse_body(n_frames: usize, text_per_frame: usize) -> Vec<u8> {
 }
 
 fn make_anthropic_tool_body(frames: usize, tools: usize) -> Vec<u8> {
+    // Prebuild argument fragments: {"k":"v<block>-<i>"} per delta frame.
     let mut body = String::new();
     let per_block = frames / tools.max(1);
-    let mut block = 0;
+    let mut block = 0usize;
     for i in 0..frames {
         if i % per_block == 0 && block < tools {
             block += 1;
-            body.push_str(&format!(
+            let start = format!(
                 "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":{block},\"content_block\":{{\"type\":\"tool_use\",\"id\":\"toolu_{block}\",\"name\":\"tool_{block}\"}}}}\n\n"
-            ));
+            );
+            body.push_str(&start);
         }
-        body.push_str(&format!(
-            "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{block},\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{{\\\\\"k\\\\\":\\\\\"v{block}-{i}\\\\\"}\"}}}}\n\n"
-        ));
+        let fragment = "{\"k\":\"v".to_string() + &format!("{block}-{i}") + "\"}";
+        let delta = format!(
+            "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":{block},\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{fragment}\"}}}}\n\n"
+        );
+        body.push_str(&delta);
     }
     body.into_bytes()
 }
 
-fn median_of3<F: FnMut() -> std::time::Duration>(mut f: F) -> std::time::Duration {
+fn median_of3<T: Ord + Copy>(mut f: impl FnMut() -> T) -> T {
     let mut v = [f(), f(), f()];
     v.sort();
     v[1]
