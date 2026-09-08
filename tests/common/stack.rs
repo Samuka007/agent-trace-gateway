@@ -10,10 +10,6 @@ pub fn gateway_port() -> u16 {
     fixture_port() - 1
 }
 
-// Backwards-compatible constants used by older tests.
-pub const FIXTURE_PORT: u16 = 17861;
-pub const GATEWAY_PORT: u16 = 17860;
-
 async fn wait_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
     for _ in 0..100 {
@@ -28,12 +24,8 @@ async fn wait_port(port: u16) {
 /// Start the fixture upstream as a tokio task and the pingora gateway in a
 /// background thread (both in-process: endpoint security kills freshly
 /// compiled listener child processes, so tests embed the servers).
-pub async fn start_stack() {
-    start_stack_inner(&[]).await;
-}
-
-/// Start the stack with extra gateway env vars (e.g. stitcher capacity/TTL).
-pub async fn start_stack_with_env(extra: &[(&str, String)]) {
+/// `extra` adds gateway env vars (e.g. stitcher capacity/TTL, OTLP endpoint).
+pub async fn start_stack(extra: &[(&str, String)]) {
     start_stack_inner(extra).await;
 }
 

@@ -49,7 +49,7 @@ async fn export_fail_open() {
     let collector_port = common::stack::fixture_port() + 200;
     failing_collector(collector_port).await;
 
-    common::stack::start_stack_with_env(&[(
+    common::stack::start_stack(&[(
         "ATG_OTLP_ENDPOINT",
         format!("http://127.0.0.1:{collector_port}/api/public/otel"),
     )])

@@ -61,7 +61,7 @@ async fn otlp_export() {
     let received = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     fake_collector(collector_port, received.clone()).await;
 
-    common::stack::start_stack_with_env(&[(
+    common::stack::start_stack(&[(
         "ATG_OTLP_ENDPOINT",
         format!("http://127.0.0.1:{collector_port}/api/public/otel"),
     )])

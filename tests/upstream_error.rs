@@ -12,8 +12,7 @@ use hyper_util::rt::TokioExecutor;
 
 #[tokio::test]
 async fn upstream_error_passthrough() {
-    let gw = common::stack::gateway_port();
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     // 404 from upstream must pass through with its body.

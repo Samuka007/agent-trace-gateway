@@ -10,8 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
 async fn ws_passthrough() {
-    let gw = common::stack::gateway_port();
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     let url = format!("ws://127.0.0.1:{gw}/ws");

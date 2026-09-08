@@ -24,7 +24,7 @@ async fn records(gw: u16) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn capture_size_caps() {
     // Tiny cap so truncation is observable without huge payloads.
-    common::stack::start_stack_with_env(&[("ATG_CAPTURE_MAX_BYTES", "1024".to_string())]).await;
+    common::stack::start_stack(&[("ATG_CAPTURE_MAX_BYTES", "1024".to_string())]).await;
     let gw = common::stack::gateway_port();
 
     // Oversized request body (~100KB user text).

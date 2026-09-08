@@ -18,8 +18,7 @@ fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<B
 
 #[tokio::test]
 async fn sse_reassembly() {
-    let gw = common::stack::gateway_port();
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     // Streaming Responses request: fixture emits two output_text deltas + completed.

@@ -45,7 +45,7 @@ async fn records() -> Vec<serde_json::Value> {
 
 #[tokio::test]
 async fn explicit_session_stitch() {
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     // Real claude-cli samples: three turns of session 01a01f21-eae3-7000-9857-78f64c4de4cc,

@@ -21,8 +21,7 @@ fn h2_client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Ful
 
 #[tokio::test]
 async fn transparent_forward() {
-    let gw = common::stack::gateway_port();
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     let body = serde_json::json!({

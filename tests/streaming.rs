@@ -14,8 +14,7 @@ use std::time::Instant;
 
 #[tokio::test]
 async fn streaming_passthrough() {
-    let gw = common::stack::gateway_port();
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     let req = Request::post(format!("http://127.0.0.1:{gw}/v1/sse"))

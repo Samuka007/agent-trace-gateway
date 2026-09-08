@@ -42,8 +42,7 @@ async fn records() -> Vec<serde_json::Value> {
 
 #[tokio::test]
 async fn prefix_stitch() {
-    start_stack().await;
-    let gw = common::stack::gateway_port();
+    start_stack(&[]).await;
 
     let fixture_dir = format!("{}/xtask/harness/fixtures/openai_chat", manifest_dir());
     // Real omp tool-loop samples: turn4 (5 messages) then turn5 (7 messages).

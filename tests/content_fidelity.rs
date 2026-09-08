@@ -29,7 +29,7 @@ async fn records(gw: u16) -> Vec<serde_json::Value> {
 
 #[tokio::test]
 async fn content_fidelity() {
-    start_stack().await;
+    start_stack(&[]).await;
     let gw = common::stack::gateway_port();
 
     // Real claude-cli sample carries a canary marker in the user text.
