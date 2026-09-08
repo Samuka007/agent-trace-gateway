@@ -217,12 +217,12 @@ fn kv_array(key: &str, values: &[&str]) -> serde_json::Value {
 
 /// Random 16 bytes from the OS entropy pool, hex-encoded (trace-id shape).
 fn random_trace_id() -> String {
-    hex::encode(&random_bytes(16))
+    hex::encode(random_bytes(16))
 }
 
 /// Random 8 bytes from the OS entropy pool, hex-encoded (span-id shape).
 fn random_span_id() -> String {
-    hex::encode(&random_bytes(8))
+    hex::encode(random_bytes(8))
 }
 
 fn random_bytes(n: usize) -> Vec<u8> {

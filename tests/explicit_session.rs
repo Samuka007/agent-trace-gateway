@@ -85,9 +85,14 @@ async fn explicit_session_stitch() {
     let recs = records().await;
 
     // claude-cli envelope sessions + header session must share one session id.
+    // (Scoped by session id: tests in this binary share one gateway's record
+    // store, so sibling tests' anthropic turns would otherwise be counted.)
     let claude_recs: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "anthropic.messages")
+        .filter(|r| {
+            r["protocol"] == "anthropic.messages"
+                && r["session_id"] == "01a01f21-eae3-7000-9857-78f64c4de4cc"
+        })
         .collect();
     assert_eq!(
         claude_recs.len(),
@@ -104,7 +109,10 @@ async fn explicit_session_stitch() {
     // codex client_metadata session.
     let codex_rec = recs
         .iter()
-        .find(|r| r["protocol"] == "openai.responses")
+        .find(|r| {
+            r["protocol"] == "openai.responses"
+                && r["session_id"] == "01a01f1f-bcff-7c80-94a1-9bbbc9fe9145"
+        })
         .unwrap_or_else(|| panic!("codex record missing: {recs:?}"));
     assert_eq!(
         codex_rec["session_id"], "01a01f1f-bcff-7c80-94a1-9bbbc9fe9145",
@@ -155,7 +163,12 @@ async fn grok_conv_id_session_extraction() {
     let recs = records().await;
     let response_recs: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "openai.responses")
+        // Scoped by the sessions this test created (sibling tests in this
+        // binary share one gateway's record store).
+        .filter(|r| {
+            let sid = r["session_id"].as_str().unwrap_or_default();
+            r["protocol"] == "openai.responses" && (sid == "grok-conv-42" || sid == "std-wins")
+        })
         .collect();
     assert_eq!(
         response_recs.len(),

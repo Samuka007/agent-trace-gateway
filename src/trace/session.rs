@@ -205,12 +205,12 @@ mod tests {
             // 63 hex digits.
             mk(format!(
                 "user_{}_account_abc_session_{UUID}",
-                "0123456789abcdef".repeat(4)[1..]
+                &"0123456789abcdef".repeat(4)[1..]
             )),
             // Non-hex inside the 64-digit run.
             mk(format!(
                 "user_g{}_account_abc_session_{UUID}",
-                "0123456789abcdef".repeat(4)[1..]
+                &"0123456789abcdef".repeat(4)[1..]
             )),
             // Missing session segment.
             mk(format!(
