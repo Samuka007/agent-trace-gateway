@@ -282,8 +282,9 @@ mod tests {
 
     #[test]
     fn chat_cached_tokens_resolves_nested_path() {
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
-            .unwrap();
+        let d =
+            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
+                .unwrap();
         let v = frame(
             r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":40}}}"#,
         );
@@ -296,8 +297,8 @@ mod tests {
 
     #[test]
     fn live_cached_tokens_resolves_nested_path() {
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.live")
-            .unwrap();
+        let d =
+            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.live").unwrap();
         let v = frame(
             r#"{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":8,"total_tokens":108,"input_token_details":{"cached_tokens":30}}}}"#,
         );
