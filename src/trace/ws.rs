@@ -121,9 +121,7 @@ impl WsTurnState {
         match v["type"].as_str() {
             // Real Realtime wire format (Bifrost realtime.go): the complete
             // tool item arrives on response.output_item.done.
-            Some("response.output_item.done")
-                if v["item"]["type"] == "function_call" =>
-            {
+            Some("response.output_item.done") if v["item"]["type"] == "function_call" => {
                 self.tool_calls.push(ToolCall {
                     name: v["item"]["name"].as_str().unwrap_or("").to_string(),
                     arguments: v["item"]["arguments"].as_str().unwrap_or("").to_string(),
@@ -140,10 +138,8 @@ impl WsTurnState {
             Some("response.done") => {
                 if !v["response"]["usage"].is_null() {
                     self.usage = Some(crate::trace::adaptor::usage_from_obj(
-                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name(
-                            "openai.live",
-                        )
-                        .expect("openai.live descriptor"),
+                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.live")
+                            .expect("openai.live descriptor"),
                         &v["response"]["usage"],
                     ));
                 }
