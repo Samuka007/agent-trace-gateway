@@ -190,7 +190,11 @@ impl ProtocolDescriptor {
     pub fn user_input(&self, req: &Value) -> Option<String> {
         match self.input_shape {
             InputShape::Messages => {
-                let item = req["messages"].as_array()?.iter().rev().find(|m| m["role"] == "user")?;
+                let item = req["messages"]
+                    .as_array()?
+                    .iter()
+                    .rev()
+                    .find(|m| m["role"] == "user")?;
                 content_text(&item["content"])
             }
             InputShape::Responses => (self.user_input?)(&req["input"]),
@@ -217,7 +221,10 @@ fn read_source(body: &Value, src: &BodySource) -> Option<String> {
             .filter(|s| !s.is_empty())?
             .to_string()
     } else {
-        v.as_str().map(str::trim).filter(|s| !s.is_empty())?.to_string()
+        v.as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string()
     };
     match src.transform {
         Some(f) => f(&raw),
@@ -238,7 +245,11 @@ pub fn resolve_path<'a>(v: &'a Value, path: &[&str]) -> &'a Value {
     for key in path {
         // "0"/"1"... index into arrays.
         cur = match cur {
-            Value::Array(arr) => key.parse::<usize>().ok().and_then(|i| arr.get(i)).unwrap_or(&Value::Null),
+            Value::Array(arr) => key
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| arr.get(i))
+                .unwrap_or(&Value::Null),
             _ => cur.get(key).unwrap_or(&Value::Null),
         };
     }
@@ -277,8 +288,16 @@ pub mod live {
         // WS session: client_metadata.session_id is a sub2api injection
         // convention (not OpenAI Realtime spec); kept lowest priority.
         body_sources: &[
-            BodySource { path: &["metadata", "session_id"], two_form: false, transform: None },
-            BodySource { path: &["client_metadata", "session_id"], two_form: false, transform: None },
+            BodySource {
+                path: &["metadata", "session_id"],
+                two_form: false,
+                transform: None,
+            },
+            BodySource {
+                path: &["client_metadata", "session_id"],
+                two_form: false,
+                transform: None,
+            },
         ],
         header_sources: &["session-id", "session_id", "x-grok-conv-id"],
         chain_sources: &[],
@@ -353,11 +372,19 @@ pub mod anthropic {
         // legacy composite (Claude Code convention, transform extracts uuid).
         body_sources: &[
             // Shared v0.2.0 top-level sources (modeltrace nine-source port).
-            BodySource { path: &["session_id"], two_form: false, transform: None },
+            BodySource {
+                path: &["session_id"],
+                two_form: false,
+                transform: None,
+            },
             // anthropic-specific: metadata.session_id (client convention),
             // then metadata.user_id — plain JSON envelope {session_id}, or
             // the Claude Code legacy composite (transform extracts uuid).
-            BodySource { path: &["metadata", "session_id"], two_form: false, transform: None },
+            BodySource {
+                path: &["metadata", "session_id"],
+                two_form: false,
+                transform: None,
+            },
             BodySource {
                 path: &["metadata", "user_id"],
                 two_form: false,
@@ -402,8 +429,14 @@ pub mod anthropic {
         ],
         tool_calls: ToolCallStrategy::DeltaAssembly,
         usage_frames: &[
-            UsageFrame { on_event: Some("message_start"), obj_path: &["message", "usage"] },
-            UsageFrame { on_event: Some("message_delta"), obj_path: &["usage"] },
+            UsageFrame {
+                on_event: Some("message_start"),
+                obj_path: &["message", "usage"],
+            },
+            UsageFrame {
+                on_event: Some("message_delta"),
+                obj_path: &["usage"],
+            },
         ],
         usage_shape: UsageShape {
             input: &["input_tokens"],
@@ -427,11 +460,27 @@ pub mod responses {
         user_input: Some(responses_user_input),
         final_output: Some(responses_final_output),
         body_sources: &[
-            BodySource { path: &["session_id"], two_form: false, transform: None },
+            BodySource {
+                path: &["session_id"],
+                two_form: false,
+                transform: None,
+            },
             // Strongest explicit root: conversation (string or {id}).
-            BodySource { path: &["conversation"], two_form: true, transform: None },
-            BodySource { path: &["metadata", "session_id"], two_form: false, transform: None },
-            BodySource { path: &["client_metadata", "session_id"], two_form: false, transform: None },
+            BodySource {
+                path: &["conversation"],
+                two_form: true,
+                transform: None,
+            },
+            BodySource {
+                path: &["metadata", "session_id"],
+                two_form: false,
+                transform: None,
+            },
+            BodySource {
+                path: &["client_metadata", "session_id"],
+                two_form: false,
+                transform: None,
+            },
             // prompt_cache_key: official cache-routing key, borrowed as a
             // stable affinity (namespaced `pck:`) when no stronger source.
             BodySource {
@@ -440,7 +489,12 @@ pub mod responses {
                 transform: Some(pck_namespace),
             },
         ],
-        header_sources: &["session-id", "session_id", "x-claude-code-session-id", "x-grok-conv-id"],
+        header_sources: &[
+            "session-id",
+            "session_id",
+            "x-claude-code-session-id",
+            "x-grok-conv-id",
+        ],
         chain_sources: &["previous_response_id"],
         user_sources: &["safety_identifier", "user"],
         sse_rules: &[
@@ -490,8 +544,16 @@ pub mod chat {
         user_input: None,
         final_output: None,
         body_sources: &[
-            BodySource { path: &["session_id"], two_form: false, transform: None },
-            BodySource { path: &["metadata", "session_id"], two_form: false, transform: None },
+            BodySource {
+                path: &["session_id"],
+                two_form: false,
+                transform: None,
+            },
+            BodySource {
+                path: &["metadata", "session_id"],
+                two_form: false,
+                transform: None,
+            },
             BodySource {
                 path: &["prompt_cache_key"],
                 two_form: false,
@@ -522,7 +584,10 @@ pub mod chat {
             },
         ],
         tool_calls: ToolCallStrategy::ChunkedToolCalls,
-        usage_frames: &[UsageFrame { on_event: None, obj_path: &["usage"] }],
+        usage_frames: &[UsageFrame {
+            on_event: None,
+            obj_path: &["usage"],
+        }],
         usage_shape: UsageShape {
             input: &["prompt_tokens"],
             output: &["completion_tokens"],
@@ -541,9 +606,10 @@ fn responses_user_input(input: &Value) -> Option<String> {
         return Some(s.to_string()).filter(|s| !s.is_empty());
     }
     let items = input.as_array()?;
-    let user_item = items.iter().rev().find(|i| {
-        i["type"].as_str().is_none_or(|t| t == "message") && i["role"] == "user"
-    })?;
+    let user_item = items
+        .iter()
+        .rev()
+        .find(|i| i["type"].as_str().is_none_or(|t| t == "message") && i["role"] == "user")?;
     if let Some(s) = user_item["content"].as_str() {
         return Some(s.to_string()).filter(|s| !s.is_empty());
     }
@@ -595,13 +661,26 @@ mod tests {
     /// Path detection for every real-world path variant, data-driven.
     #[test]
     fn path_prefixes_match_official_routes() {
-        assert_eq!(ProtocolDescriptor::detect("/v1/messages").unwrap().name, "anthropic.messages");
-        assert_eq!(ProtocolDescriptor::detect("/v1/responses").unwrap().name, "openai.responses");
         assert_eq!(
-            ProtocolDescriptor::detect("/compatible-mode/v1/responses").unwrap().name,
+            ProtocolDescriptor::detect("/v1/messages").unwrap().name,
+            "anthropic.messages"
+        );
+        assert_eq!(
+            ProtocolDescriptor::detect("/v1/responses").unwrap().name,
             "openai.responses"
         );
-        assert_eq!(ProtocolDescriptor::detect("/v1/chat/completions").unwrap().name, "openai.chat_completions");
+        assert_eq!(
+            ProtocolDescriptor::detect("/compatible-mode/v1/responses")
+                .unwrap()
+                .name,
+            "openai.responses"
+        );
+        assert_eq!(
+            ProtocolDescriptor::detect("/v1/chat/completions")
+                .unwrap()
+                .name,
+            "openai.chat_completions"
+        );
         assert_eq!(
             ProtocolDescriptor::detect("/compatible-mode/v1/chat/completions")
                 .unwrap()
@@ -663,7 +742,10 @@ mod tests {
         );
         assert_eq!(d.body_sources[3].path, &["metadata"]);
         assert_eq!(d.header_sources[0], "x-claude-code-session-id");
-        assert!(d.chain_sources.is_empty(), "anthropic has no chain primitive");
+        assert!(
+            d.chain_sources.is_empty(),
+            "anthropic has no chain primitive"
+        );
     }
 
     /// responses session layering: conversation > metadata.session_id >
@@ -673,11 +755,11 @@ mod tests {
         let d = &responses::DESCRIPTOR;
         assert_eq!(d.body_sources[1].path, &["conversation"]);
         assert_eq!(d.body_sources[0].path, &["session_id"]);
-        assert!(d.body_sources[1].two_form, "conversation accepts object-id form");
-        assert_eq!(
-            d.body_sources.last().unwrap().path,
-            &["prompt_cache_key"]
+        assert!(
+            d.body_sources[1].two_form,
+            "conversation accepts object-id form"
         );
+        assert_eq!(d.body_sources.last().unwrap().path, &["prompt_cache_key"]);
         assert_eq!(d.chain_sources, &["previous_response_id"]);
         assert_eq!(d.user_sources, &["safety_identifier", "user"]);
     }
@@ -693,13 +775,19 @@ mod tests {
             d.session_from_body(&value(r#"{"conversation":{"id":"conv_9"}}"#)),
             Some("conv_9".to_string())
         );
-        assert!(d.session_from_body(&value(r#"{"conversation":null}"#)).is_none());
+        assert!(d
+            .session_from_body(&value(r#"{"conversation":null}"#))
+            .is_none());
     }
 
     #[test]
     fn bare_items_count_as_messages() {
-        let body = value(r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#);
+        let body =
+            value(r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#);
         let d = &responses::DESCRIPTOR;
-        assert_eq!(d.user_input.unwrap()(&body["input"]), Some("hi".to_string()));
+        assert_eq!(
+            d.user_input.unwrap()(&body["input"]),
+            Some("hi".to_string())
+        );
     }
 }

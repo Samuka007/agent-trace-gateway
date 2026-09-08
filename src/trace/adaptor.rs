@@ -114,7 +114,10 @@ pub fn merge_usage(acc: &mut Option<TurnUsage>, next: TurnUsage) {
 }
 
 /// Build TurnUsage from an already-located usage object per protocol.
-pub fn usage_from_obj(d: &crate::trace::descriptor::ProtocolDescriptor, usage: &Value) -> TurnUsage {
+pub fn usage_from_obj(
+    d: &crate::trace::descriptor::ProtocolDescriptor,
+    usage: &Value,
+) -> TurnUsage {
     // Field spellings come from the descriptor's UsageShape (protocol
     // knowledge in the table — no or_else chains in code).
     let shape = &d.usage_shape;
@@ -181,7 +184,8 @@ mod tests {
         );
         let delta = frame(r#"{"type":"message_delta","usage":{"output_tokens":7}}"#);
         let mut acc: Option<TurnUsage> = None;
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("anthropic.messages")
+            .unwrap();
         if let Some(u) = usage_from_sse_frame(d, &start) {
             merge_usage(&mut acc, u);
         }
@@ -206,7 +210,8 @@ mod tests {
         let done = frame(
             r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":11,"output_tokens":22,"total_tokens":33}}}"#,
         );
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses")
+            .unwrap();
         let u = usage_from_sse_frame(d, &done).expect("usage");
         assert_eq!(u.input_tokens, Some(11));
         assert_eq!(u.output_tokens, Some(22));
@@ -219,17 +224,17 @@ mod tests {
         let chunk = frame(
             r#"{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}"#,
         );
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions").unwrap();
+        let d =
+            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
+                .unwrap();
         let u = usage_from_sse_frame(d, &chunk).expect("usage");
         assert_eq!(u.input_tokens, Some(8));
         assert_eq!(u.output_tokens, Some(2));
         assert_eq!(u.total_tokens, Some(10));
         // Frames without usage must not disturb the accumulator.
-        assert!(usage_from_sse_frame(
-            d,
-            &frame(r#"{"choices":[{"delta":{"content":"x"}}]}"#)
-        )
-        .is_none());
+        assert!(
+            usage_from_sse_frame(d, &frame(r#"{"choices":[{"delta":{"content":"x"}}]}"#)).is_none()
+        );
     }
 
     #[test]
@@ -237,21 +242,25 @@ mod tests {
         let anth = frame(
             r#"{"id":"m","usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}"#,
         );
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("anthropic.messages")
+            .unwrap();
         let u = usage_from_nonstreaming(d, &anth).unwrap();
         assert_eq!(u.input_tokens, Some(5));
         assert_eq!(u.cache_read_tokens, Some(3));
         let chat = frame(
             r#"{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}"#,
         );
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions").unwrap();
+        let d =
+            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
+                .unwrap();
         let u = usage_from_nonstreaming(d, &chat)
             .expect("chat nonstreaming usage should resolve from top-level usage object");
         assert_eq!(u.input_tokens, Some(8));
         assert_eq!(u.total_tokens, Some(10));
         // Missing usage object => None, never zeros.
         let bare = frame(r#"{"id":"m"}"#);
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses")
+            .unwrap();
         assert!(usage_from_nonstreaming(d, &bare).is_none());
     }
 
