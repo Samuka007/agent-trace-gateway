@@ -121,7 +121,7 @@ async fn flush_batch(
 ) {
     let payload = build_otlp_json(batch);
     let mut req = client
-        .post(endpoint)
+        .post(normalize_endpoint_path(endpoint))
         .header("content-type", "application/json");
     if let Some(auth) = auth_header {
         req = req.header("authorization", auth);
@@ -137,8 +137,47 @@ async fn flush_batch(
             health
                 .failed
                 .fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            // Fail-open still demands observability: surface why a batch died
+            // (connect refused, non-2xx status, body errors) without ever
+            // blocking or leaking the traced content.
+            match result {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    let body = body.chars().take(200).collect::<String>();
+                    eprintln!(
+                        "OTLP export failed: endpoint={} status={status} body={body:?}",
+                        display_endpoint(endpoint)
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "OTLP export failed: endpoint={} error={e}",
+                        display_endpoint(endpoint)
+                    );
+                }
+            }
         }
     }
+}
+
+/// Ensure the POST path targets the OTLP HTTP receiver's `/v1/traces`.
+/// The otelcol-contrib OTLP/HTTP receiver only accepts POSTs there; users
+/// configuring `http://host:4318` (host only) previously exported to `/` and
+/// every batch failed. Langfuse's self-hosted OTLP gateway path
+/// (`/api/public/otel/v1/traces`) is already complete and is kept verbatim.
+fn normalize_endpoint_path(endpoint: &str) -> String {
+    let trimmed = endpoint.trim_end_matches('/');
+    if trimmed.ends_with("/v1/traces") {
+        return endpoint.to_string();
+    }
+    format!("{trimmed}/v1/traces")
+}
+
+/// Endpoint for log lines with userinfo stripped (credentials never logged).
+fn display_endpoint(endpoint: &str) -> String {
+    let (clean, _) = split_basic_auth(endpoint);
+    clean
 }
 
 /// Minimal OTLP/HTTP JSON: one resourceSpans with a scopeSpans holding one
@@ -417,6 +456,29 @@ mod tests {
         let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
         assert_eq!(span["traceId"], trace_id_for("abc"));
         assert_eq!(span["spanId"], span_id_for("abc", "", ""));
+    }
+
+    /// The otelcol OTLP/HTTP receiver only accepts POSTs on /v1/traces; a
+    /// bare-host endpoint must get the path appended, complete paths must be
+    /// kept verbatim.
+    #[test]
+    fn normalize_endpoint_appends_traces_path() {
+        assert_eq!(
+            normalize_endpoint_path("http://otel-sink:4318"),
+            "http://otel-sink:4318/v1/traces"
+        );
+        assert_eq!(
+            normalize_endpoint_path("http://otel-sink:4318/"),
+            "http://otel-sink:4318/v1/traces"
+        );
+        assert_eq!(
+            normalize_endpoint_path("http://pk:sk@127.0.0.1:13000/api/public/otel/v1/traces"),
+            "http://pk:sk@127.0.0.1:13000/api/public/otel/v1/traces"
+        );
+        assert_eq!(
+            normalize_endpoint_path("http://host/api/public/otel"),
+            "http://host/api/public/otel/v1/traces"
+        );
     }
 
     #[test]
