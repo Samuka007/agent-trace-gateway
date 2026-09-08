@@ -4,7 +4,10 @@ use agent_trace_gateway::trace::unpack::detect_protocol;
 
 #[test]
 fn detects_all_real_path_variants() {
-    assert_eq!(detect_protocol("/v1/chat/completions"), Some("openai.chat_completions"));
+    assert_eq!(
+        detect_protocol("/v1/chat/completions"),
+        Some("openai.chat_completions")
+    );
     assert_eq!(
         detect_protocol("/compatible-mode/v1/chat/completions"),
         Some("openai.chat_completions")

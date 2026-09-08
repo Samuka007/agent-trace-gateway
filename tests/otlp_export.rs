@@ -272,5 +272,3 @@ async fn otlp_export() {
         assert_eq!(span["name"], "agent.turn");
     }
 }
-
-

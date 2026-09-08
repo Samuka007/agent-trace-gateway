@@ -141,16 +141,14 @@ async fn legacy_user_id_session_extraction() {
 async fn grok_conv_id_session_extraction() {
     start_stack(&[]).await;
     let body = r#"{"model":"m","input":"grok-turn"}"#;
+    post_raw("/v1/responses", body, &[("x-grok-conv-id", "grok-conv-42")]).await;
     post_raw(
         "/v1/responses",
         body,
-        &[("x-grok-conv-id", "grok-conv-42")],
-    )
-    .await;
-    post_raw(
-        "/v1/responses",
-        body,
-        &[("session-id", "std-wins"), ("x-grok-conv-id", "grok-conv-43")],
+        &[
+            ("session-id", "std-wins"),
+            ("x-grok-conv-id", "grok-conv-43"),
+        ],
     )
     .await;
 
@@ -165,7 +163,9 @@ async fn grok_conv_id_session_extraction() {
         "two responses turns expected: {recs:?}"
     );
     assert!(
-        response_recs.iter().any(|r| r["session_id"] == "grok-conv-42"),
+        response_recs
+            .iter()
+            .any(|r| r["session_id"] == "grok-conv-42"),
         "grok header must be extracted: {recs:?}"
     );
     assert!(

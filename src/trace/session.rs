@@ -77,9 +77,7 @@ fn extract_body_session(protocol: &str, request_body: &[u8]) -> Option<String> {
             }
             metadata_user_id_session(&v)
         }
-        "openai.responses" | "openai.live" => {
-            body_string(&v, &["client_metadata", "session_id"])
-        }
+        "openai.responses" | "openai.live" => body_string(&v, &["client_metadata", "session_id"]),
         _ => body_string(&v, &["metadata", "session_id"]),
     }
 }
@@ -203,13 +201,26 @@ mod tests {
         let mk = |core: String| format!(r#"{{"metadata":{{"user_id":"{core}"}}}}"#);
         let cases = [
             // 63 hex digits.
-            mk(format!("user_{}_account_abc_session_{UUID}", "0123456789abcdef".repeat(4)[1..])),
+            mk(format!(
+                "user_{}_account_abc_session_{UUID}",
+                "0123456789abcdef".repeat(4)[1..]
+            )),
             // Non-hex inside the 64-digit run.
-            mk(format!("user_g{}_account_abc_session_{UUID}", "0123456789abcdef".repeat(4)[1..])),
+            mk(format!(
+                "user_g{}_account_abc_session_{UUID}",
+                "0123456789abcdef".repeat(4)[1..]
+            )),
             // Missing session segment.
-            mk(format!("user_{}a_account_abc", "0123456789abcdef".repeat(4))),
+            mk(format!(
+                "user_{}a_account_abc",
+                "0123456789abcdef".repeat(4)
+            )),
             // Truncated uuid.
-            mk(format!("user_{}a_account_abc_session_{}", "0123456789abcdef".repeat(4), &UUID[..35])),
+            mk(format!(
+                "user_{}a_account_abc_session_{}",
+                "0123456789abcdef".repeat(4),
+                &UUID[..35]
+            )),
             // JSON envelope without session_id falls through to the matcher and fails.
             mk(r#"{"user_id":"someone"}"#.to_string()),
         ];
@@ -232,7 +243,10 @@ mod tests {
             extract_session_id("openai.responses", body, &get),
             Some(UUID.to_string())
         );
-        assert_eq!(extract_session_id("openai.live", body, &get), Some(UUID.to_string()));
+        assert_eq!(
+            extract_session_id("openai.live", body, &get),
+            Some(UUID.to_string())
+        );
         // Priority: standard header wins over grok.
         let both = hdr(&[("session-id", "std-1"), ("x-grok-conv-id", UUID)]);
         assert_eq!(
@@ -251,7 +265,10 @@ mod tests {
     fn grok_conv_id_ignored_on_other_protocols() {
         let body = br#"{"model":"m"}"#;
         let get = hdr(&[("x-grok-conv-id", UUID)]);
-        assert_eq!(extract_session_id("openai.chat_completions", body, &get), None);
+        assert_eq!(
+            extract_session_id("openai.chat_completions", body, &get),
+            None
+        );
         assert_eq!(extract_session_id("anthropic.messages", body, &get), None);
     }
 }
