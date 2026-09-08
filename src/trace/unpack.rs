@@ -72,15 +72,20 @@ pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
 /// Extract complete tool calls from a streaming response. Tool calls are read
 /// from `response.output_item.done` events, which carry the fully assembled
 /// function_call item (name + complete arguments), avoiding the need to
-/// reassemble argument deltas.
+/// reassemble argument deltas. The anthropic.messages protocol emits
+/// `content_block_start` (type=tool_use, carries the name) followed by
+/// `input_json_delta` partial-argument events; those are reassembled into the
+/// same ToolCall shape (canonical JSON: type/call_id/name/arguments, aligned
+/// with modeltrace conversation_delta.go's chat.tool_call item).
 pub fn extract_sse_tool_calls(
     protocol: &str,
     response_body: &[u8],
 ) -> Vec<crate::trace::store::ToolCall> {
     let mut out = Vec::new();
-    if protocol != "openai.responses" {
+    if protocol != "openai.responses" && protocol != "anthropic.messages" {
         return out;
     }
+    let mut pending: Option<(u64, crate::trace::store::ToolCall)> = None;
     let text = String::from_utf8_lossy(response_body);
     for frame in text.split("\n\n") {
         let mut data = String::new();
@@ -95,12 +100,47 @@ pub fn extract_sse_tool_calls(
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
             continue;
         };
-        if v["type"] == "response.output_item.done" && v["item"]["type"] == "function_call" {
+        if protocol == "openai.responses" {
+            if v["type"] == "response.output_item.done" && v["item"]["type"] == "function_call" {
             out.push(crate::trace::store::ToolCall {
                 name: v["item"]["name"].as_str().unwrap_or("").to_string(),
                 arguments: v["item"]["arguments"].as_str().unwrap_or("").to_string(),
             });
+            }
+            continue;
         }
+        // anthropic.messages: content_block_start opens a tool_use block
+        // (carries the tool name); input_json_delta events append argument
+        // fragments for the block's index; a new content_block_start or the
+        // end of the stream closes the pending call.
+                match v["type"].as_str() {
+            Some("content_block_start") if v["content_block"]["type"] == "tool_use" => {
+                if let Some((_, call)) = pending.take() {
+                    out.push(call);
+                }
+                pending = Some((
+                    v["index"].as_u64().unwrap_or(0),
+                    crate::trace::store::ToolCall {
+                        name: v["content_block"]["name"].as_str().unwrap_or("").to_string(),
+                            arguments: String::new(),
+                    },
+                ));
+            }
+            Some("input_json_delta") => {
+                let index = v["index"].as_u64().unwrap_or(0);
+                if let Some((pending_index, call)) = pending.as_mut() {
+                    if *pending_index == index {
+                        if let Some(d) = v["partial_json"].as_str() {
+                            call.arguments.push_str(d);
+    }
+                    }
+                }
+            }
+                    _ => {}
+        }
+    }
+    if let Some((_, call)) = pending.take() {
+        out.push(call);
     }
     out
 }

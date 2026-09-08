@@ -92,10 +92,10 @@ fn replay_calibration() {
     std::fs::create_dir_all(manifest_dir().join("target")).unwrap();
     std::fs::write(&out_path, &report).unwrap();
 
-    // Assertions on the calibration matrix (real samples, 9 total):
-    // claude_cli_request.json + codex_turn1.json + codex_real_toolturn.json
-    // carry explicit ids.
-    assert_eq!(explicit, 3, "three explicit-id samples expected: {report}");
+    // Assertions on the calibration matrix (real samples, 10 total):
+    // claude_cli_request.json + claude_cli_tooluse_request.json +
+    // codex_turn1.json + codex_real_toolturn.json carry explicit ids.
+    assert_eq!(explicit, 4, "four explicit-id samples expected: {report}");
     // The six omp bailian/tool samples are all id-less and have messages.
     assert_eq!(
         prefix_assigned, 6,

@@ -1,0 +1,29 @@
+{
+  "model": "claude-opus-5",
+  "max_tokens": 256,
+  "stream": true,
+  "metadata": {
+    "session_id": "01a01f21-eae3-7000-9857-78f64c4de4cc"
+  },
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get current weather for a city",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": ["city"]
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tokyo now what weather"
+    }
+  ]
+}
