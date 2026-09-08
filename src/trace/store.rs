@@ -28,6 +28,10 @@ pub struct TurnRecord {
     /// Token usage reported by the model protocol (None = not reported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    /// Protocol error marker (response.failed / event:error) when the turn
+    /// terminated abnormally; serde-skipped when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

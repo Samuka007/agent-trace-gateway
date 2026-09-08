@@ -114,30 +114,22 @@ pub fn merge_usage(acc: &mut Option<TurnUsage>, next: TurnUsage) {
 }
 
 /// Build TurnUsage from an already-located usage object per protocol.
+/// UsageShape fields are full nested paths (e.g. responses'
+/// input_tokens_details.cached_tokens), each alternative tried via
+/// resolve_path — never flattened to top-level key probes.
 pub fn usage_from_obj(
     d: &crate::trace::descriptor::ProtocolDescriptor,
     usage: &Value,
 ) -> TurnUsage {
-    // Field spellings come from the descriptor's UsageShape (protocol
-    // knowledge in the table — no or_else chains in code).
     let shape = &d.usage_shape;
+    let read = |alts: &[&[&str]]| -> Option<u64> {
+        alts.iter().find_map(|p| opt_u64(resolve_path(usage, p)))
+    };
     TurnUsage {
-        input_tokens: shape
-            .input
-            .iter()
-            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
-        output_tokens: shape
-            .output
-            .iter()
-            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
-        cache_read_tokens: shape
-            .cache_read
-            .iter()
-            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
-        cache_creation_tokens: shape
-            .cache_write
-            .iter()
-            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
+        input_tokens: read(shape.input),
+        output_tokens: read(shape.output),
+        cache_read_tokens: read(shape.cache_read),
+        cache_creation_tokens: read(shape.cache_write),
         total_tokens: opt_u64(&usage["total_tokens"]),
     }
 }
@@ -268,5 +260,51 @@ mod tests {
     fn empty_usage_is_not_exported() {
         let u = TurnUsage::default();
         assert!(u.is_empty());
+    }
+
+    /// R1 nails: openai cache tokens arrive on NESTED paths — each
+    /// protocol's details bucket must resolve via resolve_path, never as a
+    /// flattened top-level key probe (slop#3 regression pin).
+    #[test]
+    fn responses_cached_tokens_resolves_nested_path() {
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses")
+            .unwrap();
+        let v = frame(
+            r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":22,"total_tokens":122,"input_tokens_details":{"cached_tokens":64,"cache_write_tokens":2}}}}"#,
+        );
+        let u = usage_from_sse_frame(d, &v).expect("usage");
+        assert_eq!(u.input_tokens, Some(100));
+        assert_eq!(u.output_tokens, Some(22));
+        assert_eq!(u.total_tokens, Some(122));
+        assert_eq!(u.cache_read_tokens, Some(64), "nested details path");
+        assert_eq!(u.cache_creation_tokens, Some(2));
+    }
+
+    #[test]
+    fn chat_cached_tokens_resolves_nested_path() {
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
+            .unwrap();
+        let v = frame(
+            r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":40}}}"#,
+        );
+        let u = usage_from_sse_frame(d, &v).expect("usage");
+        assert_eq!(u.input_tokens, Some(100));
+        assert_eq!(u.output_tokens, Some(5));
+        assert_eq!(u.total_tokens, Some(105));
+        assert_eq!(u.cache_read_tokens, Some(40), "nested details path");
+    }
+
+    #[test]
+    fn live_cached_tokens_resolves_nested_path() {
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.live")
+            .unwrap();
+        let v = frame(
+            r#"{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":8,"total_tokens":108,"input_token_details":{"cached_tokens":30}}}}"#,
+        );
+        let u = usage_from_sse_frame(d, &v).expect("usage");
+        assert_eq!(u.input_tokens, Some(100));
+        assert_eq!(u.output_tokens, Some(8));
+        assert_eq!(u.total_tokens, Some(108));
+        assert_eq!(u.cache_read_tokens, Some(30), "nested live details path");
     }
 }

@@ -12,31 +12,24 @@ pub fn looks_like_sse(content_type: &str) -> bool {
     content_type.contains("text/event-stream")
 }
 
-/// Reassemble the final output text of a streaming response, harvesting
-/// usage in the same per-frame pass (single traversal). Delegates to the
-/// descriptor engine.
-pub fn reassemble_sse_output(
+/// Single-entry streaming reassembly: text output, token usage, tool calls
+/// and the parse error marker in ONE traversal of the response body (the lib
+/// SSE arm calls this once and fills all TurnRecord fields).
+pub fn reassemble_sse(
     protocol: &str,
     response_body: &[u8],
-) -> (String, Option<crate::trace::adaptor::TurnUsage>) {
+) -> (
+    String,
+    Option<crate::trace::adaptor::TurnUsage>,
+    Vec<crate::trace::store::ToolCall>,
+    Option<String>,
+    u32,
+) {
     let Some(d) = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol) else {
-        return (String::new(), None);
+        return (String::new(), None, Vec::new(), None, 0);
     };
-    let (text, usage, _tools) = crate::trace::engine::stream_response(d, response_body);
-    (text, usage)
-}
-
-/// Extract complete tool calls from a streaming response via the descriptor
-/// engine (strategy comes from the protocol table).
-pub fn extract_sse_tool_calls(
-    protocol: &str,
-    response_body: &[u8],
-) -> Vec<crate::trace::store::ToolCall> {
-    let Some(d) = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol) else {
-        return Vec::new();
-    };
-    let (_text, _usage, tools) = crate::trace::engine::stream_response(d, response_body);
-    tools
+    let out = crate::trace::engine::stream_response(d, response_body);
+    (out.text, out.usage, out.tools, out.error, out.frame_errors)
 }
 
 /// Extract user input + final output from one non-streaming request/response
