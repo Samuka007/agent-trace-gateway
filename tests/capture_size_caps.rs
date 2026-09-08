@@ -50,7 +50,7 @@ async fn capture_size_caps() {
     let recs = records(gw).await;
     let rec = recs
         .iter()
-        .find(|r| r["protocol"] == "openai_chat")
+        .find(|r| r["protocol"] == "openai.chat_completions")
         .unwrap_or_else(|| panic!("chat record missing: {recs:?}"));
 
     let raw = rec["raw_request"].as_str().expect("raw_request");

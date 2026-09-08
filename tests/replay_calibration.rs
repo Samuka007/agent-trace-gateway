@@ -15,9 +15,9 @@ fn read_samples() -> Vec<(String, String, Vec<u8>)> {
     let base = manifest_dir().join("xtask/harness/fixtures");
     let mut out = Vec::new();
     let dirs = [
-        ("openai_chat", "openai_chat"),
-        ("openai_responses", "openai_responses"),
-        ("anthropic_messages", "anthropic_messages"),
+        ("openai.chat_completions", "openai.chat_completions"),
+        ("openai.responses", "openai.responses"),
+        ("anthropic.messages", "anthropic.messages"),
     ];
     for (protocol, dir) in dirs {
         let d = base.join(dir);

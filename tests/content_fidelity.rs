@@ -35,7 +35,7 @@ async fn content_fidelity() {
     // Real claude-cli sample carries a canary marker in the user text.
     let fixture_dir = format!("{}/xtask/harness/fixtures", manifest_dir());
     let body = std::fs::read_to_string(format!(
-        "{fixture_dir}/anthropic_messages/claude_cli_request.json"
+        "{fixture_dir}/anthropic.messages/claude_cli_request.json"
     ))
     .unwrap();
     let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages"))
@@ -50,7 +50,7 @@ async fn content_fidelity() {
     let recs = records(gw).await;
     let rec = recs
         .iter()
-        .find(|r| r["protocol"] == "anthropic_messages")
+        .find(|r| r["protocol"] == "anthropic.messages")
         .unwrap_or_else(|| panic!("anthropic record missing: {recs:?}"));
 
     // 1. Verbatim: the record must embed the full original request body text,

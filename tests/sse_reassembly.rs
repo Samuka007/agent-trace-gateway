@@ -50,8 +50,8 @@ async fn sse_reassembly() {
     let arr = recs.as_array().expect("records array");
     let rec = arr
         .iter()
-        .find(|r| r["protocol"] == "openai_responses")
-        .unwrap_or_else(|| panic!("no openai_responses record in {arr:?}"));
+        .find(|r| r["protocol"] == "openai.responses")
+        .unwrap_or_else(|| panic!("no openai.responses record in {arr:?}"));
 
     assert_eq!(
         rec["user_input"], "sse-user-text",

@@ -71,7 +71,7 @@ async fn unpack_nonstreaming() {
             .clone()
     };
 
-    let chat = find("openai_chat");
+    let chat = find("openai.chat_completions");
     assert_eq!(
         chat["user_input"], "chat-user-text",
         "chat user input: {chat}"
@@ -81,7 +81,7 @@ async fn unpack_nonstreaming() {
         "chat output must be extracted: {chat}"
     );
 
-    let anth = find("anthropic_messages");
+    let anth = find("anthropic.messages");
     assert_eq!(
         anth["user_input"], "anthropic-user-text",
         "anthropic user input: {anth}"
@@ -91,7 +91,7 @@ async fn unpack_nonstreaming() {
         "anthropic output must be extracted: {anth}"
     );
 
-    let resp = find("openai_responses");
+    let resp = find("openai.responses");
     assert_eq!(
         resp["user_input"], "responses-user-text",
         "responses user input: {resp}"
