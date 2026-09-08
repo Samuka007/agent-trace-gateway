@@ -130,6 +130,13 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 - 不做轨迹存储/查询 UI（消费端仍是 Langfuse）；
 - 不承担下游数据清洗（原样内容的脱敏与治理由数据 Owner 在 Langfuse 侧负责）。
 
+## 版本与发布
+
+- 遵循[语义化版本](https://semver.org/lang/zh-CN/)（`X.Y.Z`）；变更明细见 [CHANGELOG.md](CHANGELOG.md)（Keep a Changelog 格式）。
+- **tag 即 release**：push `vX.Y.Z` annotated tag 触发 CI，构建镜像并自动创建 GitHub Release（附镜像 digest）。历史锚点：`v0.1.0` = `df0d32a`。
+- 镜像 tag 对应关系：`X.Y.Z` 与 `X.Y` 由 release tag 生成并固定；`:latest` 与 `:<sha>` 随 main 每次构建覆盖。
+- **部署必须 pin digest**（Release 页可查），勿用 `:latest`/`:sha`——两者会被后续 CI 覆盖。
+
 ## 测试与回归
 
 - `tests/`：行为测试（TDD 主战场）——协议解包、SSE/WS 重组、会话串联、内容保真、体积上限、fail-open、OTLP 导出；
