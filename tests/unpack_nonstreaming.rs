@@ -40,7 +40,6 @@ async fn records() -> serde_json::Value {
 #[tokio::test]
 async fn unpack_nonstreaming() {
     start_stack(&[]).await;
-    let gw = common::stack::gateway_port();
 
     // openai chat completions
     post(
