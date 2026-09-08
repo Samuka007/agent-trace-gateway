@@ -130,7 +130,9 @@ pub mod gateway_app {
             }
             if session.req_header().uri.path() == "/__atg/health" {
                 let (exported, failed, dropped) = self.exporter.health.snapshot();
-                let failed_frames = self.failed_frames.load(std::sync::atomic::Ordering::Relaxed);
+                let failed_frames = self
+                    .failed_frames
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let body = serde_json::json!({
                     "exported": exported,
                     "failed": failed,
