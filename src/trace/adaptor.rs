@@ -220,8 +220,8 @@ mod tests {
         assert_eq!(u.total_tokens, None);
         assert_eq!(
             usage_details_json(&u),
-        // Official snake_case cache bucket keys.
-        r#"{"cache_creation_input_tokens":4,"cache_read_input_tokens":3,"input":12,"output":7}"#
+            // Official snake_case cache bucket keys.
+            r#"{"cache_creation_input_tokens":4,"cache_read_input_tokens":3,"input":12,"output":7}"#
         );
     }
 
