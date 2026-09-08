@@ -85,15 +85,16 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 .unwrap_or("");
             let stream = v.get("stream").and_then(|x| x.as_bool()).unwrap_or(false);
             if stream {
-                // Real anthropic tool_use stream: content_block_start opens the
-                // block, input_json_delta feeds argument fragments,
-                // content_block_stop closes it.
+                // Real anthropic tool_use stream: content_block_start opens
+                // the block, outer content_block_delta events carry
+                // delta.type=input_json_delta fragments, content_block_stop
+                // closes it.
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(8);
                 tokio::spawn(async move {
                     let events = [
                         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\"}}\n\n",
-                        "event: input_json_delta\ndata: {\"type\":\"input_json_delta\",\"index\":0,\"partial_json\":\"{\\\"city\\\":\\\"\"}\n\n",
-                        "event: input_json_delta\ndata: {\"type\":\"input_json_delta\",\"index\":0,\"partial_json\":\"Tokyo\\\"}\"}\n\n",
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"\"}}\n\n",
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Tokyo\\\"}\"}}\n\n",
                         "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
                         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
                         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",

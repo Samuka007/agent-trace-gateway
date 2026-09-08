@@ -110,9 +110,11 @@ pub fn extract_sse_tool_calls(
             continue;
         }
         // anthropic.messages: content_block_start opens a tool_use block
-        // (carries the tool name); input_json_delta events append argument
-        // fragments for the block's index; a new content_block_start or the
-        // end of the stream closes the pending call.
+        // (carries the tool name); argument fragments arrive on the OUTER
+        // content_block_delta event as delta.type=input_json_delta with the
+        // bytes in delta.partial_json (Anthropic wire format — the inner
+        // delta type is never the event type); a new content_block_start or
+        // the end of the stream closes the pending call.
         match v["type"].as_str() {
             Some("content_block_start") if v["content_block"]["type"] == "tool_use" => {
                 if let Some((_, call)) = pending.take() {
@@ -129,11 +131,11 @@ pub fn extract_sse_tool_calls(
                     },
                 ));
             }
-            Some("input_json_delta") => {
+            Some("content_block_delta") if v["delta"]["type"] == "input_json_delta" => {
                 let index = v["index"].as_u64().unwrap_or(0);
                 if let Some((pending_index, call)) = pending.as_mut() {
                     if *pending_index == index {
-                        if let Some(d) = v["partial_json"].as_str() {
+                        if let Some(d) = v["delta"]["partial_json"].as_str() {
                             call.arguments.push_str(d);
                         }
                     }
