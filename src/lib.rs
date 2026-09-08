@@ -20,6 +20,9 @@ pub mod gateway_app {
         pub stitcher: crate::trace::prefix::PrefixStitcher,
         pub cap: crate::trace::capture::CaptureCap,
         pub exporter: crate::trace::export::Exporter,
+        /// Frames that failed JSON parse during SSE unpack (observability;
+        /// fail-open — never blocks).
+        pub failed_frames: std::sync::atomic::AtomicU64,
     }
 
     impl Gateway {
@@ -127,10 +130,12 @@ pub mod gateway_app {
             }
             if session.req_header().uri.path() == "/__atg/health" {
                 let (exported, failed, dropped) = self.exporter.health.snapshot();
+                let failed_frames = self.failed_frames.load(std::sync::atomic::Ordering::Relaxed);
                 let body = serde_json::json!({
                     "exported": exported,
                     "failed": failed,
-                    "dropped": dropped
+                    "dropped": dropped,
+                    "failed_frames": failed_frames
                 })
                 .to_string();
                 let mut resp = ResponseHeader::build(200, None)?;
@@ -316,6 +321,7 @@ pub mod gateway_app {
         server.bootstrap();
         let gateway = Gateway {
             upstream: upstream.to_string(),
+            failed_frames: std::sync::atomic::AtomicU64::new(0),
             store: TraceStore::new(),
             stitcher: crate::trace::prefix::PrefixStitcher::new(),
             cap: crate::trace::capture::CaptureCap::new(),

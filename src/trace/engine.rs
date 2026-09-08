@@ -7,25 +7,20 @@ use crate::trace::descriptor::{
 };
 use crate::trace::store::ToolCall;
 
-/// Split an SSE body into `data:` payload strings per the SSE spec: frames
-/// separated by blank lines (tolerating CRLF line endings), multiple data
-/// lines within a frame joined with LF.
-/// Zero-copy on the UTF-8-valid fast path: frames and single data lines
-/// borrow from the body; allocation happens only for multi-data-line frames
-/// (joined with LF) or lossy replacement of invalid bytes.
+/// Split an SSE body into `data:` payloads per the SSE spec. Line-driven
+/// frame separation works identically for LF-LF and CRLF-CRLF delimiters
+/// (each line sheds its trailing CR). Zero-copy on the UTF-8-valid fast
+/// path: frames and single data lines borrow from the body; allocation only
+/// for multi-data-line frames or lossy replacement of invalid bytes.
 pub fn sse_data_frames(body: &[u8]) -> Vec<std::borrow::Cow<'_, str>> {
-    // Zero-copy when the body is valid UTF-8 (the 99.9% path); the lossy
-    // replacement only allocates on invalid bytes. Callers parse with
-    // serde_json::from_str on Cow::as_ref.
-    match std::str::from_utf8(body) {
-        Ok(text) => collect_frames(text),
-        Err(_) => collect_frames_owned(String::from_utf8_lossy(body).into_owned()),
+    // Fast path: valid UTF-8 borrows from the body — the lifetime of
+    // from_utf8's &str is the body's, so frames borrow the caller's buffer.
+    if let Ok(text) = std::str::from_utf8(body) {
+        return collect_frames(text);
     }
-}
-
-/// Owned-variant wrapper: frames borrow the caller-owned text.
-fn collect_frames_owned(text: String) -> Vec<std::borrow::Cow<'static, str>> {
-    collect_frames(&text)
+    // Lossy fallback: frames own their strings (allocation only here).
+    let owned = String::from_utf8_lossy(body).into_owned();
+    collect_frames(&owned)
         .into_iter()
         .map(std::borrow::Cow::into_owned)
         .map(std::borrow::Cow::Owned)
@@ -36,30 +31,34 @@ fn collect_frames_owned(text: String) -> Vec<std::borrow::Cow<'static, str>> {
 /// frame has multiple data lines).
 fn collect_frames<'a>(text: &'a str) -> Vec<std::borrow::Cow<'a, str>> {
     let mut out = Vec::new();
-    for frame in text.split("\n\n") {
-        let mut data: Option<std::borrow::Cow<'a, str>> = None;
-        for line in frame.split('\n') {
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            let Some(rest) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let rest = rest.strip_prefix(' ').unwrap_or(rest);
-            match &mut data {
-                Some(d) => {
-                    d.to_mut().push('\n');
-                    d.to_mut().push_str(rest);
-                }
-                None => data = Some(std::borrow::Cow::Borrowed(rest)),
+    let mut data: Option<std::borrow::Cow<'a, str>> = None;
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            // Blank line = frame boundary; flush any pending multi-line join.
+            if let Some(d) = data.take() {
+                out.push(d);
             }
+            continue;
         }
-        if let Some(d) = data {
-            out.push(d);
+        let Some(rest) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let rest = rest.strip_prefix(' ').unwrap_or(rest);
+        match &mut data {
+            Some(d) => {
+                d.to_mut().push('\n');
+                d.to_mut().push_str(rest);
+            }
+            None => data = Some(std::borrow::Cow::Borrowed(rest)),
         }
+    }
+    // Trailing frame without a blank-line terminator.
+    if let Some(d) = data.take() {
+        out.push(d);
     }
     out
 }
-
-
 
 /// Streaming accumulator state driven by the descriptor's sse_rules.
 #[derive(Default)]
