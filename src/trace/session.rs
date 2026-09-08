@@ -253,7 +253,10 @@ mod tests {
             extract_session_id("openai.responses", body, &both),
             Some("std-1".to_string())
         );
-        let claude_first = hdr(&[("x-claude-code-session-id", "cc-1"), ("x-grok-conv-id", UUID)]);
+        let claude_first = hdr(&[
+            ("x-claude-code-session-id", "cc-1"),
+            ("x-grok-conv-id", UUID),
+        ]);
         assert_eq!(
             extract_session_id("openai.responses", body, &claude_first),
             Some("cc-1".to_string())
