@@ -35,7 +35,7 @@ fn split_at_hex(s: &str, n: usize) -> Option<(&str, &str)> {
 fn split_at_class(s: &str, n: usize, allow_dash: bool) -> Option<(&str, &str)> {
     let end = s
         .char_indices()
-        .find(|(i, c)| i >= n || !(c.is_ascii_hexdigit() || (allow_dash && *c == '-')))
+        .find(|(i, c)| *i >= n || !(c.is_ascii_hexdigit() || (allow_dash && *c == '-')))
         .map(|(i, _)| i)
         .unwrap_or(s.len());
     if end != n {
@@ -161,7 +161,7 @@ fn body_string(v: &Value, path: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn hdr(map: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + '_ {
+    fn hdr<'a>(map: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name: &str| {
             map.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
@@ -177,6 +177,7 @@ mod tests {
         let body = format!(
             r#"{{"metadata":{{"user_id":"user_{}{}_account_abc_session_{}"}}}}"#,
             "0123456789abcdef".repeat(4),
+            "",
             UUID
         );
         assert_eq!(
@@ -187,6 +188,7 @@ mod tests {
         let envelope = format!(
             r#"{{"metadata":"{{\"user_id\":\"user_{}{}_account__session_{}\"}}"}}"#,
             "0123456789abcdef".repeat(4),
+            "",
             UUID
         );
         assert_eq!(
