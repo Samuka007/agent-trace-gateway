@@ -164,6 +164,7 @@ impl WsTurnState {
             start_ns: 0,
             end_ns: 0,
             usage: self.usage.take(),
+            error: None,
         }
     }
 }

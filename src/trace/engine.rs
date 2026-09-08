@@ -10,34 +10,79 @@ use crate::trace::store::ToolCall;
 /// Split an SSE body into `data:` payload strings per the SSE spec: frames
 /// separated by blank lines (tolerating CRLF line endings), multiple data
 /// lines within a frame joined with LF.
-pub fn sse_data_frames(body: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(body).replace("\r\n", "\n");
+/// Zero-copy on the UTF-8-valid fast path: frames and single data lines
+/// borrow from the body; allocation happens only for multi-data-line frames
+/// (joined with LF) or lossy replacement of invalid bytes.
+pub fn sse_data_frames(body: &[u8]) -> Vec<std::borrow::Cow<'_, str>> {
+    // Zero-copy when the body is valid UTF-8 (the 99.9% path); the lossy
+    // replacement only allocates on invalid bytes. Callers parse with
+    // serde_json::from_str on Cow::as_ref.
+    match std::str::from_utf8(body) {
+        Ok(text) => collect_frames(text),
+        Err(_) => collect_frames_owned(String::from_utf8_lossy(body).into_owned()),
+    }
+}
+
+/// Owned-variant wrapper: frames borrow the caller-owned text.
+fn collect_frames_owned(text: String) -> Vec<std::borrow::Cow<'static, str>> {
+    collect_frames(&text)
+        .into_iter()
+        .map(std::borrow::Cow::into_owned)
+        .map(std::borrow::Cow::Owned)
+        .collect()
+}
+
+/// Frame splitter over a &str body (borrowed frames; allocation only when a
+/// frame has multiple data lines).
+fn collect_frames<'a>(text: &'a str) -> Vec<std::borrow::Cow<'a, str>> {
     let mut out = Vec::new();
     for frame in text.split("\n\n") {
-        let mut data = String::new();
-        for line in frame.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
+        let mut data: Option<std::borrow::Cow<'a, str>> = None;
+        for line in frame.split('\n') {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let Some(rest) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            match &mut data {
+                Some(d) => {
+                    d.to_mut().push('\n');
+                    d.to_mut().push_str(rest);
                 }
-                data.push_str(rest.trim_start_matches(' '));
+                None => data = Some(std::borrow::Cow::Borrowed(rest)),
             }
         }
-        if !data.is_empty() {
-            out.push(data);
+        if let Some(d) = data {
+            out.push(d);
         }
     }
     out
 }
+
+
 
 /// Streaming accumulator state driven by the descriptor's sse_rules.
 #[derive(Default)]
 pub struct SseAccum {
     pub text: String,
     pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    /// Data frames that failed to parse as JSON (observability counter).
+    pub frame_errors: u32,
+    /// Terminal-frame error marker (response.failed / response.incomplete /
+    /// anthropic event:error) — protocol error text when present.
+    pub error: Option<String>,
     tools: Vec<ToolCall>,
     pending: Option<(u64, ToolCall)>,
     chat_tools: Vec<(u64, ToolCall)>,
+}
+
+/// Full result of one streaming pass.
+pub struct SseOutcome {
+    pub text: String,
+    pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    pub tools: Vec<ToolCall>,
+    pub frame_errors: u32,
+    pub error: Option<String>,
 }
 
 impl SseAccum {
@@ -202,26 +247,63 @@ pub fn apply_sse_rule(
 
 /// Stream a captured SSE response through the descriptor: text output, token
 /// usage and tool calls in a single per-frame pass.
-pub fn stream_response(
-    d: &ProtocolDescriptor,
-    body: &[u8],
-) -> (
-    String,
-    Option<crate::trace::adaptor::TurnUsage>,
-    Vec<ToolCall>,
-) {
+pub fn stream_response(d: &ProtocolDescriptor, body: &[u8]) -> SseOutcome {
     let mut acc = SseAccum::default();
     for data in sse_data_frames(body) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data.as_ref()) else {
+            acc.frame_errors += 1;
             continue;
         };
+        // slop#6: terminal error frames mark the turn errored instead of
+        // recording a silently-successful half turn.
+        if let Some(err_text) = error_marker(d.name, &v) {
+            acc.error = Some(err_text);
+        }
         let event = v["type"].as_str();
         apply_sse_rule(&mut acc, d, event, &v);
     }
     let text = std::mem::take(&mut acc.text);
     let usage = acc.usage.take();
-    let tools = acc.finish(d.tool_calls);
-    (text, usage, tools)
+    let error = acc.error.take();
+    let frame_errors = acc.frame_errors;
+    let mut tools = std::mem::take(&mut acc.tools);
+    if let Some((_, call)) = acc.pending.take() {
+        tools.push(call);
+    }
+    if d.tool_calls == ToolCallStrategy::ChunkedToolCalls {
+        acc.chat_tools.sort_by_key(|(i, _)| *i);
+        tools.extend(acc.chat_tools.into_iter().map(|(_, c)| c));
+    }
+    SseOutcome {
+        text,
+        usage,
+        tools,
+        frame_errors,
+        error,
+    }
+}
+
+/// Detect protocol error markers on terminal/exception frames: returns the
+/// protocol error text when the frame signals failure.
+fn error_marker(protocol: &str, v: &serde_json::Value) -> Option<String> {
+    match protocol {
+        "openai.responses" | "openai.live" => {
+            if matches!(
+                v["type"].as_str(),
+                Some("response.failed") | Some("response.incomplete")
+            ) {
+                return Some(v["response"]["error"].to_string());
+            }
+            None
+        }
+        "anthropic.messages" => {
+            if v["type"].as_str() == Some("error") {
+                return Some(v["error"].to_string());
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Non-streaming: user_input/final_output/usage in one pass over the

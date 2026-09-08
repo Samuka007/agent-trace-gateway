@@ -53,8 +53,8 @@ fn bench_sse_reassembly_256k() {
     let body = make_sse_body(256, 1024); // ~272KB
     let run = || {
         let start = Instant::now();
-        let (text, _usage, _tools) = stream_response(d, &body);
-        (start.elapsed(), text.len())
+        let out = stream_response(d, &body);
+        (start.elapsed(), out.text.len())
     };
     let (elapsed, text_len) = median_of3(run);
     println!("SSE 264KB reassembly: {elapsed:?} (text {text_len} bytes)");
@@ -74,8 +74,8 @@ fn bench_anthropic_tool_stream() {
     let body = make_anthropic_tool_body(3000, 50);
     let run = || {
         let start = Instant::now();
-        let (_text, _usage, tools) = stream_response(d, &body);
-        (start.elapsed(), tools.len())
+        let out = stream_response(d, &body);
+        (start.elapsed(), out.tools.len())
     };
     let (elapsed, tools) = median_of3(run);
     println!("anthropic 3000-frame/50-tool stream: {elapsed:?} ({tools} tools)");

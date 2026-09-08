@@ -85,12 +85,15 @@ pub struct UsageFrame {
 
 /// Field spellings for one protocol's usage object (protocol knowledge lives
 /// here, never in code or_else chains).
+/// Field spellings as ALTERNATIVE full paths (segments for resolve_path);
+/// e.g. openai cache_read is the nested ["input_tokens_details",
+/// "cached_tokens"].
 #[derive(Clone, Copy)]
 pub struct UsageShape {
-    pub input: &'static [&'static str],
-    pub output: &'static [&'static str],
-    pub cache_read: &'static [&'static str],
-    pub cache_write: &'static [&'static str],
+    pub input: &'static [&'static [&'static str]],
+    pub output: &'static [&'static [&'static str]],
+    pub cache_read: &'static [&'static [&'static str]],
+    pub cache_write: &'static [&'static [&'static str]],
 }
 
 /// Whether the protocol's input token count already includes cache reads.
@@ -328,10 +331,10 @@ pub mod live {
             obj_path: &["response", "usage"],
         }],
         usage_shape: UsageShape {
-            input: &["input_tokens"],
-            output: &["output_tokens"],
-            cache_read: &["input_token_details", "cached_tokens"],
-            cache_write: &["input_token_details", "cache_write_tokens"],
+            input: &[&["input_tokens"]],
+            output: &[&["output_tokens"]],
+            cache_read: &[&["input_token_details", "cached_tokens"]],
+            cache_write: &[&["input_token_details", "cache_write_tokens"]],
         },
         usage_inclusion: TokenInclusion::Inclusive,
         final_output_path: &["output"],
@@ -439,10 +442,10 @@ pub mod anthropic {
             },
         ],
         usage_shape: UsageShape {
-            input: &["input_tokens"],
-            output: &["output_tokens"],
-            cache_read: &["cache_read_input_tokens"],
-            cache_write: &["cache_creation_input_tokens"],
+            input: &[&["input_tokens"]],
+            output: &[&["output_tokens"]],
+            cache_read: &[&["cache_read_input_tokens"]],
+            cache_write: &[&["cache_creation_input_tokens"]],
         },
         usage_inclusion: TokenInclusion::Exclusive,
         final_output_path: &["content"],
@@ -523,10 +526,10 @@ pub mod responses {
             obj_path: &["response", "usage"],
         }],
         usage_shape: UsageShape {
-            input: &["input_tokens"],
-            output: &["output_tokens"],
-            cache_read: &["input_tokens_details", "cached_tokens"],
-            cache_write: &["input_tokens_details", "cache_write_tokens"],
+            input: &[&["input_tokens"]],
+            output: &[&["output_tokens"]],
+            cache_read: &[&["input_tokens_details", "cached_tokens"]],
+            cache_write: &[&["input_tokens_details", "cache_write_tokens"]],
         },
         usage_inclusion: TokenInclusion::Inclusive,
         final_output_path: &["output"],
@@ -589,10 +592,10 @@ pub mod chat {
             obj_path: &["usage"],
         }],
         usage_shape: UsageShape {
-            input: &["prompt_tokens"],
-            output: &["completion_tokens"],
-            cache_read: &["prompt_tokens_details", "cached_tokens"],
-            cache_write: &["prompt_tokens_details", "cache_write_tokens"],
+            input: &[&["prompt_tokens"]],
+            output: &[&["completion_tokens"]],
+            cache_read: &[&["prompt_tokens_details", "cached_tokens"]],
+            cache_write: &[&["prompt_tokens_details", "cache_write_tokens"]],
         },
         usage_inclusion: TokenInclusion::Inclusive,
         final_output_path: &["choices", "0", "message", "content"],
