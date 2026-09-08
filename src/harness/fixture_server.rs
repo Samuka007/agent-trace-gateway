@@ -260,8 +260,9 @@ async fn run_ws_turn(ws: tokio_tungstenite::WebSocketStream<TokioIo<hyper::upgra
         return;
     };
     eprintln!("FIXTURE: ws got create: {create}");
+    // Real Realtime wire format: complete tool item on output_item.done.
     sink.send(Message::Text(
-        "{\"type\":\"response.tool_call\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/x\\\"}\"}".into(),
+        "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/x\\\"}\"}}".into(),
     ))
     .await
     .unwrap();
@@ -272,12 +273,12 @@ async fn run_ws_turn(ws: tokio_tungstenite::WebSocketStream<TokioIo<hyper::upgra
     };
     eprintln!("FIXTURE: ws got tool result: {result}");
     sink.send(Message::Text(
-        "{\"type\":\"response.output_text.delta\",\"delta\":\"file-content\"}".into(),
+        "{\"type\":\"response.audio_transcript.delta\",\"delta\":\"file-content\"}".into(),
     ))
     .await
     .unwrap();
     sink.send(Message::Text(
-        "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"session_id\":\"sess-ws-1\"}}".into(),
+        "{\"type\":\"response.done\",\"response\":{\"status\":\"completed\",\"session_id\":\"sess-ws-1\",\"usage\":{\"input_tokens\":9,\"output_tokens\":3,\"total_tokens\":12,\"input_token_details\":{\"cached_tokens\":5}}}}".into(),
     ))
     .await
     .unwrap();

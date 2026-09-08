@@ -73,6 +73,7 @@ impl WsFrameParser {
 pub struct WsTurnState {
     pub input: Option<String>,
     pub session_id: String,
+    pub usage: Option<crate::trace::adaptor::TurnUsage>,
     pub output: String,
     pub tool_calls: Vec<ToolCall>,
     /// Verbatim client frame payload of the turn (response.create).
@@ -97,6 +98,8 @@ impl WsTurnState {
             self.input = Some(text.clone());
             self.raw_request = text;
             self.raw_response.clear();
+            // sub2api injection convention (not OpenAI Realtime spec):
+            // client_metadata.session_id rides on response.create.
             self.session_id = v["client_metadata"]["session_id"]
                 .as_str()
                 .unwrap_or("")
@@ -116,18 +119,36 @@ impl WsTurnState {
             return None;
         };
         match v["type"].as_str() {
-            Some("response.tool_call") => {
+            // Real Realtime wire format (Bifrost realtime.go): the complete
+            // tool item arrives on response.output_item.done.
+            Some("response.output_item.done")
+                if v["item"]["type"] == "function_call" =>
+            {
                 self.tool_calls.push(ToolCall {
-                    name: v["name"].as_str().unwrap_or("").to_string(),
-                    arguments: v["arguments"].as_str().unwrap_or("").to_string(),
+                    name: v["item"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: v["item"]["arguments"].as_str().unwrap_or("").to_string(),
                 });
             }
-            Some("response.output_text.delta") => {
+            // Voice turns surface text via audio_transcript deltas.
+            Some("response.audio_transcript.delta") => {
                 if let Some(d) = v["delta"].as_str() {
                     self.output.push_str(d);
                 }
             }
-            Some("response.completed") => return Some(self.take_record()),
+            // response.done is the terminal event; usage lives at
+            // response.usage (input_token_details.cached_tokens nested).
+            Some("response.done") => {
+                if !v["response"]["usage"].is_null() {
+                    self.usage = Some(crate::trace::adaptor::usage_from_obj(
+                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name(
+                            "openai.live",
+                        )
+                        .expect("openai.live descriptor"),
+                        &v["response"]["usage"],
+                    ));
+                }
+                return Some(self.take_record());
+            }
             _ => {}
         }
         None
@@ -146,7 +167,7 @@ impl WsTurnState {
             // Timing is filled by the gateway (Ctx) after take_record.
             start_ns: 0,
             end_ns: 0,
-            usage: None,
+            usage: self.usage.take(),
         }
     }
 }
