@@ -132,10 +132,12 @@ fn instance_salt() -> [u8; 8] {
     static ANCHOR: u8 = 0;
     let mut h = Sha256::new();
     h.update(std::process::id().to_be_bytes());
-    h.update(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos().to_be_bytes())
-        .unwrap_or_default());
+    h.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos().to_be_bytes())
+            .unwrap_or_default(),
+    );
     h.update((&ANCHOR as *const u8 as usize).to_be_bytes());
     h.finalize()[..8].try_into().unwrap()
 }

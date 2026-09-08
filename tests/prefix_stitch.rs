@@ -67,10 +67,7 @@ async fn prefix_stitch() {
     compacted["messages"].as_array_mut().unwrap().pop();
     post_chat(&compacted.to_string()).await;
     // Single-shot unrelated request.
-    post_chat(
-        r#"{"model":"m","messages":[{"role":"user","content":"one-shot unrelated"}]}"#,
-    )
-    .await;
+    post_chat(r#"{"model":"m","messages":[{"role":"user","content":"one-shot unrelated"}]}"#).await;
 
     let recs = records().await;
     let chat: Vec<_> = recs
@@ -108,6 +105,12 @@ async fn prefix_stitch() {
     assert_ne!(s1, s3);
     assert_ne!(s1, sc);
     // No breakpoint for a pure extension or a fresh head.
-    assert_ne!(chat[0]["breakpoint"], true, "chain head is not a breakpoint");
-    assert_ne!(chat[1]["breakpoint"], true, "prefix extension is not a breakpoint");
+    assert_ne!(
+        chat[0]["breakpoint"], true,
+        "chain head is not a breakpoint"
+    );
+    assert_ne!(
+        chat[1]["breakpoint"], true,
+        "prefix extension is not a breakpoint"
+    );
 }

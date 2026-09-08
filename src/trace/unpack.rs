@@ -8,7 +8,8 @@ pub fn detect_protocol(path: &str) -> Option<&'static str> {
         Some("openai_chat")
     } else if path.starts_with("/v1/messages") {
         Some("anthropic_messages")
-    } else if path.starts_with("/v1/responses") || path.starts_with("/compatible-mode/v1/responses") {
+    } else if path.starts_with("/v1/responses") || path.starts_with("/compatible-mode/v1/responses")
+    {
         Some("openai_responses")
     } else {
         None
@@ -72,7 +73,10 @@ pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
 /// from `response.output_item.done` events, which carry the fully assembled
 /// function_call item (name + complete arguments), avoiding the need to
 /// reassemble argument deltas.
-pub fn extract_sse_tool_calls(protocol: &str, response_body: &[u8]) -> Vec<crate::trace::store::ToolCall> {
+pub fn extract_sse_tool_calls(
+    protocol: &str,
+    response_body: &[u8],
+) -> Vec<crate::trace::store::ToolCall> {
     let mut out = Vec::new();
     if protocol != "openai_responses" {
         return out;
@@ -103,7 +107,11 @@ pub fn extract_sse_tool_calls(protocol: &str, response_body: &[u8]) -> Vec<crate
 
 /// Extract user input + final output from one non-streaming request/response
 /// pair. Returns None when the protocol is unknown or bodies are not JSON.
-pub fn unpack_nonstreaming(protocol: &str, request_body: &[u8], response_body: &[u8]) -> Option<TurnRecord> {
+pub fn unpack_nonstreaming(
+    protocol: &str,
+    request_body: &[u8],
+    response_body: &[u8],
+) -> Option<TurnRecord> {
     let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
     let resp: serde_json::Value = serde_json::from_slice(response_body).ok()?;
     match protocol {
@@ -205,9 +213,10 @@ fn responses_user_input(req: &serde_json::Value) -> Option<String> {
         return Some(s.to_string());
     }
     let items = req["input"].as_array()?;
-    let user_item = items.iter().rev().find(|i| {
-        i["type"] == "message" && i["role"] == "user"
-    })?;
+    let user_item = items
+        .iter()
+        .rev()
+        .find(|i| i["type"] == "message" && i["role"] == "user")?;
     let blocks = user_item["content"].as_array()?;
     let mut out = Vec::new();
     for b in blocks {

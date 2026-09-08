@@ -3,8 +3,8 @@
 mod common;
 
 use bytes::Bytes;
-use common::stack::start_stack;
 use common::stack::gateway_port;
+use common::stack::start_stack;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, StatusCode};
 use hyper_util::client::legacy::Client;
@@ -33,7 +33,10 @@ async fn upstream_error_passthrough() {
         StatusCode::NOT_FOUND,
         "upstream 404 must pass through, got {status}"
     );
-    assert!(text.contains("not found"), "upstream error body lost: {text}");
+    assert!(
+        text.contains("not found"),
+        "upstream error body lost: {text}"
+    );
 
     // Connection refused upstream: gateway must answer with a 5xx, not hang.
     let gw_port = gw + 100;
@@ -60,7 +63,9 @@ async fn upstream_error_passthrough() {
             .request(req),
     )
     .await;
-    let resp = result.expect("gateway must respond when upstream is down, not hang").expect("response expected");
+    let resp = result
+        .expect("gateway must respond when upstream is down, not hang")
+        .expect("response expected");
     let status = resp.status();
     assert!(
         status.is_server_error(),

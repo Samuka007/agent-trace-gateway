@@ -18,22 +18,30 @@ fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<B
 }
 
 async fn fake_collector(port: u16, received: Arc<Mutex<Vec<Vec<u8>>>>) {
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             let received = received.clone();
             tokio::spawn(async move {
                 let io = hyper_util::rt::TokioIo::new(stream);
-                let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let received = received.clone();
-                    async move {
-                        let body = req.collect().await.unwrap().to_bytes();
-                        received.lock().push(body.to_vec());
-                        Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(Bytes::from("{}"))))
-                    }
-                });
-                let _ = Builder::new(TokioExecutor::new()).serve_connection(io, svc).await;
+                let svc = hyper::service::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        let received = received.clone();
+                        async move {
+                            let body = req.collect().await.unwrap().to_bytes();
+                            received.lock().push(body.to_vec());
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(
+                                Bytes::from("{}"),
+                            )))
+                        }
+                    },
+                );
+                let _ = Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
             });
         }
     });
@@ -120,7 +128,11 @@ async fn otlp_export() {
             .map(str::to_string)
             .unwrap_or_default()
     };
-    assert_eq!(attr("session.id"), "otlp-session-1", "session attribute: {attrs:?}");
+    assert_eq!(
+        attr("session.id"),
+        "otlp-session-1",
+        "session attribute: {attrs:?}"
+    );
     assert_eq!(attr("protocol"), "openai_chat");
     assert!(
         attr("user_input").contains("otlp-turn"),
@@ -133,8 +145,14 @@ async fn otlp_export() {
 
     // Timestamps must be real (non-zero nanoseconds), not placeholders.
     for s in spans {
-        let start = s["startTimeUnixNano"].as_str().and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
-        let end = s["endTimeUnixNano"].as_str().and_then(|t| t.parse::<u64>().ok()).unwrap_or(0);
+        let start = s["startTimeUnixNano"]
+            .as_str()
+            .and_then(|t| t.parse::<u64>().ok())
+            .unwrap_or(0);
+        let end = s["endTimeUnixNano"]
+            .as_str()
+            .and_then(|t| t.parse::<u64>().ok())
+            .unwrap_or(0);
         assert!(start > 0, "startTimeUnixNano must be a real timestamp: {s}");
         assert!(end >= start, "endTimeUnixNano must be >= start: {s}");
     }
@@ -147,22 +165,29 @@ async fn otlp_export() {
                 .as_array()
                 .map(|a| {
                     a.iter().any(|x| {
-                        x["key"] == "protocol"
-                            && x["value"]["stringValue"] == "openai_responses"
+                        x["key"] == "protocol" && x["value"]["stringValue"] == "openai_responses"
                     })
                 })
                 .unwrap_or(false)
         })
         .unwrap_or_else(|| panic!("openai_responses span missing: {spans:?}"));
-    let tool_attrs = tool_span["attributes"].as_array().expect("tool span attributes");
+    let tool_attrs = tool_span["attributes"]
+        .as_array()
+        .expect("tool span attributes");
     let tool_calls_json = tool_attrs
         .iter()
         .find(|a| a["key"] == "tool_calls")
         .and_then(|a| a["value"]["stringValue"].as_str())
-        .unwrap_or_else(|| panic!("tool_calls attribute missing on streaming span: {tool_attrs:?}"));
+        .unwrap_or_else(|| {
+            panic!("tool_calls attribute missing on streaming span: {tool_attrs:?}")
+        });
     let tool_calls: Vec<serde_json::Value> =
         serde_json::from_str(tool_calls_json).expect("tool_calls must be JSON");
-    assert_eq!(tool_calls.len(), 1, "one streamed tool call expected: {tool_calls:?}");
+    assert_eq!(
+        tool_calls.len(),
+        1,
+        "one streamed tool call expected: {tool_calls:?}"
+    );
     assert_eq!(tool_calls[0]["name"], "read_file");
     let args: serde_json::Value =
         serde_json::from_str(tool_calls[0]["arguments"].as_str().unwrap())

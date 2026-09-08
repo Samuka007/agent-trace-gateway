@@ -19,7 +19,9 @@ fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<B
 
 /// A collector that always answers 500 (persistent export failure).
 async fn failing_collector(port: u16) {
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
@@ -34,7 +36,9 @@ async fn failing_collector(port: u16) {
                         Ok::<_, std::convert::Infallible>(r)
                     },
                 );
-                let _ = Builder::new(TokioExecutor::new()).serve_connection(io, svc).await;
+                let _ = Builder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
             });
         }
     });
@@ -84,7 +88,11 @@ async fn export_fail_open() {
     let resp = client().request(req).await.expect("records");
     let recs: Vec<serde_json::Value> =
         serde_json::from_slice(&resp.collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(recs.len(), 3, "all turns must be captured despite export failure");
+    assert_eq!(
+        recs.len(),
+        3,
+        "all turns must be captured despite export failure"
+    );
 
     // The failure must be OBSERVABLE via the gateway health endpoint: the
     // failing export increments the `failed` counter (never blocks traffic).

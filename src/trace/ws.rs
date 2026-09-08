@@ -109,7 +109,8 @@ impl WsTurnState {
     /// Server frames: accumulate output/tool calls; response.completed ends the
     /// turn and returns its record.
     pub fn apply_server_frame(&mut self, payload: &[u8]) -> Option<TurnRecord> {
-        self.raw_response.push_str(&String::from_utf8_lossy(payload));
+        self.raw_response
+            .push_str(&String::from_utf8_lossy(payload));
         self.raw_response.push('\n');
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else {
             return None;

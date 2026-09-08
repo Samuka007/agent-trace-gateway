@@ -56,19 +56,19 @@ async fn restart_stitch_state() {
     std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw2, &up2));
     for port in [FIXTURE_PORT, GW1, GW2] {
         for _ in 0..100 {
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok() {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
-    let explicit_body =
-        r#"{"model":"m","messages":[{"role":"user","content":"explicit-turn"}]}"#;
-    let prefix_body_a =
-        r#"{"model":"m","messages":[{"role":"system","content":"rs-sys"},{"role":"user","content":"rs-u1"}]}"#;
-    let prefix_body_b =
-        r#"{"model":"m","messages":[{"role":"system","content":"rs-sys"},{"role":"user","content":"rs-u1"},{"role":"assistant","content":"ok"},{"role":"user","content":"rs-u2"}]}"#;
+    let explicit_body = r#"{"model":"m","messages":[{"role":"user","content":"explicit-turn"}]}"#;
+    let prefix_body_a = r#"{"model":"m","messages":[{"role":"system","content":"rs-sys"},{"role":"user","content":"rs-u1"}]}"#;
+    let prefix_body_b = r#"{"model":"m","messages":[{"role":"system","content":"rs-sys"},{"role":"user","content":"rs-u1"},{"role":"assistant","content":"ok"},{"role":"user","content":"rs-u2"}]}"#;
 
     // Before restart: explicit session + one prefix chain.
     post(GW1, explicit_body, Some("restart-sess-1")).await;

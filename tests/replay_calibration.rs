@@ -97,9 +97,15 @@ fn replay_calibration() {
     // carry explicit ids.
     assert_eq!(explicit, 3, "three explicit-id samples expected: {report}");
     // The six omp bailian/tool samples are all id-less and have messages.
-    assert_eq!(prefix_assigned, 6, "six prefix-assignable samples: {report}");
+    assert_eq!(
+        prefix_assigned, 6,
+        "six prefix-assignable samples: {report}"
+    );
     // Among those six, omp_tool_turn4/turn5 form one strict-prefix chain; the
     // fixture ordering triggers no same-head breakpoint.
-    assert_eq!(breakpoints, 0, "no breakpoint expected in fixture order: {report}");
+    assert_eq!(
+        breakpoints, 0,
+        "no breakpoint expected in fixture order: {report}"
+    );
     assert_eq!(no_session, 0, "every sample must be classifiable: {report}");
 }

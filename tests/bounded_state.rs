@@ -23,7 +23,11 @@ async fn post_chat(body: &str) {
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap();
     let resp = client().request(req).await.expect("request");
-    assert_eq!(resp.status(), 200, "bounded-state degradation must not error");
+    assert_eq!(
+        resp.status(),
+        200,
+        "bounded-state degradation must not error"
+    );
     let _ = resp.collect().await.unwrap();
 }
 
@@ -88,8 +92,14 @@ async fn bounded_stitch_state() {
         ids[3], ids[0],
         "evicted head must reopen a fresh chain, not merge with its old session"
     );
-    assert_ne!(ids[3], ids[1], "evicted head must not merge into surviving chain B");
-    assert_ne!(ids[3], ids[2], "evicted head must not merge into surviving chain C");
+    assert_ne!(
+        ids[3], ids[1],
+        "evicted head must not merge into surviving chain B"
+    );
+    assert_ne!(
+        ids[3], ids[2],
+        "evicted head must not merge into surviving chain C"
+    );
 
     // TTL: wait out the TTL, re-send A again — expired chain must open a new
     // session, still without error.

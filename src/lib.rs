@@ -10,9 +10,9 @@ pub mod gateway_app {
     use pingora::proxy::{http_proxy, FailToProxy, ProxyHttp, Session};
     use pingora::upstreams::peer::HttpPeer;
 
+    use crate::trace::session;
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
-    use crate::trace::session;
 
     pub struct Gateway {
         pub upstream: String,
@@ -79,7 +79,8 @@ pub mod gateway_app {
                 .to_string();
             // ATG_SNI overrides SNI so an upstream given as a bare IP can still
             // complete TLS with the correct hostname.
-            let sni = std::env::var("ATG_SNI").ok()
+            let sni = std::env::var("ATG_SNI")
+                .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| host.split(':').next().unwrap_or("").to_string());
             Ok(Box::new(HttpPeer::new(host, tls, sni)))
@@ -98,7 +99,8 @@ pub mod gateway_app {
                 .trim_start_matches("https://")
                 .trim_start_matches("http://")
                 .to_string();
-            let host = std::env::var("ATG_SNI").ok()
+            let host = std::env::var("ATG_SNI")
+                .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(default_host);
             let _ = upstream_request.insert_header(http::header::HOST, host);
@@ -106,7 +108,11 @@ pub mod gateway_app {
         }
 
         // Control endpoint: dump collected turn records as JSON.
-        async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        async fn request_filter(
+            &self,
+            session: &mut Session,
+            _ctx: &mut Self::CTX,
+        ) -> Result<bool> {
             if session.req_header().uri.path() == "/__atg/records" {
                 let records = self.store.snapshot();
                 let body = serde_json::to_vec(&records).unwrap_or_default();
@@ -114,7 +120,9 @@ pub mod gateway_app {
                 resp.insert_header("content-type", "application/json")?;
                 resp.insert_header("content-length", body.len().to_string())?;
                 session.write_response_header(Box::new(resp), false).await?;
-                session.write_response_body(Some(Bytes::from(body)), true).await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
                 return Ok(true);
             }
             if session.req_header().uri.path() == "/__atg/health" {
@@ -129,7 +137,9 @@ pub mod gateway_app {
                 resp.insert_header("content-type", "application/json")?;
                 resp.insert_header("content-length", body.len().to_string())?;
                 session.write_response_header(Box::new(resp), false).await?;
-                session.write_response_body(Some(Bytes::from(body)), true).await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
                 return Ok(true);
             }
             Ok(false)
@@ -203,8 +213,8 @@ pub mod gateway_app {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string)
             };
-            let mut session_id =
-                session::extract_session_id(protocol, &ctx.req_buf, &header_get).unwrap_or_default();
+            let mut session_id = session::extract_session_id(protocol, &ctx.req_buf, &header_get)
+                .unwrap_or_default();
             let mut breakpoint = false;
             if session_id.is_empty() {
                 if let Some(messages) = unpack::extract_messages(&ctx.req_buf) {
@@ -276,12 +286,10 @@ pub mod gateway_app {
                 pingora::HTTPStatus(code) => *code,
                 _ => match e.esource() {
                     pingora::ErrorSource::Upstream => 502,
-                    pingora::ErrorSource::Downstream => {
-                        match e.etype() {
-                            pingora::WriteError | pingora::ReadError | pingora::ConnectionClosed => 0,
-                            _ => 400,
-                        }
-                    }
+                    pingora::ErrorSource::Downstream => match e.etype() {
+                        pingora::WriteError | pingora::ReadError | pingora::ConnectionClosed => 0,
+                        _ => 400,
+                    },
                     _ => 500,
                 },
             };
@@ -307,13 +315,18 @@ pub mod gateway_app {
             store: TraceStore::new(),
             stitcher: crate::trace::prefix::PrefixStitcher::new(),
             cap: crate::trace::capture::CaptureCap::new(),
-            exporter: crate::trace::export::Exporter::start(std::env::var("ATG_OTLP_ENDPOINT").ok()),
+            exporter: crate::trace::export::Exporter::start(
+                std::env::var("ATG_OTLP_ENDPOINT").ok(),
+            ),
         };
         let mut http_proxy = http_proxy(&server.configuration, gateway);
         let mut opts = pingora::apps::HttpServerOptions::default();
         opts.h2c = true;
         http_proxy.server_options = Some(opts);
-        let mut svc = pingora::services::listening::Service::new("agent-trace-gateway".to_string(), http_proxy);
+        let mut svc = pingora::services::listening::Service::new(
+            "agent-trace-gateway".to_string(),
+            http_proxy,
+        );
         svc.add_tcp(listen);
         server.add_service(svc);
         server.run_forever();

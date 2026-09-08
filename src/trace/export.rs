@@ -47,7 +47,10 @@ impl Exporter {
                 .expect("export runtime");
             rt.block_on(export_loop(endpoint, auth_header, rx, health2));
         });
-        Self { tx: Some(tx), health }
+        Self {
+            tx: Some(tx),
+            health,
+        }
     }
 
     /// Queue one record for export. Never blocks; drops (counted) when the
@@ -111,7 +114,9 @@ async fn flush_batch(
     health: &ExportHealth,
 ) {
     let payload = build_otlp_json(batch);
-    let mut req = client.post(endpoint).header("content-type", "application/json");
+    let mut req = client
+        .post(endpoint)
+        .header("content-type", "application/json");
     if let Some(auth) = auth_header {
         req = req.header("authorization", auth);
     }
@@ -226,23 +231,16 @@ fn split_basic_auth(endpoint: &str) -> (String, Option<String>) {
     // Find the first @ that appears before any '/' or '?' (i.e. in the
     // authority section only).
     let at = match rest.find('@') {
-        Some(i)
-            if rest[..i]
-                .chars()
-                .all(|c| c != '/' && c != '?' && c != '#') =>
-        {
-            i
-        }
+        Some(i) if rest[..i].chars().all(|c| c != '/' && c != '?' && c != '#') => i,
         _ => return (endpoint.to_string(), None),
     };
     let creds = &rest[..at];
-    let clean = format!(
-        "{}{}",
-        &endpoint[..scheme_end + 3],
-        &rest[at + 1..]
-    );
+    let clean = format!("{}{}", &endpoint[..scheme_end + 3], &rest[at + 1..]);
     let decoded = percent_decode(creds);
-    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, decoded.as_bytes());
+    let b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        decoded.as_bytes(),
+    );
     (clean, Some(format!("Basic {b64}")))
 }
 

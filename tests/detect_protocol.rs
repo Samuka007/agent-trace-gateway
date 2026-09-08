@@ -5,11 +5,17 @@ use agent_trace_gateway::trace::unpack::detect_protocol;
 #[test]
 fn detects_all_real_path_variants() {
     assert_eq!(detect_protocol("/v1/chat/completions"), Some("openai_chat"));
-    assert_eq!(detect_protocol("/compatible-mode/v1/chat/completions"), Some("openai_chat"));
+    assert_eq!(
+        detect_protocol("/compatible-mode/v1/chat/completions"),
+        Some("openai_chat")
+    );
     assert_eq!(detect_protocol("/v1/messages"), Some("anthropic_messages"));
     assert_eq!(detect_protocol("/v1/responses"), Some("openai_responses"));
     // Real codex path when pointed at a compatible-mode upstream (RED before fix).
-    assert_eq!(detect_protocol("/compatible-mode/v1/responses"), Some("openai_responses"));
+    assert_eq!(
+        detect_protocol("/compatible-mode/v1/responses"),
+        Some("openai_responses")
+    );
     assert_eq!(detect_protocol("/v1/models"), None);
     assert_eq!(detect_protocol("/__atg/records"), None);
 }
@@ -17,7 +23,8 @@ fn detects_all_real_path_variants() {
 #[test]
 fn extracts_user_input_from_codex_input_array() {
     use agent_trace_gateway::trace::unpack::extract_user_input;
-    let body = std::fs::read("xtask/harness/fixtures/openai_responses/codex_real_toolturn.json").unwrap();
+    let body =
+        std::fs::read("xtask/harness/fixtures/openai_responses/codex_real_toolturn.json").unwrap();
     let input = extract_user_input("openai_responses", &body);
     assert_eq!(
         input.as_deref(),

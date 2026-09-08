@@ -4,13 +4,13 @@ mod common;
 
 use common::stack::start_stack;
 
+use bytes::Bytes;
+use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use std::time::Instant;
-use bytes::Bytes;
-use futures_util::StreamExt;
 
 #[tokio::test]
 async fn streaming_passthrough() {
@@ -49,7 +49,10 @@ async fn streaming_passthrough() {
     // response, every chunk would arrive together (span ~0). Streaming means
     // the arrival span covers at least one fixture gap.
     assert!(!arrivals.is_empty(), "no chunks received");
-    assert!(text.contains("response.completed"), "stream incomplete: {text}");
+    assert!(
+        text.contains("response.completed"),
+        "stream incomplete: {text}"
+    );
     if arrivals.len() >= 2 {
         let span = *arrivals.last().unwrap() - *arrivals.first().unwrap();
         assert!(

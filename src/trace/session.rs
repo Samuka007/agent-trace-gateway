@@ -90,9 +90,7 @@ fn extract_header_session(
             .or_else(|| header_get("session_id"))
             .filter(|s| !s.trim().is_empty())
     };
-    let claude = || {
-        header_get("x-claude-code-session-id").filter(|s| !s.trim().is_empty())
-    };
+    let claude = || header_get("x-claude-code-session-id").filter(|s| !s.trim().is_empty());
     if protocol == "anthropic_messages" {
         return claude().or_else(standard);
     }
@@ -104,5 +102,7 @@ fn body_string(v: &Value, path: &[&str]) -> Option<String> {
     for key in path {
         cur = cur.get(key)?;
     }
-    cur.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    cur.as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }

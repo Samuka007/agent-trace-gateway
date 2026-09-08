@@ -34,9 +34,10 @@ async fn content_fidelity() {
 
     // Real claude-cli sample carries a canary marker in the user text.
     let fixture_dir = format!("{}/xtask/harness/fixtures", manifest_dir());
-    let body =
-        std::fs::read_to_string(format!("{fixture_dir}/anthropic_messages/claude_cli_request.json"))
-            .unwrap();
+    let body = std::fs::read_to_string(format!(
+        "{fixture_dir}/anthropic_messages/claude_cli_request.json"
+    ))
+    .unwrap();
     let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages"))
         .header("content-type", "application/json")
         .header("connection", "keep-alive") // transport noise candidate

@@ -28,7 +28,8 @@ async fn ws_turn_reassembly() {
         .expect("WS handshake through gateway");
 
     ws.send(Message::Text(
-        "{\"type\":\"response.create\",\"client_metadata\":{\"session_id\":\"sess-ws-turn\"}}".into(),
+        "{\"type\":\"response.create\",\"client_metadata\":{\"session_id\":\"sess-ws-turn\"}}"
+            .into(),
     ))
     .await
     .unwrap();
@@ -76,7 +77,10 @@ async fn ws_turn_reassembly() {
 
     // Input comes from the response.create frame.
     assert!(
-        rec["user_input"].as_str().unwrap_or("").contains("sess-ws-turn"),
+        rec["user_input"]
+            .as_str()
+            .unwrap_or("")
+            .contains("sess-ws-turn"),
         "WS turn input must come from response.create frame: {rec}"
     );
     // Tool call parsed from the server tool_call frame.

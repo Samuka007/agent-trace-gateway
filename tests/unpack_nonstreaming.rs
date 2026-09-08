@@ -73,7 +73,10 @@ async fn unpack_nonstreaming() {
     };
 
     let chat = find("openai_chat");
-    assert_eq!(chat["user_input"], "chat-user-text", "chat user input: {chat}");
+    assert_eq!(
+        chat["user_input"], "chat-user-text",
+        "chat user input: {chat}"
+    );
     assert!(
         chat["final_output"].as_str().is_some_and(|s| !s.is_empty()),
         "chat output must be extracted: {chat}"

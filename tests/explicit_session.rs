@@ -52,7 +52,8 @@ async fn explicit_session_stitch() {
     // session id inside metadata.user_id JSON envelope (no header on these).
     let fixture_dir = format!("{}/xtask/harness/fixtures", manifest_dir());
     for name in ["claude_cli_request.json"] {
-        let body = std::fs::read_to_string(format!("{fixture_dir}/anthropic_messages/{name}")).unwrap();
+        let body =
+            std::fs::read_to_string(format!("{fixture_dir}/anthropic_messages/{name}")).unwrap();
         post_with_session("/v1/messages", &body, None).await;
     }
     // Header-only session (X-Claude-Code-Session-Id), no body envelope.
@@ -65,7 +66,8 @@ async fn explicit_session_stitch() {
 
     // Real codex sample: session id in body client_metadata.session_id.
     let codex_body =
-        std::fs::read_to_string(format!("{fixture_dir}/openai_responses/codex_turn1.json")).unwrap();
+        std::fs::read_to_string(format!("{fixture_dir}/openai_responses/codex_turn1.json"))
+            .unwrap();
     post_with_session("/v1/responses", &codex_body, None).await;
 
     let recs = records().await;
@@ -75,7 +77,11 @@ async fn explicit_session_stitch() {
         .iter()
         .filter(|r| r["protocol"] == "anthropic_messages")
         .collect();
-    assert_eq!(claude_recs.len(), 2, "two anthropic turns expected: {recs:?}");
+    assert_eq!(
+        claude_recs.len(),
+        2,
+        "two anthropic turns expected: {recs:?}"
+    );
     for r in &claude_recs {
         assert_eq!(
             r["session_id"], "01a01f21-eae3-7000-9857-78f64c4de4cc",

@@ -23,7 +23,8 @@ async fn ws_passthrough() {
 
     // Send response.create (client -> upstream direction).
     ws.send(Message::Text(
-        "{\"type\":\"response.create\",\"client_metadata\":{\"session_id\":\"sess-ws-test\"}}".into(),
+        "{\"type\":\"response.create\",\"client_metadata\":{\"session_id\":\"sess-ws-test\"}}"
+            .into(),
     ))
     .await
     .expect("client frame send");
@@ -43,7 +44,11 @@ async fn ws_passthrough() {
                     .expect("tool result send");
                 }
                 frames.push(t);
-                if frames.last().map(|f| f.contains("response.completed")).unwrap_or(false) {
+                if frames
+                    .last()
+                    .map(|f| f.contains("response.completed"))
+                    .unwrap_or(false)
+                {
                     break;
                 }
             }
@@ -52,7 +57,10 @@ async fn ws_passthrough() {
         }
     }
 
-    assert!(got_tool_call, "tool_call frame must traverse gateway: {frames:?}");
+    assert!(
+        got_tool_call,
+        "tool_call frame must traverse gateway: {frames:?}"
+    );
     assert!(
         frames.iter().any(|f| f.contains("response.completed")),
         "completed frame must traverse gateway: {frames:?}"

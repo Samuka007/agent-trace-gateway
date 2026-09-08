@@ -71,7 +71,13 @@ async fn capture_size_caps() {
         "marker must carry the true original byte count ({original_bytes}): {raw}"
     );
     // Content before truncation is the original verbatim prefix (no rewriting).
-    assert!(raw.starts_with(&original[..1000]), "truncation must keep the verbatim prefix");
+    assert!(
+        raw.starts_with(&original[..1000]),
+        "truncation must keep the verbatim prefix"
+    );
     // Oversized tail must NOT be present.
-    assert!(!raw.contains(&big_content[big_content.len() - 100..]), "oversized tail leaked");
+    assert!(
+        !raw.contains(&big_content[big_content.len() - 100..]),
+        "oversized tail leaked"
+    );
 }

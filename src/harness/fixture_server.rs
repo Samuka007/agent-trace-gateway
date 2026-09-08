@@ -69,8 +69,10 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}
             });
             let mut r = Response::new(full(resp.to_string()));
-            r.headers_mut()
-                .insert(hyper::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            r.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            );
             Ok(r)
         }
         ("POST", "/v1/messages") => {
@@ -91,8 +93,10 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 "usage": {"input_tokens": 1, "output_tokens": 1}
             });
             let mut r = Response::new(full(resp.to_string()));
-            r.headers_mut()
-                .insert(hyper::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            r.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            );
             Ok(r)
         }
         ("POST", "/v1/responses") => {
@@ -119,8 +123,10 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
                 let body = BodyExt::boxed(StreamBody::new(stream));
                 let mut r = Response::new(body);
-                r.headers_mut()
-                    .insert(hyper::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+                r.headers_mut().insert(
+                    hyper::header::CONTENT_TYPE,
+                    "text/event-stream".parse().unwrap(),
+                );
                 return Ok(r);
             }
             let resp = serde_json::json!({
@@ -133,8 +139,10 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
                 }]
             });
             let mut r = Response::new(full(resp.to_string()));
-            r.headers_mut()
-                .insert(hyper::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            r.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            );
             Ok(r)
         }
         ("POST", "/v1/sse") => {
@@ -155,8 +163,10 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
             let body = BodyExt::boxed(StreamBody::new(stream));
             let mut r = Response::new(body);
             *r.status_mut() = StatusCode::OK;
-            r.headers_mut()
-                .insert(hyper::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            r.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                "text/event-stream".parse().unwrap(),
+            );
             Ok(r)
         }
         ("GET", "/ws") if is_ws_upgrade(&req) => {
