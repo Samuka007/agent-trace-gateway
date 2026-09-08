@@ -227,7 +227,8 @@ pub mod gateway_app {
             let raw_request = self.cap.bound(&ctx.req_buf);
             let raw_response = self.cap.bound(&ctx.resp_buf);
             if unpack::looks_like_sse(&ctx.resp_content_type) {
-                let final_output = unpack::reassemble_sse_output(protocol, &ctx.resp_buf);
+                let (final_output, usage) =
+                    unpack::reassemble_sse_output(protocol, &ctx.resp_buf);
                 let user_input =
                     unpack::extract_user_input(protocol, &ctx.req_buf).unwrap_or_default();
                 ctx.end_ns = now_ns();
@@ -242,6 +243,7 @@ pub mod gateway_app {
                     breakpoint,
                     start_ns: ctx.start_ns,
                     end_ns: ctx.end_ns,
+                    usage,
                 });
                 return;
             }

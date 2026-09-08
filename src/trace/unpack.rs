@@ -25,9 +25,15 @@ pub fn looks_like_sse(content_type: &str) -> bool {
 /// frames. Concatenates output_text deltas in arrival order.
 /// Supports OpenAI Responses deltas, OpenAI chat deltas and Anthropic
 /// content_block_delta.
-pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
+/// Returns (reassembled text, token usage). Usage is harvested inside the
+/// same per-frame loop — no second pass over the body.
+pub fn reassemble_sse_output(
+    protocol: &str,
+    response_body: &[u8],
+) -> (String, Option<crate::trace::adaptor::TurnUsage>) {
     let text = String::from_utf8_lossy(response_body);
     let mut out = String::new();
+    let mut usage: Option<crate::trace::adaptor::TurnUsage> = None;
     for frame in text.split("\n\n") {
         let mut data = String::new();
         for line in frame.lines() {
@@ -41,6 +47,9 @@ pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
             continue;
         };
+        if let Some(u) = crate::trace::adaptor::usage_from_sse_frame(protocol, &v) {
+            crate::trace::adaptor::merge_usage(&mut usage, u);
+        }
         match protocol {
             "openai.responses" => {
                 if v["type"] == "response.output_text.delta" {
@@ -66,7 +75,7 @@ pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
             _ => {}
         }
     }
-    out
+    (out, usage)
 }
 
 /// Extract complete tool calls from a streaming response. Tool calls are read
@@ -176,6 +185,7 @@ pub fn unpack_nonstreaming(
                 protocol: protocol.to_string(),
                 user_input,
                 final_output,
+                usage: crate::trace::adaptor::usage_from_nonstreaming(protocol, &resp),
                 ..Default::default()
             })
         }
@@ -202,6 +212,7 @@ pub fn unpack_nonstreaming(
                 protocol: protocol.to_string(),
                 user_input,
                 final_output,
+                usage: crate::trace::adaptor::usage_from_nonstreaming(protocol, &resp),
                 ..Default::default()
             })
         }
@@ -227,6 +238,7 @@ pub fn unpack_nonstreaming(
                 protocol: protocol.to_string(),
                 user_input,
                 final_output,
+                usage: crate::trace::adaptor::usage_from_nonstreaming(protocol, &resp),
                 ..Default::default()
             })
         }
