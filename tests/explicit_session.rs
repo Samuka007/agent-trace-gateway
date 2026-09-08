@@ -135,7 +135,10 @@ async fn legacy_user_id_session_extraction() {
     let recs = records().await;
     let rec = recs
         .iter()
-        .find(|r| r["protocol"] == "anthropic.messages")
+        // Scoped by this test's session: sibling tests in this binary share
+        // one gateway's record store, and their anthropic turns (with other
+        // session ids) may appear first under concurrent scheduling.
+        .find(|r| r["protocol"] == "anthropic.messages" && r["session_id"] == uuid)
         .unwrap_or_else(|| panic!("anthropic record missing: {recs:?}"));
     assert_eq!(
         rec["session_id"], uuid,
