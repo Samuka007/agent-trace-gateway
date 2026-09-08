@@ -3,7 +3,6 @@
 mod common;
 
 use bytes::Bytes;
-use common::stack::gateway_port;
 use common::stack::start_stack;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, StatusCode};
