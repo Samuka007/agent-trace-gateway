@@ -275,12 +275,7 @@ fn responses_user_input(req: &serde_json::Value) -> Option<String> {
     let user_item = items
         .iter()
         .rev()
-        .find(|i| {
-            i["type"]
-                .as_str()
-                .is_none_or(|t| t == "message")
-                && i["role"] == "user"
-        })?;
+        .find(|i| i["type"].as_str().is_none_or(|t| t == "message") && i["role"] == "user")?;
     // Content is a string or a block array (input_text blocks).
     if let Some(s) = user_item["content"].as_str() {
         if !s.is_empty() {
