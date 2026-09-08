@@ -2,7 +2,6 @@
 // trajectory segment (state is in-process), while explicit session ids keep
 // stitching — no errors either way.
 // [Requirement: 会话串联；Scenario: 网关重启后的串联状态]
-mod common;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
