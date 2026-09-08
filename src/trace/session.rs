@@ -7,7 +7,35 @@ use serde_json::Value;
 /// uuid. Mirrors modeltrace/session.go claudeCodeLegacyUserIDPattern.
 /// Hand-rolled matcher instead of a regex crate: the pattern is fixed, so a
 /// slice-scan keeps the dependency tree untouched.
-fn claude_code_legacy_user_id_session(user_id: &str) -> Option<String> {
+/// metadata.user_id may carry session_id in three shapes (Claude Code legacy
+/// and shaped forms): a JSON envelope string {"session_id": ...}, a plain
+/// composite legacy string, or an object with session_id. Returns the
+/// session uuid when recognisable.
+pub fn metadata_user_id_session(user_id: &Value) -> Option<String> {
+    match user_id {
+        Value::String(s) => {
+            // JSON envelope: {"session_id": "..."} — extraction wins first.
+            if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                if let Some(sid) = parsed.get("session_id").and_then(|x| x.as_str()) {
+                    let trimmed = sid.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+            // Plain (non-JSON) string: legacy composite matcher.
+            claude_code_legacy_user_id_session(s)
+        }
+        Value::Object(_) => user_id
+            .get("session_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
+pub fn claude_code_legacy_user_id_session(user_id: &str) -> Option<String> {
     let rest = user_id.strip_prefix("user_")?;
     let (_hex64, rest) = split_at_hex(rest, 64)?;
     let rest = rest.strip_prefix("_account_")?;
@@ -58,103 +86,28 @@ pub fn extract_session_id(
 }
 
 fn extract_body_session(protocol: &str, request_body: &[u8]) -> Option<String> {
-    if request_body.is_empty() {
-        return None;
-    }
+    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
     let Ok(v) = serde_json::from_slice::<Value>(request_body) else {
         return None;
     };
-    if let Some(s) = body_string(&v, &["session_id"]) {
-        return Some(s);
-    }
-    if let Some(s) = body_string(&v, &["conversation_id"]) {
-        return Some(s);
-    }
-    match protocol {
-        "anthropic.messages" => {
-            if let Some(s) = body_string(&v, &["metadata", "session_id"]) {
-                return Some(s);
-            }
-            metadata_user_id_session(&v)
-        }
-        "openai.responses" | "openai.live" => body_string(&v, &["client_metadata", "session_id"]),
-        _ => body_string(&v, &["metadata", "session_id"]),
-    }
-}
-
-/// metadata.user_id may be a JSON envelope string holding session_id
-/// (Claude-Code legacy and shaped forms).
-fn metadata_user_id_session(v: &Value) -> Option<String> {
-    let metadata = v.get("metadata")?;
-    let user_id = match metadata {
-        Value::Object(m) => m.get("user_id")?,
-        Value::String(s) => {
-            let parsed = serde_json::from_str::<Value>(s).ok()?;
-            let user_id = parsed.get("user_id")?.clone();
-            return session_from_user_id_value(&user_id);
-        }
-        _ => return None,
-    };
-    session_from_user_id_value(user_id)
-}
-
-fn session_from_user_id_value(user_id: &Value) -> Option<String> {
-    match user_id {
-        Value::String(s) => {
-            // May itself be a JSON envelope: {"session_id": "..."}
-            if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-                if let Some(sid) = parsed.get("session_id").and_then(|x| x.as_str()) {
-                    let trimmed = sid.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            }
-            // Legacy source 6: only a plain (non-JSON) user_id string reaches
-            // the matcher, matching session.go's gjson.Valid short-circuit.
-            claude_code_legacy_user_id_session(s)
-        }
-        Value::Object(_) => user_id
-            .get("session_id")
-            .and_then(|x| x.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        _ => None,
-    }
+    d.session_from_body(&v)
 }
 
 fn extract_header_session(
     protocol: &str,
     header_get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let standard = || {
-        header_get("session-id")
-            .or_else(|| header_get("session_id"))
-            .filter(|s| !s.trim().is_empty())
-    };
-    let claude = || header_get("x-claude-code-session-id").filter(|s| !s.trim().is_empty());
-    if protocol == "anthropic.messages" {
-        return claude().or_else(standard);
-    }
-    let grok = || header_get("x-grok-conv-id").filter(|s| !s.trim().is_empty());
-    // modeltrace gates this source on `grokRoute` (the request's API-key
-    // group platform == "grok", middleware.go:411-415), which ATG cannot see
-    // — ATG sits before sub2api's key resolution. Protocol-shape
-    // approximation: responses/live requests only.
-    if protocol == "openai.responses" || protocol == "openai.live" {
-        return standard().or_else(claude).or_else(grok);
-    }
-    standard().or_else(claude)
+    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    d.session_from_headers(header_get)
 }
 
-fn body_string(v: &Value, path: &[&str]) -> Option<String> {
-    let mut cur = v;
-    for key in path {
-        cur = cur.get(key)?;
-    }
-    cur.as_str()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+/// metadata itself may be a JSON envelope string: {"user_id": "..."} —
+/// extracts the user_id then applies the three-form reader.
+pub fn metadata_envelope_transform(metadata_str: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(metadata_str).ok()?;
+    let user_id = parsed.get("user_id")?.as_str()?;
+    let inner: Value = serde_json::from_str(user_id).unwrap_or(Value::String(user_id.to_string()));
+    metadata_user_id_session(&inner)
 }
 
 #[cfg(test)]

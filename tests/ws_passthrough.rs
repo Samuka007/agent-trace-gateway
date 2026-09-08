@@ -34,7 +34,7 @@ async fn ws_passthrough() {
     while let Some(msg) = ws.next().await {
         match msg.expect("frame should be ok") {
             Message::Text(t) => {
-                if t.contains("response.tool_call") && !got_tool_call {
+                if t.contains("response.output_item.done") && !got_tool_call {
                     got_tool_call = true;
                     ws.send(Message::Text(
                         "{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"ok\"}}".into(),
@@ -45,7 +45,7 @@ async fn ws_passthrough() {
                 frames.push(t);
                 if frames
                     .last()
-                    .map(|f| f.contains("response.completed"))
+                    .map(|f| f.contains("response.done"))
                     .unwrap_or(false)
                 {
                     break;
@@ -61,7 +61,7 @@ async fn ws_passthrough() {
         "tool_call frame must traverse gateway: {frames:?}"
     );
     assert!(
-        frames.iter().any(|f| f.contains("response.completed")),
+        frames.iter().any(|f| f.contains("response.done")),
         "completed frame must traverse gateway: {frames:?}"
     );
     assert!(

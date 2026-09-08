@@ -37,14 +37,14 @@ async fn ws_turn_reassembly() {
     while let Some(msg) = ws.next().await {
         match msg.unwrap() {
             Message::Text(t) => {
-                if t.contains("response.tool_call") {
+                if t.contains("response.output_item.done") {
                     ws.send(Message::Text(
                         "{\"type\":\"conversation.item.create\",\"item\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"ok\"}}".into(),
                     ))
                     .await
                     .unwrap();
                 }
-                if t.contains("response.completed") {
+                if t.contains("response.done") {
                     completed = true;
                     break;
                 }

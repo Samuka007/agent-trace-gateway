@@ -2,6 +2,7 @@
 //! semantics to OTLP/Langfuse vocabulary. Attribute keys, tag constants and
 //! usage_details assembly live here so vocabulary changes never scatter
 //! across export/unpack code.
+use crate::trace::descriptor::resolve_path;
 use serde_json::Value;
 
 /// Langfuse vocabulary constants, aligned with sub2api modeltrace
@@ -47,95 +48,43 @@ impl TurnUsage {
     }
 }
 
-/// Extract usage facts from one SSE frame already parsed as JSON, inside the
-/// reassembly loop (zero extra passes over the body). Returns Some(usage)
-/// only for frames that carry usage data.
-pub fn usage_from_sse_frame(protocol: &str, v: &Value) -> Option<TurnUsage> {
-    match protocol {
-        // message_start: input side; message_delta: output side. Neither
-        // carries both, so partial updates are merged by the caller.
-        "anthropic.messages" => {
-            let usage = match v["type"].as_str()? {
-                "message_start" => &v["message"]["usage"],
-                "message_delta" => &v["usage"],
-                _ => return None,
-            };
-            if usage.is_null() {
-                return None;
+/// Extract usage facts from one SSE frame (single traversal — called inside
+/// the reassembly loop). Delegates to the descriptor table's usage frames.
+pub fn usage_from_sse_frame(
+    d: &crate::trace::descriptor::ProtocolDescriptor,
+    v: &Value,
+) -> Option<TurnUsage> {
+    let event = v["type"].as_str();
+    for uf in d.usage_frames {
+        let matches = match (uf.on_event, event) {
+            (Some(ev), Some(e)) => ev == e,
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
+        if matches {
+            let obj = crate::trace::descriptor::resolve_path(v, uf.obj_path);
+            if !obj.is_null() {
+                return Some(usage_from_obj(d, obj));
             }
-            Some(TurnUsage {
-                input_tokens: opt_u64(&usage["input_tokens"]),
-                output_tokens: opt_u64(&usage["output_tokens"]),
-                cache_read_tokens: opt_u64(&usage["cache_read_input_tokens"]),
-                cache_creation_tokens: opt_u64(&usage["cache_creation_input_tokens"]),
-                total_tokens: None,
-            })
         }
-        // response.completed carries the full usage object once.
-        "openai.responses" => {
-            if v["type"].as_str()? != "response.completed" {
-                return None;
-            }
-            let usage = &v["response"]["usage"];
-            if usage.is_null() {
-                return None;
-            }
-            Some(TurnUsage {
-                input_tokens: opt_u64(&usage["input_tokens"]),
-                output_tokens: opt_u64(&usage["output_tokens"]),
-                cache_read_tokens: None,
-                cache_creation_tokens: None,
-                total_tokens: opt_u64(&usage["total_tokens"]),
-            })
-        }
-        // Chat streams a usage-only final chunk (choices empty).
-        "openai.chat_completions" => {
-            let usage = &v["usage"];
-            if usage.is_null() {
-                return None;
-            }
-            Some(TurnUsage {
-                input_tokens: opt_u64(&usage["prompt_tokens"]),
-                output_tokens: opt_u64(&usage["completion_tokens"]),
-                cache_read_tokens: None,
-                cache_creation_tokens: None,
-                total_tokens: opt_u64(&usage["total_tokens"]),
-            })
-        }
-        _ => None,
     }
+    None
 }
 
 /// Extract usage facts from one non-streaming response body (single parse;
 /// caller already has the parsed body).
-pub fn usage_from_nonstreaming(protocol: &str, resp: &Value) -> Option<TurnUsage> {
-    let usage = match protocol {
-        "anthropic.messages" => &resp["usage"],
-        "openai.responses" => &resp["usage"],
-        "openai.chat_completions" => &resp["usage"],
-        _ => return None,
-    };
-    if usage.is_null() {
+pub fn usage_from_nonstreaming(
+    d: &crate::trace::descriptor::ProtocolDescriptor,
+    resp: &Value,
+) -> Option<TurnUsage> {
+    // Non-streaming response bodies always carry usage at the top level,
+    // regardless of the streaming frame geometry (message.usage is an SSE
+    // concern only).
+    let obj = crate::trace::descriptor::resolve_path(resp, &["usage"]);
+    if obj.is_null() {
         return None;
     }
-    Some(match protocol {
-        "anthropic.messages" => TurnUsage {
-            input_tokens: opt_u64(&usage["input_tokens"]),
-            output_tokens: opt_u64(&usage["output_tokens"]),
-            cache_read_tokens: opt_u64(&usage["cache_read_input_tokens"]),
-            cache_creation_tokens: opt_u64(&usage["cache_creation_input_tokens"]),
-            total_tokens: None,
-        },
-        _ => TurnUsage {
-            input_tokens: opt_u64(&usage["input_tokens"])
-                .or_else(|| opt_u64(&usage["prompt_tokens"])),
-            output_tokens: opt_u64(&usage["output_tokens"])
-                .or_else(|| opt_u64(&usage["completion_tokens"])),
-            cache_read_tokens: None,
-            cache_creation_tokens: None,
-            total_tokens: opt_u64(&usage["total_tokens"]),
-        },
-    })
+    Some(usage_from_obj(d, obj))
 }
 
 /// Merge a partial frame usage into an accumulator: Some fields win, None
@@ -161,6 +110,32 @@ pub fn merge_usage(acc: &mut Option<TurnUsage>, next: TurnUsage) {
             }
         }
         None => *acc = Some(next),
+    }
+}
+
+/// Build TurnUsage from an already-located usage object per protocol.
+pub fn usage_from_obj(d: &crate::trace::descriptor::ProtocolDescriptor, usage: &Value) -> TurnUsage {
+    // Field spellings come from the descriptor's UsageShape (protocol
+    // knowledge in the table — no or_else chains in code).
+    let shape = &d.usage_shape;
+    TurnUsage {
+        input_tokens: shape
+            .input
+            .iter()
+            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
+        output_tokens: shape
+            .output
+            .iter()
+            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
+        cache_read_tokens: shape
+            .cache_read
+            .iter()
+            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
+        cache_creation_tokens: shape
+            .cache_write
+            .iter()
+            .find_map(|k| opt_u64(resolve_path(usage, &[k]))),
+        total_tokens: opt_u64(&usage["total_tokens"]),
     }
 }
 
@@ -206,10 +181,11 @@ mod tests {
         );
         let delta = frame(r#"{"type":"message_delta","usage":{"output_tokens":7}}"#);
         let mut acc: Option<TurnUsage> = None;
-        if let Some(u) = usage_from_sse_frame("anthropic.messages", &start) {
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        if let Some(u) = usage_from_sse_frame(d, &start) {
             merge_usage(&mut acc, u);
         }
-        if let Some(u) = usage_from_sse_frame("anthropic.messages", &delta) {
+        if let Some(u) = usage_from_sse_frame(d, &delta) {
             merge_usage(&mut acc, u);
         }
         let u = acc.expect("usage accumulated");
@@ -230,7 +206,8 @@ mod tests {
         let done = frame(
             r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":11,"output_tokens":22,"total_tokens":33}}}"#,
         );
-        let u = usage_from_sse_frame("openai.responses", &done).expect("usage");
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
+        let u = usage_from_sse_frame(d, &done).expect("usage");
         assert_eq!(u.input_tokens, Some(11));
         assert_eq!(u.output_tokens, Some(22));
         assert_eq!(u.total_tokens, Some(33));
@@ -242,13 +219,14 @@ mod tests {
         let chunk = frame(
             r#"{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}"#,
         );
-        let u = usage_from_sse_frame("openai.chat_completions", &chunk).expect("usage");
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions").unwrap();
+        let u = usage_from_sse_frame(d, &chunk).expect("usage");
         assert_eq!(u.input_tokens, Some(8));
         assert_eq!(u.output_tokens, Some(2));
         assert_eq!(u.total_tokens, Some(10));
         // Frames without usage must not disturb the accumulator.
         assert!(usage_from_sse_frame(
-            "openai.chat_completions",
+            d,
             &frame(r#"{"choices":[{"delta":{"content":"x"}}]}"#)
         )
         .is_none());
@@ -259,18 +237,22 @@ mod tests {
         let anth = frame(
             r#"{"id":"m","usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}"#,
         );
-        let u = usage_from_nonstreaming("anthropic.messages", &anth).unwrap();
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        let u = usage_from_nonstreaming(d, &anth).unwrap();
         assert_eq!(u.input_tokens, Some(5));
         assert_eq!(u.cache_read_tokens, Some(3));
         let chat = frame(
             r#"{"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}"#,
         );
-        let u = usage_from_nonstreaming("openai.chat_completions", &chat).unwrap();
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions").unwrap();
+        let u = usage_from_nonstreaming(d, &chat)
+            .expect("chat nonstreaming usage should resolve from top-level usage object");
         assert_eq!(u.input_tokens, Some(8));
         assert_eq!(u.total_tokens, Some(10));
         // Missing usage object => None, never zeros.
         let bare = frame(r#"{"id":"m"}"#);
-        assert!(usage_from_nonstreaming("openai.responses", &bare).is_none());
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
+        assert!(usage_from_nonstreaming(d, &bare).is_none());
     }
 
     #[test]
