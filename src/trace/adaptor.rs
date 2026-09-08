@@ -164,6 +164,27 @@ pub fn merge_usage(acc: &mut Option<TurnUsage>, next: TurnUsage) {
     }
 }
 
+/// Build TurnUsage from an already-located usage object per protocol.
+pub fn usage_from_obj(protocol: &str, usage: &Value) -> TurnUsage {
+    match protocol {
+        "anthropic.messages" => TurnUsage {
+            input_tokens: opt_u64(&usage["input_tokens"]),
+            output_tokens: opt_u64(&usage["output_tokens"]),
+            cache_read_tokens: opt_u64(&usage["cache_read_input_tokens"]),
+            cache_creation_tokens: opt_u64(&usage["cache_creation_input_tokens"]),
+            total_tokens: None,
+        },
+        _ => TurnUsage {
+            input_tokens: opt_u64(&usage["input_tokens"]).or_else(|| opt_u64(&usage["prompt_tokens"])),
+            output_tokens: opt_u64(&usage["output_tokens"]).or_else(|| opt_u64(&usage["completion_tokens"])),
+            cache_read_tokens: opt_u64(&usage["input_tokens_details"]["cached_tokens"])
+                .or_else(|| opt_u64(&usage["prompt_tokens_details"]["cached_tokens"])),
+            cache_creation_tokens: opt_u64(&usage["input_tokens_details"]["cache_write_tokens"]),
+            total_tokens: opt_u64(&usage["total_tokens"]),
+        },
+    }
+}
+
 fn opt_u64(v: &Value) -> Option<u64> {
     v.as_u64()
 }

@@ -1,6 +1,7 @@
 pub mod adaptor;
 pub mod capture;
 pub mod descriptor;
+pub mod engine;
 pub mod export;
 pub mod prefix;
 pub mod session;

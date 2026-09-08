@@ -149,10 +149,7 @@ impl ProtocolDescriptor {
     }
 
     /// Session id from headers (lowercased names, in order).
-    pub fn session_from_headers<'a>(
-        &self,
-        get: &dyn Fn(&str) -> Option<String>,
-    ) -> Option<String> {
+    pub fn session_from_headers(&self, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
         for name in self.header_sources {
             if let Some(v) = get(name).filter(|s| !s.trim().is_empty()) {
                 return Some(v.trim().to_string());
@@ -517,7 +514,7 @@ mod tests {
         assert_eq!(d.body_sources[0].path, Some(&["conversation"] as &[&str]));
         assert!(d.body_sources[0].two_form, "conversation accepts object-id form");
         assert_eq!(
-            d.body_sources.iter().filter_map(|s| s.path).last(),
+            d.body_sources.iter().filter_map(|s| s.path).next_back(),
             Some(&["prompt_cache_key"] as &[&str])
         );
         assert_eq!(d.chain_sources, &["previous_response_id"]);
