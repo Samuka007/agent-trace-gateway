@@ -109,5 +109,8 @@ fn replay_calibration() {
     );
     // bare_item_request.json (openai.responses, no messages array) is the
     // single-turn sample.
-    assert_eq!(no_session, 1, "only the bare-item sample is session-less: {report}");
+    assert_eq!(
+        no_session, 1,
+        "only the bare-item sample is session-less: {report}"
+    );
 }
