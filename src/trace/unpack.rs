@@ -70,5 +70,3 @@ pub fn extract_messages(request_body: &[u8]) -> Option<Vec<serde_json::Value>> {
         .map(|arr| arr.to_vec())
         .filter(|v| !v.is_empty())
 }
-
-
