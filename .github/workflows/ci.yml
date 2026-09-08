@@ -118,4 +118,4 @@ jobs:
             echo ""
             echo "变更明细见 [CHANGELOG.md](https://github.com/Samuka007/agent-trace-gateway/blob/main/CHANGELOG.md)。"
           } > "$BODY"
-          gh release create "$TAG" --verify-tag --title "$TAG" --body-file "$BODY"
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$BODY"
