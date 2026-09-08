@@ -25,6 +25,9 @@ jobs:
           apt-get install -y --no-install-recommends cmake clang golang perl pkg-config git
           rm -rf /var/lib/apt/lists/*
 
+      - name: Add rustfmt/clippy components
+        run: rustup component add rustfmt clippy
+
       - name: rustfmt
         run: cargo fmt --check
 
