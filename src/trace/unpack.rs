@@ -23,12 +23,13 @@ pub fn reassemble_sse(
     Option<crate::trace::adaptor::TurnUsage>,
     Vec<crate::trace::store::ToolCall>,
     Option<String>,
+    u32,
 ) {
     let Some(d) = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol) else {
-        return (String::new(), None, Vec::new(), None);
+        return (String::new(), None, Vec::new(), None, 0);
     };
     let out = crate::trace::engine::stream_response(d, response_body);
-    (out.text, out.usage, out.tools, out.error)
+    (out.text, out.usage, out.tools, out.error, out.frame_errors)
 }
 
 /// Extract user input + final output from one non-streaming request/response

@@ -233,8 +233,21 @@ pub mod gateway_app {
             let raw_response = self.cap.bound(&ctx.resp_buf);
             if unpack::looks_like_sse(&ctx.resp_content_type) {
                 // One traversal of resp_buf fills text/usage/tool_calls/error.
-                let (final_output, usage, tool_calls, error) =
+                let (final_output, usage, tool_calls, error, frame_errors) =
                     unpack::reassemble_sse(protocol, &ctx.resp_buf);
+                if frame_errors > 0 {
+                    let total = self.failed_frames.fetch_add(
+                        u64::from(frame_errors),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    // Sampled: first occurrence + every 10th cumulative.
+                    if total == 0 || total % 10 == 0 {
+                        eprintln!(
+                            "ATG: SSE unpack frame_errors={frame_errors} cumulative={}",
+                            total + u64::from(frame_errors)
+                        );
+                    }
+                }
                 let user_input =
                     unpack::extract_user_input(protocol, &ctx.req_buf).unwrap_or_default();
                 ctx.end_ns = now_ns();
