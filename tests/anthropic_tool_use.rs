@@ -44,9 +44,7 @@ async fn anthropic_tool_use_stream_extraction() {
     let recs = records().await;
     let rec = recs
         .iter()
-        .find(|r| {
-            r["protocol"] == "anthropic.messages" && r["session_id"] == "anthropic-tooluse-1"
-        })
+        .find(|r| r["protocol"] == "anthropic.messages" && r["session_id"] == "anthropic-tooluse-1")
         .unwrap_or_else(|| panic!("tool_use record missing: {recs:?}"));
 
     // Structured tool_calls must carry the reassembled name + arguments.
@@ -55,15 +53,17 @@ async fn anthropic_tool_use_stream_extraction() {
         .unwrap_or_else(|| panic!("tool_calls array missing: {rec}"));
     assert_eq!(calls.len(), 1, "one tool_use block expected: {rec}");
     assert_eq!(calls[0]["name"], "get_weather");
-    let args: serde_json::Value =
-        serde_json::from_str(calls[0]["arguments"].as_str().unwrap())
-            .expect("reassembled arguments must be valid JSON");
+    let args: serde_json::Value = serde_json::from_str(calls[0]["arguments"].as_str().unwrap())
+        .expect("reassembled arguments must be valid JSON");
     assert_eq!(args["city"], "Tokyo");
 
     // final_output stays the reassembled text (no tool_use JSON dump needed
     // once the structured field carries it).
     assert!(
-        rec["final_output"].as_str().unwrap_or("").contains("weather-turn")
+        rec["final_output"]
+            .as_str()
+            .unwrap_or("")
+            .contains("weather-turn")
             || rec["final_output"].as_str().unwrap_or("").is_empty(),
         "final_output must not corrupt the tool call stream: {rec}"
     );

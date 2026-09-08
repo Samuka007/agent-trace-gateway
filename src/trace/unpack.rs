@@ -102,10 +102,10 @@ pub fn extract_sse_tool_calls(
         };
         if protocol == "openai.responses" {
             if v["type"] == "response.output_item.done" && v["item"]["type"] == "function_call" {
-            out.push(crate::trace::store::ToolCall {
-                name: v["item"]["name"].as_str().unwrap_or("").to_string(),
-                arguments: v["item"]["arguments"].as_str().unwrap_or("").to_string(),
-            });
+                out.push(crate::trace::store::ToolCall {
+                    name: v["item"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: v["item"]["arguments"].as_str().unwrap_or("").to_string(),
+                });
             }
             continue;
         }
@@ -113,7 +113,7 @@ pub fn extract_sse_tool_calls(
         // (carries the tool name); input_json_delta events append argument
         // fragments for the block's index; a new content_block_start or the
         // end of the stream closes the pending call.
-                match v["type"].as_str() {
+        match v["type"].as_str() {
             Some("content_block_start") if v["content_block"]["type"] == "tool_use" => {
                 if let Some((_, call)) = pending.take() {
                     out.push(call);
@@ -121,8 +121,11 @@ pub fn extract_sse_tool_calls(
                 pending = Some((
                     v["index"].as_u64().unwrap_or(0),
                     crate::trace::store::ToolCall {
-                        name: v["content_block"]["name"].as_str().unwrap_or("").to_string(),
-                            arguments: String::new(),
+                        name: v["content_block"]["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        arguments: String::new(),
                     },
                 ));
             }
@@ -132,11 +135,11 @@ pub fn extract_sse_tool_calls(
                     if *pending_index == index {
                         if let Some(d) = v["partial_json"].as_str() {
                             call.arguments.push_str(d);
-    }
+                        }
                     }
                 }
             }
-                    _ => {}
+            _ => {}
         }
     }
     if let Some((_, call)) = pending.take() {
