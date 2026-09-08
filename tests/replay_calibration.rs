@@ -92,7 +92,7 @@ fn replay_calibration() {
     std::fs::create_dir_all(manifest_dir().join("target")).unwrap();
     std::fs::write(&out_path, &report).unwrap();
 
-    // Assertions on the calibration matrix (real samples, 10 total):
+    // Assertions on the calibration matrix (real samples, 11 total):
     // claude_cli_request.json + claude_cli_tooluse_request.json +
     // codex_turn1.json + codex_real_toolturn.json carry explicit ids.
     assert_eq!(explicit, 4, "four explicit-id samples expected: {report}");
@@ -107,5 +107,7 @@ fn replay_calibration() {
         breakpoints, 0,
         "no breakpoint expected in fixture order: {report}"
     );
-    assert_eq!(no_session, 0, "every sample must be classifiable: {report}");
+    // bare_item_request.json (openai.responses, no messages array) is the
+    // single-turn sample.
+    assert_eq!(no_session, 1, "only the bare-item sample is session-less: {report}");
 }

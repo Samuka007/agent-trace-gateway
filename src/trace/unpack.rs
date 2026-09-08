@@ -264,7 +264,9 @@ pub fn extract_user_input(protocol: &str, request_body: &[u8]) -> Option<String>
 
 /// OpenAI Responses `input` is either a plain string or an array of items
 /// (messages with role + content blocks). For the array form, take the last
-/// user message's input_text blocks (real codex traffic format).
+/// user message's input_text blocks. Real clients (codex and probes) also
+/// send bare items without the `type` field — a missing type counts as a
+/// message item.
 fn responses_user_input(req: &serde_json::Value) -> Option<String> {
     if let Some(s) = req["input"].as_str() {
         return Some(s.to_string());
@@ -273,7 +275,18 @@ fn responses_user_input(req: &serde_json::Value) -> Option<String> {
     let user_item = items
         .iter()
         .rev()
-        .find(|i| i["type"] == "message" && i["role"] == "user")?;
+        .find(|i| {
+            i["type"]
+                .as_str()
+                .is_none_or(|t| t == "message")
+                && i["role"] == "user"
+        })?;
+    // Content is a string or a block array (input_text blocks).
+    if let Some(s) = user_item["content"].as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
     let blocks = user_item["content"].as_array()?;
     let mut out = Vec::new();
     for b in blocks {
