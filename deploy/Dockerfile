@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
+COPY crates ./crates
 COPY src ./src
 COPY tests ./tests
 COPY xtask ./xtask
