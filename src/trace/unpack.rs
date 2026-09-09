@@ -1,8 +1,8 @@
 //! Protocol unpacking: request/response bytes -> turn facts.
 //! Slice 2.1 scope: non-streaming user_input + final_output for the three
 //! model protocols. SSE/WS reassembly lands in later slices.
-use serde_json::Value;
 use crate::trace::store::TurnRecord;
+use serde_json::Value;
 
 pub fn detect_protocol(path: &str) -> Option<&'static str> {
     crate::trace::descriptor::ProtocolDescriptor::detect(path).map(|d| d.name)
@@ -61,7 +61,8 @@ pub fn session_from_parsed(
     header_get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
-    d.session_from_body(req).or_else(|| d.session_from_headers(header_get))
+    d.session_from_body(req)
+        .or_else(|| d.session_from_headers(header_get))
 }
 
 /// Extract only the user input from a request body (streaming path; response

@@ -223,9 +223,7 @@ pub mod gateway_app {
             let parsed_req: Option<serde_json::Value> = unpack::parse_body(&ctx.req_buf);
             let mut session_id = parsed_req
                 .as_ref()
-                .and_then(|req| {
-                    unpack::session_from_parsed(protocol, req, &header_get)
-                })
+                .and_then(|req| unpack::session_from_parsed(protocol, req, &header_get))
                 .unwrap_or_default();
             let mut breakpoint = false;
             if session_id.is_empty() {

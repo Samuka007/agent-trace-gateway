@@ -359,12 +359,11 @@ mod tests {
     /// concatenate.
     #[test]
     fn chat_tool_name_first_hit_wins() {
-        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(
-            "openai.chat_completions",
-        )
-        .unwrap();
-        let body = chat_chunk("read_file", r#"{"pa"#)
-            + &chat_chunk("read_file", r#"th":"/tmp/x"}"#);
+        let d =
+            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
+                .unwrap();
+        let body =
+            chat_chunk("read_file", r#"{"pa"#) + &chat_chunk("read_file", r#"th":"/tmp/x"}"#);
         let out = stream_response(d, body.as_bytes());
         assert_eq!(out.tools.len(), 1);
         assert_eq!(

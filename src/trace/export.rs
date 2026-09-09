@@ -576,16 +576,22 @@ mod tests {
         for _ in 0..5 {
             records.push(record("sess-1"));
         }
-        let payload: serde_json::Value =
-            serde_json::from_str(&build_otlp_json(&records)).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&records)).unwrap();
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();
-        let mut ids: Vec<&str> = spans.iter().map(|s| s["spanId"].as_str().unwrap()).collect();
+        let mut ids: Vec<&str> = spans
+            .iter()
+            .map(|s| s["spanId"].as_str().unwrap())
+            .collect();
         ids.sort();
         let before = ids.len();
         ids.dedup();
-        assert_eq!(ids.len(), before, "duplicate span ids across turns: {ids:?}");
+        assert_eq!(
+            ids.len(),
+            before,
+            "duplicate span ids across turns: {ids:?}"
+        );
         // Same request replayed N times -> N distinct trace ids.
         let mut trace_ids: Vec<String> = (0..5).map(|_| trace_id_for("sess-1")).collect();
         trace_ids.sort();
