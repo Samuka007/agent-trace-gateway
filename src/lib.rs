@@ -10,7 +10,6 @@ pub mod gateway_app {
     use pingora::proxy::{http_proxy, FailToProxy, ProxyHttp, Session};
     use pingora::upstreams::peer::HttpPeer;
 
-    use crate::trace::session;
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
 
@@ -220,7 +219,13 @@ pub mod gateway_app {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string)
             };
-            let mut session_id = session::extract_session_id(protocol, &ctx.req_buf, &header_get)
+            // Single parse of req_buf — shared with every extractor (C14).
+            let parsed_req: Option<serde_json::Value> = unpack::parse_body(&ctx.req_buf);
+            let mut session_id = parsed_req
+                .as_ref()
+                .and_then(|req| {
+                    unpack::session_from_parsed(protocol, req, &header_get)
+                })
                 .unwrap_or_default();
             let mut breakpoint = false;
             if session_id.is_empty() {
@@ -250,11 +255,27 @@ pub mod gateway_app {
                         );
                     }
                 }
-                let user_input =
-                    unpack::extract_user_input(protocol, &ctx.req_buf).unwrap_or_default();
-                let model_name =
-                    unpack::extract_model_name(protocol, &ctx.req_buf).unwrap_or_default();
-                let user_id = unpack::extract_end_user(protocol, &ctx.req_buf).unwrap_or_default();
+                let user_input = parsed_req
+                    .as_ref()
+                    .and_then(|req| {
+                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)
+                            .and_then(|d| d.user_input(req))
+                    })
+                    .unwrap_or_default();
+                let model_name = parsed_req
+                    .as_ref()
+                    .and_then(|req| {
+                        Some(req["model"].as_str().unwrap_or_default().to_string())
+                            .filter(|s| !s.is_empty())
+                    })
+                    .unwrap_or_default();
+                let user_id = parsed_req
+                    .as_ref()
+                    .and_then(|req| {
+                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)
+                            .and_then(|d| d.end_user(req))
+                    })
+                    .unwrap_or_default();
                 ctx.end_ns = now_ns();
                 self.push_record(crate::trace::store::TurnRecord {
                     protocol: protocol.to_string(),

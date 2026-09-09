@@ -23,6 +23,8 @@ pub const GENERATION_SPAN_NAME: &str = "agent.turn.generation";
 /// Official observation content keys (UI panel reads input/output).
 pub const ATTR_OBSERVATION_INPUT: &str = "langfuse.observation.input";
 pub const ATTR_OBSERVATION_OUTPUT: &str = "langfuse.observation.output";
+/// Trace-level end-user identity (copied to every span like session).
+pub const ATTR_USER_ID: &str = "langfuse.user.id";
 /// Generation-exclusive model name.
 pub const ATTR_MODEL_NAME: &str = "langfuse.observation.model.name";
 /// Ingestion version header (v4 = current Langfuse OTLP protocol).

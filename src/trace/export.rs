@@ -15,8 +15,8 @@ const GEN_SPAN_ID_SEED: &str = "\u{0}gen";
 
 use crate::trace::adaptor::{
     usage_details_json, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT, ATTR_OBSERVATION_OUTPUT,
-    ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME,
-    LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
+    ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID, GENERATION_SPAN_NAME,
+    LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
 };
 
 #[derive(Default)]
@@ -201,7 +201,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // every span in the trace (spec section 3).
             let mut attributes = Vec::new();
             if !r.session_id.is_empty() {
-                attributes.push(kv("session.id", &r.session_id));
+                // P2-14: single official key — dual spelling converged.
                 attributes.push(kv("langfuse.session.id", &r.session_id));
             }
             attributes.extend([
@@ -219,6 +219,9 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // empty strings are omitted.
             if !r.user_input.is_empty() {
                 attributes.push(kv(ATTR_OBSERVATION_INPUT, &r.user_input));
+            }
+            if !r.user_id.is_empty() {
+                attributes.push(kv(ATTR_USER_ID, &r.user_id));
             }
             if !r.final_output.is_empty() {
                 attributes.push(kv(ATTR_OBSERVATION_OUTPUT, &r.final_output));
@@ -262,8 +265,11 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
             ];
             if !r.session_id.is_empty() {
-                generation_attributes.push(kv("session.id", &r.session_id));
+                // P2-14: single official key (dual spelling converged).
                 generation_attributes.push(kv("langfuse.session.id", &r.session_id));
+            }
+            if !r.user_id.is_empty() {
+                generation_attributes.push(kv(ATTR_USER_ID, &r.user_id));
             }
             if !r.model_name.is_empty() {
                 generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
@@ -455,7 +461,8 @@ mod tests {
                 .and_then(|v| v["stringValue"].as_str())
                 .unwrap_or_else(|| panic!("{k} missing: {span}"))
         };
-        assert_eq!(value("session.id"), "sess-1");
+        // P2-14: single official key (dual spelling converged).
+        assert_eq!(value("langfuse.session.id"), "sess-1");
         assert_eq!(value("langfuse.session.id"), "sess-1");
         assert_eq!(value("langfuse.trace.name"), "agent.turn");
         assert_eq!(value("langfuse.observation.type"), "agent");

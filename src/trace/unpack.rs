@@ -1,6 +1,7 @@
 //! Protocol unpacking: request/response bytes -> turn facts.
 //! Slice 2.1 scope: non-streaming user_input + final_output for the three
 //! model protocols. SSE/WS reassembly lands in later slices.
+use serde_json::Value;
 use crate::trace::store::TurnRecord;
 
 pub fn detect_protocol(path: &str) -> Option<&'static str> {
@@ -44,6 +45,23 @@ pub fn unpack_nonstreaming(
     let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
     let resp: serde_json::Value = serde_json::from_slice(response_body).ok()?;
     crate::trace::engine::nonstreaming(d, &req, &resp)
+}
+
+/// Parse one request body once — the lib logging hook shares this parsed
+/// Value with every extractor (no repeated req_buf traversal, C14).
+pub fn parse_body(request_body: &[u8]) -> Option<serde_json::Value> {
+    serde_json::from_slice(request_body).ok()
+}
+
+/// &Value entry: session id from body sources, then the descriptor's header
+/// sources (body wins over header — same priority as the bytes entry).
+pub fn session_from_parsed(
+    protocol: &str,
+    req: &Value,
+    header_get: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    d.session_from_body(req).or_else(|| d.session_from_headers(header_get))
 }
 
 /// Extract only the user input from a request body (streaming path; response
