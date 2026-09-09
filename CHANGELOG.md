@@ -9,11 +9,44 @@
 
 ### 计划中（台账，未排期）
 
-- **bench 进 CI**：sse_bench 目前 debug 自 ignore、release 手跑（数字 372–787µs，已由 RustGate 本机独立复核真实）；挂进 CI release job 或 xtask 以防门禁失效
-- **openai.live descriptor 死数据**：sse_rules/usage_frames 无消费者（ws.rs 仍手写 match，正确但属第二协议分支点）——二选一：WsTurnState 接引擎（加 TurnMarkers/EndTurn action）或删表字段注明不可表
+- **bench 进 CI**：v0.3.0 已做（ci.yml release 模式真执行，门 264KB ≤700µs）
+- **openai.live descriptor 死数据**：v0.3.0 已做（ws.rs 并入 live.rs，TurnMarkers/sse_rules/usage_frames 全部被消费）
 - **error 标记扩展**：response.failed/incomplete 落 TurnRecord.error 且 agent+generation 双 span 挂 native status（v0.2.2 已做）；error.type 属性、非流式失败响应与 ws `response.done(status=failed)` 的标记仍待做
-- **SseAction::Usage 死载荷**：引擎忽略路径参数改 unit 变体（API 卫生）
-- **req_buf 多次 parse 收敛**：session/user_input/model/end_user 已收敛为单次 parse（v0.2.2 已做）；剩 extract_messages 在空 session 兜底路径的二次 parse
+- **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
+- **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
+
+## [0.3.0] - 2026-09-09
+
+三层架构 reconcile（model / protocol / harness / trace 四层，Cargo workspace 编译期强制依赖红线）+ harness 能力。API 语义兼容（OTLP wire 仅新增属性）；行为变更逐条枚举于各 commit message。
+
+### 结构（F1）
+
+- **Cargo workspace 四 crate**：`atg-model`（Langfuse 语义词汇 + TurnUsage/TurnRecord，零协议零 harness 知识）、`atg-protocol`（descriptor 拆 `anthropic/` + `openai/{responses,chat,live}` + mounts 挂载点常量 + session/usage 求值器）、`atg-harness`、gateway 主 crate（trace 编排 + src/engine.rs 薄解释器）。红线 = Cargo.toml 事实：protocol→model、harness→{protocol,model}、model 零内部依赖。
+- **harness/fixture_server.rs → tests/common/**：dev-only mock 移出产品二进制；hyper/tokio-tungstenite/futures-util/sha1_smol 等移入 [dev-dependencies]。
+
+### harness 层（F2，实证设计 §1/§2/§5）
+
+- **4 个 HarnessDescriptor**：claude-code（envelope ≥2.1.22x 主流 + legacy + object/metadata-envelope 兼容形态；legacy account 段 → `langfuse.trace.metadata.cc_account`）、codex（client_metadata x-codex-* 指纹 + installation-id enrich）、grok（x-grok-conv-id，仅 grok-route 合法）、opencode（UA + x-session-* affinity 家族，attribution 门控——未识别客户端不能凭这些 header 铸 session）。
+- **strength 有序识别**：指纹（3-5）先于 UA（4）；同级冲突记 `harness_candidates` 不强消歧；协议合法性是声明——越界命中记 `harness_protocol_anomaly`。**分类失败不降级 session 提取（红线）**：session body 规则按形态命中运行，与归因结果正交。
+- **session 迁移映射（§5）**：来源 4/5/6/7（CC user_id 形态）归 harness session 规则，1/2/3/8/10 留 protocol 表；anthropic body_sources 收缩为两个通用挂载点，有效优先级不变（E2E fixture 钉住）。
+- **wire**：`langfuse.trace.tags += harness:<name>`（两 span）+ `langfuse.trace.metadata.{harness,harness_candidates,harness_protocol_anomaly,cc_account,codex_installation}`；`/__atg/health` 新增 turns_total/turns_with_session/turns_with_harness 图景计数（分母过滤查询侧）。
+
+### 行为变更（用户裁定，F3/F6）
+
+- **chat 退出 prefix 指纹兜底**：chat_completions SDK 流量无会话语义，不再合成 session（`stitch_eligible=false` 数据驱动）；**链长 ≥2 才合成**——单消息无连续性证据；**合成 session 一律 `langfuse.trace.metadata.session_synthetic=true`** 且不入命中率分子。受影响测试（prefix_stitch/restart_stitch/replay_calibration/bounded_state）显式重写并注明裁定。
+- **流式 anthropic usage 缺口修复**：usage 采集从 Usage-action 门控改为帧驱动（usage_frames 逐帧）——此前流式 anthropic usage 从未累积（表无 Usage action），现在 message_start/message_delta 正确合并。SseAction::Usage 死载荷随之删除。
+
+### 修复与能力（F4/F5/F6）
+
+- **ws.rs 并入 protocol/openai/live.rs**：WsFrameParser/WsTurnState 与表同文件，事件名全部从表读取（TurnMarkers + sse_rules + usage_frames——死数据批评以消费偿还）；take_record 从 response.create 帧补 model/user。
+- **P1-8** `langfuse.observation.completion_start_time`（仅 generation，ISO 8601 Z 纳秒精度，std-only 实现）：取**线上首输出字节时刻**（首个 SSE body chunk / 每 turn 首个 WS 服务帧，Ctx 记录逐 turn 重置；非流式 = 请求起点）。
+- **P1-10** `langfuse.trace.metadata.{entry_protocol,client_model}`（两 span，键名与 modeltrace 线对齐）。
+- **F5 bench 进 CI**：`cargo test --release --test sse_bench` 真执行，门 264KB ≤700µs（实测 372-435µs，~2× 裕量）；fmt/clippy/test 升级 --all/--workspace 覆盖成员 crate。
+- **死代码清偿**：`trace_id_for`/`span_id_for` 空壳 shim、`SseAccum::finish`、`SseAction::Usage` 变体、`GEN_SPAN_ID_SEED`；`unpack::turn_facts` 请求侧单入口（一次描述符查找一次遍历，extract_messages &Value 化——req_buf 二次 parse 清零）。
+
+### 验证（CT104 @ 全部阶段绿）
+
+fmt --all --check + clippy --workspace --all-targets -D warnings clean；全量 67 测试绿（gateway 14 + harness 13 + model 2 + protocol 18 单测 + 20 集成）；release bench：SSE 264KB **435.6µs**（门 700µs）、anthropic 3000 帧/50 工具 2.82ms。
 
 ## [0.2.2] - 2026-09-09
 
