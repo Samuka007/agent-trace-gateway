@@ -240,11 +240,26 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 "endTimeUnixNano": r.end_ns.to_string(),
                 "attributes": attributes
             });
-            if let Some(err) = &r.error {
-                agent_span["status"] = serde_json::json!({
+            // AMB-7: native OTLP span status. Langfuse's native-OTLP
+            // property mapping derives each observation's `level` from
+            // `span.status.code` and its `statusMessage` from
+            // `span.status.message` (observation-level mapping table:
+            // level ← "Inferred from span.status.code", statusMessage ←
+            // "Inferred from span.status.message"). The mapping is
+            // per-span, so the generation child carries the same ERROR
+            // status as its agent parent — generation-filtered error views
+            // would otherwise lose errored turns. Native form chosen over
+            // a `langfuse.observation.status_message` attribute because
+            // the native block sets both level and message in one field.
+            let status = r.error.as_ref().map(|err| {
+                serde_json::json!({
+                    // OTLP StatusCode::Error — Langfuse maps to level=ERROR.
                     "code": 2,
                     "message": err
-                });
+                })
+            });
+            if let Some(s) = &status {
+                agent_span["status"] = s.clone();
             }
             // Generation child span: carries the usage_details (exclusive
             // buckets) — the only span type Langfuse reads usage from. The
@@ -275,7 +290,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
             }
             generation_attributes.extend(usage_attrs);
-            let generation_span = serde_json::json!({
+            let mut generation_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
                 "spanId": span_id_for(&r.session_id, GEN_SPAN_ID_SEED, &r.raw_request),
                 "parentSpanId": agent_span_id,
@@ -285,6 +300,11 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 "endTimeUnixNano": r.end_ns.to_string(),
                 "attributes": generation_attributes
             });
+            // AMB-7: same ERROR status as the agent span (mapping is
+            // per-span — see the status block above).
+            if let Some(s) = &status {
+                generation_span["status"] = s.clone();
+            }
             vec![agent_span, generation_span]
         })
         .collect();
@@ -572,6 +592,28 @@ mod tests {
         let before = trace_ids.len();
         trace_ids.dedup();
         assert_eq!(trace_ids.len(), before, "replayed turns shared a trace id");
+    }
+
+    /// AMB-7: an errored turn marks BOTH spans — Langfuse infers each
+    /// observation's level from its own span.status.code (per-span
+    /// mapping), so the generation child needs the ERROR status for
+    /// generation-scoped error views.
+    #[test]
+    fn errored_turn_marks_both_spans() {
+        let mut r = record("sess-err");
+        r.error = Some("response.failed: upstream 500".to_string());
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 2);
+        for s in spans {
+            assert_eq!(s["status"]["code"], 2, "both spans must be ERROR: {s}");
+            assert_eq!(
+                s["status"]["message"], "response.failed: upstream 500",
+                "statusMessage must carry the error text: {s}"
+            );
+        }
     }
 
     /// The otelcol OTLP/HTTP receiver only accepts POSTs on /v1/traces; a
