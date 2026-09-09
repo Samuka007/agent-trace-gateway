@@ -67,7 +67,7 @@ async fn start_stack_inner(extra: &[(&str, String)]) {
         .collect();
     let fixture_listen = format!("127.0.0.1:{}", fixture_port());
     stack_runtime().spawn(async move {
-        if let Err(e) = agent_trace_gateway::harness::fixture_server::serve(&fixture_listen).await {
+        if let Err(e) = super::fixture_server::serve(&fixture_listen).await {
             eprintln!("FIXTURE: server exited: {e}");
         }
     });

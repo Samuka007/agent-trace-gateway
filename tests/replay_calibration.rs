@@ -3,7 +3,8 @@
 // so LRU/TTL/breakpoint parameters are calibrated against real traffic.
 // Writes a human-readable report to target/replay_calibration_report.txt.
 // [tasks 3.4]
-use agent_trace_gateway::trace::{prefix::PrefixStitcher, session, unpack};
+use agent_trace_gateway::trace::{prefix::PrefixStitcher, unpack};
+use atg_protocol::session;
 use std::path::PathBuf;
 
 fn manifest_dir() -> PathBuf {

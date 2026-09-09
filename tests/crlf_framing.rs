@@ -1,8 +1,8 @@
 //! BLOCK-A regression tests: CRLF frame separation in sse_data_frames /
 //! stream_response (SSE-spec frames through a normalizing proxy).
 //! Adopted from the RustGate reviewer probe.
-use agent_trace_gateway::trace::descriptor::ProtocolDescriptor;
-use agent_trace_gateway::trace::engine::{sse_data_frames, stream_response};
+use agent_trace_gateway::engine::{sse_data_frames, stream_response};
+use atg_protocol::ProtocolDescriptor;
 
 #[test]
 fn crlf_multiframe_body_splits_into_frames() {

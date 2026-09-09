@@ -2,7 +2,7 @@
 //! Client->server frames are masked per RFC 6455; server frames are not.
 //! Turn boundaries come from protocol frames (response.create /
 //! response.completed), never from connection lifetime.
-use crate::trace::store::{ToolCall, TurnRecord};
+use atg_model::{ToolCall, TurnRecord};
 
 pub struct WsFrameParser {
     buf: Vec<u8>,
@@ -73,7 +73,7 @@ impl WsFrameParser {
 pub struct WsTurnState {
     pub input: Option<String>,
     pub session_id: String,
-    pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    pub usage: Option<atg_model::TurnUsage>,
     pub output: String,
     pub tool_calls: Vec<ToolCall>,
     /// Verbatim client frame payload of the turn (response.create).
@@ -137,8 +137,8 @@ impl WsTurnState {
             // response.usage (input_token_details.cached_tokens nested).
             Some("response.done") => {
                 if !v["response"]["usage"].is_null() {
-                    self.usage = Some(crate::trace::adaptor::usage_from_obj(
-                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.live")
+                    self.usage = Some(atg_protocol::usage::usage_from_obj(
+                        atg_protocol::ProtocolDescriptor::detect_by_name("openai.live")
                             .expect("openai.live descriptor"),
                         &v["response"]["usage"],
                     ));

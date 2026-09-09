@@ -1,11 +1,19 @@
 //! Protocol descriptors: compile-time data tables describing each wire
-//! protocol, plus the single interpretation engine. Adding a provider means
-//! adding a descriptor file and one DESCRIPTORS entry — unpack/session/
-//! adaptor/lib never grow protocol branches again.
+//! protocol, plus the generic table evaluators. Adding a provider means
+//! adding a descriptor file under `anthropic/` or `openai/` and one
+//! DESCRIPTORS entry — engine/session/usage evaluators never grow protocol
+//! branches again.
 //!
 //! Structure mirrors the design doc (`.tmp-atg-protocol-descriptor-design.md`);
 //! every table field is asserted against official docs in `mod tests`.
+//! Dependency direction (workspace red line): atg-protocol → atg-model only.
 use serde_json::Value;
+
+pub mod anthropic;
+pub mod mounts;
+pub mod openai;
+pub mod session;
+pub mod usage;
 
 /// Where a session/identity fact lives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,6 +152,14 @@ pub struct BodySource {
     pub transform: Option<fn(&str) -> Option<String>>,
 }
 
+/// The registered protocol tables. A new provider appends one line here.
+pub static DESCRIPTORS: &[&ProtocolDescriptor] = &[
+    &anthropic::DESCRIPTOR,
+    &openai::responses::DESCRIPTOR,
+    &openai::chat::DESCRIPTOR,
+    &openai::live::DESCRIPTOR,
+];
+
 impl ProtocolDescriptor {
     /// The descriptor whose path prefix matches, longest first.
     pub fn detect(path: &str) -> Option<&'static ProtocolDescriptor> {
@@ -278,379 +294,10 @@ pub fn content_text(content: &Value) -> Option<String> {
     None
 }
 
-pub mod live {
-    use super::*;
-
-    pub static DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
-        name: "openai.live",
-        path_prefixes: &[],
-        messages_path: None,
-        input_shape: InputShape::Responses,
-        user_input: None,
-        final_output: None,
-        // WS session: client_metadata.session_id is a sub2api injection
-        // convention (not OpenAI Realtime spec); kept lowest priority.
-        body_sources: &[
-            BodySource {
-                path: &["metadata", "session_id"],
-                two_form: false,
-                transform: None,
-            },
-            BodySource {
-                path: &["client_metadata", "session_id"],
-                two_form: false,
-                transform: None,
-            },
-        ],
-        header_sources: &["session-id", "session_id", "x-grok-conv-id"],
-        chain_sources: &[],
-        user_sources: &["safety_identifier", "user"],
-        sse_rules: &[
-            SseRule {
-                on: "response.audio_transcript.delta",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::Text(&["delta"]),
-            },
-            SseRule {
-                on: "response.output_item.done",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::ToolDone,
-            },
-            SseRule {
-                on: "response.done",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::Usage(&["response", "usage"]),
-            },
-        ],
-        tool_calls: ToolCallStrategy::DoneItems,
-        usage_frames: &[UsageFrame {
-            on_event: Some("response.done"),
-            obj_path: &["response", "usage"],
-        }],
-        usage_shape: UsageShape {
-            input: &[&["input_tokens"]],
-            output: &[&["output_tokens"]],
-            cache_read: &[&["input_token_details", "cached_tokens"]],
-            cache_write: &[&["input_token_details", "cache_write_tokens"]],
-        },
-        usage_inclusion: TokenInclusion::Inclusive,
-        final_output_path: &["output"],
-    };
-}
-
-pub static DESCRIPTORS: &[&ProtocolDescriptor] = &[
-    &anthropic::DESCRIPTOR,
-    &responses::DESCRIPTOR,
-    &chat::DESCRIPTOR,
-    &live::DESCRIPTOR,
-];
-
 /// Namespaces the borrowed prompt_cache_key affinity so it can never collide
 /// with an explicit session id (`pck:` prefix per the design doc).
-fn pck_namespace(v: &str) -> Option<String> {
+pub(crate) fn pck_namespace(v: &str) -> Option<String> {
     format!("pck:{v}").into()
-}
-
-/// user_id transform for the anthropic table row: runs the three-form reader
-/// (JSON envelope / legacy composite / object) on the raw string.
-fn user_id_transform(v: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(v).unwrap_or(Value::String(v.to_string()));
-    crate::trace::session::metadata_user_id_session(&parsed)
-}
-
-pub mod anthropic {
-    use super::*;
-
-    pub static DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
-        name: "anthropic.messages",
-        path_prefixes: &["/v1/messages"],
-        messages_path: Some("messages"),
-        input_shape: InputShape::Messages,
-        user_input: None,
-        final_output: None,
-        // Body: metadata.session_id (client convention) then metadata.user_id
-        // legacy composite (Claude Code convention, transform extracts uuid).
-        body_sources: &[
-            // Shared v0.2.0 top-level sources (modeltrace nine-source port).
-            BodySource {
-                path: &["session_id"],
-                two_form: false,
-                transform: None,
-            },
-            // anthropic-specific: metadata.session_id (client convention),
-            // then metadata.user_id — plain JSON envelope {session_id}, or
-            // the Claude Code legacy composite (transform extracts uuid).
-            BodySource {
-                path: &["metadata", "session_id"],
-                two_form: false,
-                transform: None,
-            },
-            BodySource {
-                path: &["metadata", "user_id"],
-                two_form: false,
-                transform: Some(user_id_transform),
-            },
-            // metadata itself as a JSON envelope string {"user_id": ...} —
-            // a real Claude Code traffic form (v0.2.0 covered it).
-            BodySource {
-                path: &["metadata"],
-                two_form: false,
-                transform: Some(crate::trace::session::metadata_envelope_transform),
-            },
-        ],
-        header_sources: &["x-claude-code-session-id", "session-id", "session_id"],
-        chain_sources: &[],
-        user_sources: &["metadata", "user_id"],
-        sse_rules: &[
-            SseRule {
-                on: "content_block_delta",
-                data_type: None,
-                delta_type: Some("text_delta"),
-                action: SseAction::Text(&["delta", "text"]),
-            },
-            SseRule {
-                on: "content_block_start",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::ToolOpen,
-            },
-            SseRule {
-                on: "content_block_delta",
-                data_type: None,
-                delta_type: Some("input_json_delta"),
-                action: SseAction::ToolArg,
-            },
-            SseRule {
-                on: "content_block_stop",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::ToolClose,
-            },
-        ],
-        tool_calls: ToolCallStrategy::DeltaAssembly,
-        usage_frames: &[
-            UsageFrame {
-                on_event: Some("message_start"),
-                obj_path: &["message", "usage"],
-            },
-            UsageFrame {
-                on_event: Some("message_delta"),
-                obj_path: &["usage"],
-            },
-        ],
-        usage_shape: UsageShape {
-            input: &[&["input_tokens"]],
-            output: &[&["output_tokens"]],
-            cache_read: &[&["cache_read_input_tokens"]],
-            cache_write: &[&["cache_creation_input_tokens"]],
-        },
-        usage_inclusion: TokenInclusion::Exclusive,
-        final_output_path: &["content"],
-    };
-}
-
-pub mod responses {
-    use super::*;
-
-    pub static DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
-        name: "openai.responses",
-        path_prefixes: &["/v1/responses", "/compatible-mode/v1/responses"],
-        messages_path: None,
-        input_shape: InputShape::Responses,
-        user_input: Some(responses_user_input),
-        final_output: Some(responses_final_output),
-        body_sources: &[
-            BodySource {
-                path: &["session_id"],
-                two_form: false,
-                transform: None,
-            },
-            // Strongest explicit root: conversation (string or {id}).
-            BodySource {
-                path: &["conversation"],
-                two_form: true,
-                transform: None,
-            },
-            BodySource {
-                path: &["metadata", "session_id"],
-                two_form: false,
-                transform: None,
-            },
-            BodySource {
-                path: &["client_metadata", "session_id"],
-                two_form: false,
-                transform: None,
-            },
-            // prompt_cache_key: official cache-routing key, borrowed as a
-            // stable affinity (namespaced `pck:`) when no stronger source.
-            BodySource {
-                path: &["prompt_cache_key"],
-                two_form: false,
-                transform: Some(pck_namespace),
-            },
-        ],
-        header_sources: &[
-            "session-id",
-            "session_id",
-            "x-claude-code-session-id",
-            "x-grok-conv-id",
-        ],
-        chain_sources: &["previous_response_id"],
-        user_sources: &["safety_identifier", "user"],
-        sse_rules: &[
-            SseRule {
-                on: "response.output_text.delta",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::Text(&["delta"]),
-            },
-            SseRule {
-                on: "response.output_item.done",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::ToolDone,
-            },
-            SseRule {
-                on: "response.completed",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::Usage(&["response", "usage"]),
-            },
-        ],
-        tool_calls: ToolCallStrategy::DoneItems,
-        usage_frames: &[UsageFrame {
-            on_event: Some("response.completed"),
-            obj_path: &["response", "usage"],
-        }],
-        usage_shape: UsageShape {
-            input: &[&["input_tokens"]],
-            output: &[&["output_tokens"]],
-            cache_read: &[&["input_tokens_details", "cached_tokens"]],
-            cache_write: &[&["input_tokens_details", "cache_write_tokens"]],
-        },
-        usage_inclusion: TokenInclusion::Inclusive,
-        final_output_path: &["output"],
-    };
-}
-
-pub mod chat {
-    use super::*;
-
-    pub static DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
-        name: "openai.chat_completions",
-        path_prefixes: &["/v1/chat", "/compatible-mode/v1/chat"],
-        messages_path: Some("messages"),
-        input_shape: InputShape::Messages,
-        user_input: None,
-        final_output: None,
-        body_sources: &[
-            BodySource {
-                path: &["session_id"],
-                two_form: false,
-                transform: None,
-            },
-            BodySource {
-                path: &["metadata", "session_id"],
-                two_form: false,
-                transform: None,
-            },
-            BodySource {
-                path: &["prompt_cache_key"],
-                two_form: false,
-                transform: Some(pck_namespace),
-            },
-        ],
-        header_sources: &["session-id", "session_id", "x-claude-code-session-id"],
-        chain_sources: &[],
-        user_sources: &["safety_identifier", "user"],
-        sse_rules: &[
-            SseRule {
-                on: "*",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::Text(&["choices", "0", "delta", "content"]),
-            },
-            SseRule {
-                on: "*",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::ToolChunk,
-            },
-            SseRule {
-                on: "*",
-                data_type: None,
-                delta_type: None,
-                action: SseAction::Usage(&["usage"]),
-            },
-        ],
-        tool_calls: ToolCallStrategy::ChunkedToolCalls,
-        usage_frames: &[UsageFrame {
-            on_event: None,
-            obj_path: &["usage"],
-        }],
-        usage_shape: UsageShape {
-            input: &[&["prompt_tokens"]],
-            output: &[&["completion_tokens"]],
-            cache_read: &[&["prompt_tokens_details", "cached_tokens"]],
-            cache_write: &[&["prompt_tokens_details", "cache_write_tokens"]],
-        },
-        usage_inclusion: TokenInclusion::Inclusive,
-        final_output_path: &["choices", "0", "message", "content"],
-    };
-}
-
-/// responses input reader (named fn referenced by the descriptor): bare items
-/// (no `type`) count as message items; content is string or input_text blocks.
-fn responses_user_input(input: &Value) -> Option<String> {
-    if let Some(s) = input.as_str() {
-        return Some(s.to_string()).filter(|s| !s.is_empty());
-    }
-    let items = input.as_array()?;
-    let user_item = items
-        .iter()
-        .rev()
-        .find(|i| i["type"].as_str().is_none_or(|t| t == "message") && i["role"] == "user")?;
-    if let Some(s) = user_item["content"].as_str() {
-        return Some(s.to_string()).filter(|s| !s.is_empty());
-    }
-    let blocks = user_item["content"].as_array()?;
-    let mut out = Vec::new();
-    for b in blocks {
-        if b["type"] == "input_text" {
-            if let Some(t) = b["text"].as_str() {
-                out.push(t.to_string());
-            }
-        }
-    }
-    if out.is_empty() {
-        return None;
-    }
-    Some(out.join("\n"))
-}
-
-/// responses final output: output[] items each with content[] of
-/// output_text blocks (join all text across all items).
-pub fn responses_final_output(resp: &Value) -> Option<String> {
-    let items = resp["output"].as_array()?;
-    let mut out = Vec::new();
-    for item in items {
-        if let Some(blocks) = item["content"].as_array() {
-            for b in blocks {
-                if b["type"] == "output_text" {
-                    if let Some(text) = b["text"].as_str() {
-                        out.push(text.to_string());
-                    }
-                }
-            }
-        }
-    }
-    if out.is_empty() {
-        return None;
-    }
-    Some(out.join("\n"))
 }
 
 #[cfg(test)]
@@ -711,7 +358,7 @@ mod tests {
     /// input (cached_tokens included) per official reference.
     #[test]
     fn responses_usage_frame_matches_official_docs() {
-        let d = &responses::DESCRIPTOR;
+        let d = &openai::responses::DESCRIPTOR;
         assert_eq!(d.usage_frames.len(), 1);
         assert_eq!(d.usage_frames[0].on_event, Some("response.completed"));
         assert_eq!(d.usage_frames[0].obj_path, &["response", "usage"]);
@@ -723,7 +370,7 @@ mod tests {
     /// frame; tool calls assembled from delta.tool_calls.
     #[test]
     fn chat_descriptor_matches_official_docs() {
-        let d = &chat::DESCRIPTOR;
+        let d = &openai::chat::DESCRIPTOR;
         assert!(d.sse_rules.iter().all(|r| r.on == "*"));
         assert_eq!(d.tool_calls, ToolCallStrategy::ChunkedToolCalls);
         assert_eq!(d.usage_inclusion, TokenInclusion::Inclusive);
@@ -744,7 +391,7 @@ mod tests {
             "legacy transform hook"
         );
         assert_eq!(d.body_sources[3].path, &["metadata"]);
-        assert_eq!(d.header_sources[0], "x-claude-code-session-id");
+        assert_eq!(d.header_sources[0], mounts::HDR_CC_SESSION);
         assert!(
             d.chain_sources.is_empty(),
             "anthropic has no chain primitive"
@@ -755,7 +402,7 @@ mod tests {
     /// client_metadata.session_id > prompt_cache_key; chain = previous_response_id.
     #[test]
     fn responses_session_layering() {
-        let d = &responses::DESCRIPTOR;
+        let d = &openai::responses::DESCRIPTOR;
         assert_eq!(d.body_sources[1].path, &["conversation"]);
         assert_eq!(d.body_sources[0].path, &["session_id"]);
         assert!(
@@ -769,7 +416,7 @@ mod tests {
 
     #[test]
     fn conversation_two_form_reading() {
-        let d = &responses::DESCRIPTOR;
+        let d = &openai::responses::DESCRIPTOR;
         assert_eq!(
             d.session_from_body(&value(r#"{"conversation":"conv_123"}"#)),
             Some("conv_123".to_string())
@@ -787,7 +434,7 @@ mod tests {
     fn bare_items_count_as_messages() {
         let body =
             value(r#"{"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#);
-        let d = &responses::DESCRIPTOR;
+        let d = &openai::responses::DESCRIPTOR;
         assert_eq!(
             d.user_input.unwrap()(&body["input"]),
             Some("hi".to_string())

@@ -3,6 +3,11 @@
 // stitching — no errors either way.
 // [Requirement: 会话串联；Scenario: 网关重启后的串联状态]
 
+// Only the fixture server — this test embeds its own gateway stack (below)
+// and must not pull the shared stack helpers (dead_code under clippy).
+#[path = "common/fixture_server.rs"]
+mod fixture_server;
+
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
@@ -44,7 +49,7 @@ async fn restart_stitch_state() {
     // Instance 1.
     tokio::spawn(async move {
         let listen = format!("127.0.0.1:{FIXTURE_PORT}");
-        let _ = agent_trace_gateway::harness::fixture_server::serve(&listen).await;
+        let _ = fixture_server::serve(&listen).await;
     });
     let gw1 = format!("127.0.0.1:{GW1}");
     let up1 = format!("127.0.0.1:{FIXTURE_PORT}");

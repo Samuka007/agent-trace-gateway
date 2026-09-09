@@ -1,0 +1,8 @@
+[package]
+name = "atg-protocol"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+atg-model = { path = "../atg-model" }
+serde_json = "1"

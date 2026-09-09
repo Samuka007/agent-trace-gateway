@@ -2,10 +2,8 @@
 //! and produces turn facts. This is the only place allowed to branch on
 //! wire-format knowledge; protocol details themselves live in the const
 //! descriptor tables.
-use crate::trace::descriptor::{
-    resolve_path, ProtocolDescriptor, SseAction, SseRule, ToolCallStrategy,
-};
-use crate::trace::store::ToolCall;
+use atg_model::ToolCall;
+use atg_protocol::{resolve_path, ProtocolDescriptor, SseAction, SseRule, ToolCallStrategy};
 
 /// Split an SSE body into `data:` payloads per the SSE spec. Line-driven
 /// frame separation works identically for LF-LF and CRLF-CRLF delimiters
@@ -64,7 +62,7 @@ fn collect_frames<'a>(text: &'a str) -> Vec<std::borrow::Cow<'a, str>> {
 #[derive(Default)]
 pub struct SseAccum {
     pub text: String,
-    pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    pub usage: Option<atg_model::TurnUsage>,
     /// Data frames that failed to parse as JSON (observability counter).
     pub frame_errors: u32,
     /// Terminal-frame error marker (response.failed / response.incomplete /
@@ -78,7 +76,7 @@ pub struct SseAccum {
 /// Full result of one streaming pass.
 pub struct SseOutcome {
     pub text: String,
-    pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    pub usage: Option<atg_model::TurnUsage>,
     pub tools: Vec<ToolCall>,
     pub frame_errors: u32,
     pub error: Option<String>,
@@ -149,9 +147,9 @@ pub fn apply_sse_rule(
                     if event_matches {
                         let usage = resolve_path(v, uf.obj_path);
                         if !usage.is_null() {
-                            crate::trace::adaptor::merge_usage(
+                            atg_model::merge_usage(
                                 &mut acc.usage,
-                                crate::trace::adaptor::usage_from_obj(d, usage),
+                                atg_protocol::usage::usage_from_obj(d, usage),
                             );
                         }
                     }
@@ -317,13 +315,13 @@ pub fn nonstreaming(
     d: &ProtocolDescriptor,
     req: &serde_json::Value,
     resp: &serde_json::Value,
-) -> Option<crate::trace::store::TurnRecord> {
+) -> Option<atg_model::TurnRecord> {
     let user_input = d.user_input(req)?;
     let final_output = d.final_output(resp).unwrap_or_default();
-    let usage = crate::trace::adaptor::usage_from_nonstreaming(d, resp);
+    let usage = atg_protocol::usage::usage_from_nonstreaming(d, resp);
     let model_name = req["model"].as_str().unwrap_or_default().to_string();
     let user_id = d.end_user(req).unwrap_or_default();
-    Some(crate::trace::store::TurnRecord {
+    Some(atg_model::TurnRecord {
         protocol: d.name.to_string(),
         user_input,
         final_output,
@@ -360,8 +358,7 @@ mod tests {
     #[test]
     fn chat_tool_name_first_hit_wins() {
         let d =
-            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
-                .unwrap();
+            atg_protocol::ProtocolDescriptor::detect_by_name("openai.chat_completions").unwrap();
         let body =
             chat_chunk("read_file", r#"{"pa"#) + &chat_chunk("read_file", r#"th":"/tmp/x"}"#);
         let out = stream_response(d, body.as_bytes());

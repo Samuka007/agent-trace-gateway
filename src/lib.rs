@@ -1,5 +1,5 @@
-// agent-trace-gateway library: harness modules + gateway app.
-pub mod harness;
+// agent-trace-gateway library: protocol interpretation + gateway app.
+pub mod engine;
 pub mod trace;
 
 pub mod gateway_app {
@@ -25,7 +25,7 @@ pub mod gateway_app {
     }
 
     impl Gateway {
-        fn push_record(&self, record: crate::trace::store::TurnRecord) {
+        fn push_record(&self, record: atg_model::TurnRecord) {
             self.store.push(record.clone());
             self.exporter.submit(&record);
         }
@@ -256,7 +256,7 @@ pub mod gateway_app {
                 let user_input = parsed_req
                     .as_ref()
                     .and_then(|req| {
-                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)
+                        atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
                             .and_then(|d| d.user_input(req))
                     })
                     .unwrap_or_default();
@@ -270,12 +270,12 @@ pub mod gateway_app {
                 let user_id = parsed_req
                     .as_ref()
                     .and_then(|req| {
-                        crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)
+                        atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
                             .and_then(|d| d.end_user(req))
                     })
                     .unwrap_or_default();
                 ctx.end_ns = now_ns();
-                self.push_record(crate::trace::store::TurnRecord {
+                self.push_record(atg_model::TurnRecord {
                     protocol: protocol.to_string(),
                     session_id,
                     user_input,

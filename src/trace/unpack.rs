@@ -1,11 +1,11 @@
 //! Protocol unpacking: request/response bytes -> turn facts.
 //! Slice 2.1 scope: non-streaming user_input + final_output for the three
 //! model protocols. SSE/WS reassembly lands in later slices.
-use crate::trace::store::TurnRecord;
+use atg_model::TurnRecord;
 use serde_json::Value;
 
 pub fn detect_protocol(path: &str) -> Option<&'static str> {
-    crate::trace::descriptor::ProtocolDescriptor::detect(path).map(|d| d.name)
+    atg_protocol::ProtocolDescriptor::detect(path).map(|d| d.name)
 }
 
 /// Detect whether a captured response is an SSE stream (by content type).
@@ -21,15 +21,15 @@ pub fn reassemble_sse(
     response_body: &[u8],
 ) -> (
     String,
-    Option<crate::trace::adaptor::TurnUsage>,
-    Vec<crate::trace::store::ToolCall>,
+    Option<atg_model::TurnUsage>,
+    Vec<atg_model::ToolCall>,
     Option<String>,
     u32,
 ) {
-    let Some(d) = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol) else {
+    let Some(d) = atg_protocol::ProtocolDescriptor::detect_by_name(protocol) else {
         return (String::new(), None, Vec::new(), None, 0);
     };
-    let out = crate::trace::engine::stream_response(d, response_body);
+    let out = crate::engine::stream_response(d, response_body);
     (out.text, out.usage, out.tools, out.error, out.frame_errors)
 }
 
@@ -41,10 +41,10 @@ pub fn unpack_nonstreaming(
     request_body: &[u8],
     response_body: &[u8],
 ) -> Option<TurnRecord> {
-    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let d = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)?;
     let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
     let resp: serde_json::Value = serde_json::from_slice(response_body).ok()?;
-    crate::trace::engine::nonstreaming(d, &req, &resp)
+    crate::engine::nonstreaming(d, &req, &resp)
 }
 
 /// Parse one request body once — the lib logging hook shares this parsed
@@ -60,7 +60,7 @@ pub fn session_from_parsed(
     req: &Value,
     header_get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let d = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)?;
     d.session_from_body(req)
         .or_else(|| d.session_from_headers(header_get))
 }
@@ -68,7 +68,7 @@ pub fn session_from_parsed(
 /// Extract only the user input from a request body (streaming path; response
 /// reassembly is handled separately).
 pub fn extract_user_input(protocol: &str, request_body: &[u8]) -> Option<String> {
-    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let d = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)?;
     let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
     d.user_input(&req)
 }

@@ -1,8 +1,8 @@
 //! Descriptor-engine micro-benchmarks (std Instant, 3 rounds, median) —
 //! performance gate for the protocol-descriptor rewrite. Run:
 //! `cargo test --test sse_bench --release -- --nocapture`
-use agent_trace_gateway::trace::descriptor::ProtocolDescriptor;
-use agent_trace_gateway::trace::engine::stream_response;
+use agent_trace_gateway::engine::stream_response;
+use atg_protocol::ProtocolDescriptor;
 use std::time::Instant;
 
 fn make_sse_body(n_frames: usize, text_per_frame: usize) -> Vec<u8> {

@@ -1,7 +1,7 @@
 //! OTLP/HTTP export of turn records (JSON encoding) to the configured
 //! endpoint. Fail-open by design: bounded queue, drop on overflow or endpoint
 //! failure, health counters observable — business traffic is never blocked.
-use crate::trace::store::TurnRecord;
+use atg_model::TurnRecord;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +13,7 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 /// Distinct span-id derivation seed for the generation child span.
 const GEN_SPAN_ID_SEED: &str = "\u{0}gen";
 
-use crate::trace::adaptor::{
+use atg_model::{
     usage_details_json, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT, ATTR_OBSERVATION_OUTPUT,
     ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID, GENERATION_SPAN_NAME,
     LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
@@ -127,8 +127,8 @@ async fn flush_batch(
         .post(normalize_endpoint_path(endpoint))
         .header("content-type", "application/json")
         .header(
-            crate::trace::adaptor::INGESTION_VERSION_HEADER,
-            crate::trace::adaptor::INGESTION_VERSION,
+            atg_model::INGESTION_VERSION_HEADER,
+            atg_model::INGESTION_VERSION,
         );
     if let Some(auth) = auth_header {
         req = req.header("authorization", auth);
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn generation_span_carries_usage_details() {
         let mut r = record("sess-usage");
-        r.usage = Some(crate::trace::adaptor::TurnUsage {
+        r.usage = Some(atg_model::TurnUsage {
             input_tokens: Some(12),
             output_tokens: Some(7),
             cache_read_tokens: Some(3),

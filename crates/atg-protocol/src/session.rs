@@ -86,7 +86,7 @@ pub fn extract_session_id(
 }
 
 fn extract_body_session(protocol: &str, request_body: &[u8]) -> Option<String> {
-    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let d = crate::ProtocolDescriptor::detect_by_name(protocol)?;
     let Ok(v) = serde_json::from_slice::<Value>(request_body) else {
         return None;
     };
@@ -97,7 +97,7 @@ fn extract_header_session(
     protocol: &str,
     header_get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let d = crate::ProtocolDescriptor::detect_by_name(protocol)?;
     d.session_from_headers(header_get)
 }
 
