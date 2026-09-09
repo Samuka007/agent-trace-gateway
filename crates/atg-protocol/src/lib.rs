@@ -378,19 +378,17 @@ mod tests {
     }
 
     /// anthropic session sources: body metadata.session_id, then
-    /// metadata.user_id (legacy transform); headers CC-first.
+    /// harness rules (CC user_id shapes — atg-harness); headers CC-first.
     #[test]
     fn anthropic_session_layering() {
         let d = &anthropic::DESCRIPTOR;
-        assert_eq!(d.body_sources.len(), 4);
+        assert_eq!(d.body_sources.len(), 2);
         assert_eq!(d.body_sources[0].path, &["session_id"]);
         assert_eq!(d.body_sources[1].path, &["metadata", "session_id"]);
-        assert_eq!(d.body_sources[2].path, &["metadata", "user_id"]);
         assert!(
-            d.body_sources[2].transform.is_some(),
-            "legacy transform hook"
+            d.body_sources.iter().all(|s| s.transform.is_none()),
+            "generic mounts carry no harness transforms (F2)"
         );
-        assert_eq!(d.body_sources[3].path, &["metadata"]);
         assert_eq!(d.header_sources[0], mounts::HDR_CC_SESSION);
         assert!(
             d.chain_sources.is_empty(),

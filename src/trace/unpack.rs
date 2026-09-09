@@ -53,16 +53,25 @@ pub fn parse_body(request_body: &[u8]) -> Option<serde_json::Value> {
     serde_json::from_slice(request_body).ok()
 }
 
-/// &Value entry: session id from body sources, then the descriptor's header
-/// sources (body wins over header — same priority as the bytes entry).
-pub fn session_from_parsed(
+/// F2 session pipeline (single parse — the Value is shared):
+/// 1. protocol body mounts (generic table rows),
+/// 2. harness body shapes (claude-code envelope/legacy — shape-gated, so
+///    attribution failure never degrades extraction),
+/// 3. protocol header mounts,
+/// 4. harness header mounts (opencode x-session-* family, attribution-gated).
+///
+/// Same effective priority as the pre-v0.3.0 anthropic table rows.
+pub fn resolve_session(
     protocol: &str,
     req: &Value,
     header_get: &dyn Fn(&str) -> Option<String>,
+    facts: &atg_harness::HarnessFacts,
 ) -> Option<String> {
     let d = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)?;
     d.session_from_body(req)
+        .or_else(|| atg_harness::session_from_body(facts, req))
         .or_else(|| d.session_from_headers(header_get))
+        .or_else(|| atg_harness::session_from_headers(facts, header_get))
 }
 
 /// Extract only the user input from a request body (streaming path; response

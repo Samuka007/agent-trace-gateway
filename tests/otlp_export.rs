@@ -81,6 +81,10 @@ async fn otlp_export() {
     let req = Request::post(format!("http://127.0.0.1:{gw}/v1/chat"))
         .header("content-type", "application/json")
         .header("x-claude-code-session-id", "otlp-session-1")
+        // F2: a claude-cli UA attributes the turn to the claude-code
+        // harness (on chat protocol — a declared-illegal pair, so the
+        // anomaly metadata must be recorded alongside the tag).
+        .header("user-agent", "claude-cli/2.1.230")
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap();
     let resp = client().request(req).await.expect("request");
@@ -152,6 +156,28 @@ async fn otlp_export() {
         attr("langfuse.session.id"),
         "otlp-session-1",
         "session attribute (official key, P2-14 convergence): {attrs:?}"
+    );
+    // F2 harness wire: tag + metadata, propagated to the generation span.
+    assert_eq!(
+        attr("langfuse.trace.metadata.harness"),
+        "claude-code",
+        "harness attribution metadata: {attrs:?}"
+    );
+    assert_eq!(
+        attr("langfuse.trace.metadata.harness_protocol_anomaly"),
+        "true",
+        "claude-code on chat protocol is a declared-illegal pair: {attrs:?}"
+    );
+    let tag_values = attrs
+        .iter()
+        .find(|a| a["key"] == "langfuse.trace.tags")
+        .and_then(|a| a["value"]["arrayValue"]["values"].as_array())
+        .unwrap_or_else(|| panic!("tags array missing: {attrs:?}"));
+    assert!(
+        tag_values
+            .iter()
+            .any(|t| t["stringValue"] == "harness:claude-code"),
+        "harness tag must ride langfuse.trace.tags: {tag_values:?}"
     );
     assert_eq!(attr("protocol"), "openai.chat_completions");
     assert!(
@@ -241,6 +267,12 @@ async fn otlp_export() {
         model_value("langfuse.session.id"),
         "otlp-session-1",
         "observation-level session filter must see usage: {generation}"
+    );
+    // F2: harness metadata propagates to the generation child too.
+    assert_eq!(
+        model_value("langfuse.trace.metadata.harness"),
+        "claude-code",
+        "{generation}"
     );
     // No gen_ai.* keys anywhere (inclusive-normalized keys must not mix with
     // exclusive usage_details).

@@ -19,9 +19,12 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-trace-gateway"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
+ "atg-harness",
+ "atg-model",
+ "atg-protocol",
  "base64",
  "bytes",
  "futures-util",
@@ -159,6 +162,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "atg-harness"
+version = "0.3.0"
+dependencies = [
+ "atg-model",
+ "atg-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "atg-model"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "atg-protocol"
+version = "0.3.0"
+dependencies = [
+ "atg-model",
+ "serde_json",
 ]
 
 [[package]]

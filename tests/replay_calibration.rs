@@ -4,7 +4,6 @@
 // Writes a human-readable report to target/replay_calibration_report.txt.
 // [tasks 3.4]
 use agent_trace_gateway::trace::{prefix::PrefixStitcher, unpack};
-use atg_protocol::session;
 use std::path::PathBuf;
 
 fn manifest_dir() -> PathBuf {
@@ -54,7 +53,13 @@ fn replay_calibration() {
 
     for (protocol, name, body) in &samples {
         let no_header = |_n: &str| None;
-        let sid = session::extract_session_id(protocol, body, &no_header);
+        // Full production pipeline: parse once, attribute the harness,
+        // resolve the session (protocol mounts → harness shapes → headers).
+        let parsed = unpack::parse_body(body);
+        let facts = atg_harness::identify(protocol, parsed.as_ref(), None, &no_header);
+        let sid = parsed
+            .as_ref()
+            .and_then(|req| unpack::resolve_session(protocol, req, &no_header, &facts));
         match &sid {
             Some(s) => {
                 explicit += 1;

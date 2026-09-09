@@ -22,6 +22,12 @@ pub mod gateway_app {
         /// Frames that failed JSON parse during SSE unpack (observability;
         /// fail-open — never blocks).
         pub failed_frames: std::sync::atomic::AtomicU64,
+        /// Landscape metrics (harness design §3): total turns, turns with a
+        /// session id, turns with a harness attribution. Denominator
+        /// filtering (session-semantics traffic only) is query-side.
+        pub turns_total: std::sync::atomic::AtomicU64,
+        pub turns_with_session: std::sync::atomic::AtomicU64,
+        pub turns_with_harness: std::sync::atomic::AtomicU64,
     }
 
     impl Gateway {
@@ -132,11 +138,21 @@ pub mod gateway_app {
                 let failed_frames = self
                     .failed_frames
                     .load(std::sync::atomic::Ordering::Relaxed);
+                let turns_total = self.turns_total.load(std::sync::atomic::Ordering::Relaxed);
+                let turns_with_session = self
+                    .turns_with_session
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let turns_with_harness = self
+                    .turns_with_harness
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let body = serde_json::json!({
                     "exported": exported,
                     "failed": failed,
                     "dropped": dropped,
-                    "failed_frames": failed_frames
+                    "failed_frames": failed_frames,
+                    "turns_total": turns_total,
+                    "turns_with_session": turns_with_session,
+                    "turns_with_harness": turns_with_harness
                 })
                 .to_string();
                 let mut resp = ResponseHeader::build(200, None)?;
@@ -221,9 +237,39 @@ pub mod gateway_app {
             };
             // Single parse of req_buf — shared with every extractor (C14).
             let parsed_req: Option<serde_json::Value> = unpack::parse_body(&ctx.req_buf);
+            // Harness attribution (orthogonal to session extraction; the
+            // user-agent is the canary-path signal — the main OTLP path
+            // records no UA).
+            let ua = header_get("user-agent");
+            let hfacts =
+                atg_harness::identify(protocol, parsed_req.as_ref(), ua.as_deref(), &header_get);
+            let harness = if hfacts.name == atg_harness::UNKNOWN {
+                String::new()
+            } else {
+                hfacts.name.to_string()
+            };
             let mut session_id = parsed_req
                 .as_ref()
-                .and_then(|req| unpack::session_from_parsed(protocol, req, &header_get))
+                .and_then(|req| unpack::resolve_session(protocol, req, &header_get, &hfacts))
+                .unwrap_or_default();
+            self.turns_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !session_id.is_empty() {
+                self.turns_with_session
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if !harness.is_empty() {
+                self.turns_with_harness
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let harness_candidates = hfacts
+                .candidates
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            let harness_enrich = parsed_req
+                .as_ref()
+                .map(|req| atg_harness::enrich(&hfacts, req))
                 .unwrap_or_default();
             let mut breakpoint = false;
             if session_id.is_empty() {
@@ -290,6 +336,10 @@ pub mod gateway_app {
                     error,
                     model_name,
                     user_id,
+                    harness,
+                    harness_candidates,
+                    harness_anomaly: hfacts.protocol_anomaly,
+                    harness_enrich,
                 });
                 return;
             }
@@ -298,6 +348,10 @@ pub mod gateway_app {
             {
                 record.session_id = session_id;
                 record.breakpoint = breakpoint;
+                record.harness = harness;
+                record.harness_candidates = harness_candidates;
+                record.harness_anomaly = hfacts.protocol_anomaly;
+                record.harness_enrich = harness_enrich;
                 record.raw_request = raw_request;
                 record.raw_response = raw_response;
                 ctx.end_ns = now_ns();
@@ -361,6 +415,9 @@ pub mod gateway_app {
         let gateway = Gateway {
             upstream: upstream.to_string(),
             failed_frames: std::sync::atomic::AtomicU64::new(0),
+            turns_total: std::sync::atomic::AtomicU64::new(0),
+            turns_with_session: std::sync::atomic::AtomicU64::new(0),
+            turns_with_harness: std::sync::atomic::AtomicU64::new(0),
             store: TraceStore::new(),
             stitcher: crate::trace::prefix::PrefixStitcher::new(),
             cap: crate::trace::capture::CaptureCap::new(),

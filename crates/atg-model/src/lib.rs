@@ -155,6 +155,21 @@ pub struct TurnRecord {
     /// terminated abnormally; serde-skipped when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Harness attribution (claude-code / codex / grok / opencode); empty
+    /// when unidentified (never blocks session extraction).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub harness: String,
+    /// Same-strength identification conflicts (CC header + codex body etc.)
+    /// — recorded as metadata, never force-disambiguated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_candidates: Vec<String>,
+    /// Harness evidence hit outside its declared protocols (mimicry noise).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_anomaly: bool,
+    /// Harness identity enrichments (cc_account, codex_installation) —
+    /// emitted as langfuse.trace.metadata.<key>.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_enrich: Vec<(String, String)>,
 }
 
 /// One tool invocation observed in a turn.

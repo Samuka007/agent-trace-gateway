@@ -36,6 +36,13 @@ pub fn metadata_user_id_session(user_id: &Value) -> Option<String> {
 }
 
 pub fn claude_code_legacy_user_id_session(user_id: &str) -> Option<String> {
+    claude_code_legacy_parts(user_id).map(|(session, _)| session)
+}
+
+/// Full legacy-shape read: returns (session uuid, account token) — the
+/// account segment restores the Claude Code account identity (harness
+/// enrich); it is None only for the empty-account form the Go regex allows.
+pub fn claude_code_legacy_parts(user_id: &str) -> Option<(String, Option<String>)> {
     let rest = user_id.strip_prefix("user_")?;
     let (_hex64, rest) = split_at_hex(rest, 64)?;
     let rest = rest.strip_prefix("_account_")?;
@@ -43,6 +50,11 @@ pub fn claude_code_legacy_user_id_session(user_id: &str) -> Option<String> {
     let acct_len = rest
         .find(|c: char| !c.is_ascii_hexdigit() && c != '-')
         .unwrap_or(rest.len());
+    let account = if acct_len > 0 {
+        Some(rest[..acct_len].to_string())
+    } else {
+        None
+    };
     let rest = &rest[acct_len..];
     let rest = rest.strip_prefix("_session_")?;
     // The Go {36} class is `[0-9a-fA-F-]` — dashes count toward the 36.
@@ -50,7 +62,7 @@ pub fn claude_code_legacy_user_id_session(user_id: &str) -> Option<String> {
     if !tail.is_empty() || !uuid36.bytes().any(|b| b == b'-') {
         return None;
     }
-    Some(uuid36.to_ascii_lowercase())
+    Some((uuid36.to_ascii_lowercase(), account))
 }
 
 /// Take `n` hex-digit chars off `s`; returns (taken, remainder) or None.
@@ -72,35 +84,6 @@ fn split_at_class(s: &str, n: usize, allow_dash: bool) -> Option<(&str, &str)> {
     Some((&s[..end], &s[end..]))
 }
 
-/// Extract the explicit session id from one request.
-/// `header_get` returns a request header value by (case-insensitive) name.
-pub fn extract_session_id(
-    protocol: &str,
-    request_body: &[u8],
-    header_get: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
-    if let Some(s) = extract_body_session(protocol, request_body) {
-        return Some(s);
-    }
-    extract_header_session(protocol, header_get)
-}
-
-fn extract_body_session(protocol: &str, request_body: &[u8]) -> Option<String> {
-    let d = crate::ProtocolDescriptor::detect_by_name(protocol)?;
-    let Ok(v) = serde_json::from_slice::<Value>(request_body) else {
-        return None;
-    };
-    d.session_from_body(&v)
-}
-
-fn extract_header_session(
-    protocol: &str,
-    header_get: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
-    let d = crate::ProtocolDescriptor::detect_by_name(protocol)?;
-    d.session_from_headers(header_get)
-}
-
 /// metadata itself may be a JSON envelope string: {"user_id": "..."} —
 /// extracts the user_id then applies the three-form reader.
 pub fn metadata_envelope_transform(metadata_str: &str) -> Option<String> {
@@ -112,7 +95,10 @@ pub fn metadata_envelope_transform(metadata_str: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // The claude-code shape pins (envelope/legacy hit + malformed
+    // rejection) moved to atg-harness (tests.rs) together with the CC
+    // session rules; what stays here pins the protocol tables' generic
+    // header evaluation (grok mount on responses/live only).
 
     fn hdr<'a>(map: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name: &str| {
@@ -124,88 +110,19 @@ mod tests {
 
     const UUID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
-    /// Source 6 (legacy user_id regex): hit.
-    #[test]
-    fn legacy_user_id_extracts_session_uuid() {
-        let body = format!(
-            r#"{{"metadata":{{"user_id":"user_{}{}_account_abc_session_{}"}}}}"#,
-            "0123456789abcdef".repeat(4),
-            "",
-            UUID
-        );
-        assert_eq!(
-            extract_session_id("anthropic.messages", body.as_bytes(), &hdr(&[])),
-            Some(UUID.to_string())
-        );
-        // Envelope-string metadata form reaches the same matcher.
-        let envelope = format!(
-            r#"{{"metadata":"{{\"user_id\":\"user_{}{}_account__session_{}\"}}"}}"#,
-            "0123456789abcdef".repeat(4),
-            "",
-            UUID
-        );
-        assert_eq!(
-            extract_session_id("anthropic.messages", envelope.as_bytes(), &hdr(&[])),
-            Some(UUID.to_string())
-        );
-    }
-
-    /// Source 6: misses (shape violations) must not extract anything.
-    #[test]
-    fn legacy_user_id_rejects_malformed_shapes() {
-        let mk = |core: String| format!(r#"{{"metadata":{{"user_id":"{core}"}}}}"#);
-        let cases = [
-            // 63 hex digits.
-            mk(format!(
-                "user_{}_account_abc_session_{UUID}",
-                &"0123456789abcdef".repeat(4)[1..]
-            )),
-            // Non-hex inside the 64-digit run.
-            mk(format!(
-                "user_g{}_account_abc_session_{UUID}",
-                &"0123456789abcdef".repeat(4)[1..]
-            )),
-            // Missing session segment.
-            mk(format!(
-                "user_{}a_account_abc",
-                "0123456789abcdef".repeat(4)
-            )),
-            // Truncated uuid.
-            mk(format!(
-                "user_{}a_account_abc_session_{}",
-                "0123456789abcdef".repeat(4),
-                &UUID[..35]
-            )),
-            // JSON envelope without session_id falls through to the matcher and fails.
-            mk(r#"{"user_id":"someone"}"#.to_string()),
-        ];
-        for body in cases {
-            assert_eq!(
-                extract_session_id("anthropic.messages", body.as_bytes(), &hdr(&[])),
-                None,
-                "must not extract from {body}"
-            );
-        }
-    }
-
-    /// Source 9 (X-Grok-Conv-Id): hit on responses protocol, after the
+    /// Source 9 (X-Grok-Conv-Id): hit on responses/live, after the
     /// standard and claude headers.
     #[test]
     fn grok_conv_id_hit_on_responses() {
-        let body = br#"{"model":"m","input":"x"}"#;
         let get = hdr(&[("x-grok-conv-id", UUID)]);
-        assert_eq!(
-            extract_session_id("openai.responses", body, &get),
-            Some(UUID.to_string())
-        );
-        assert_eq!(
-            extract_session_id("openai.live", body, &get),
-            Some(UUID.to_string())
-        );
+        let responses = crate::ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
+        assert_eq!(responses.session_from_headers(&get), Some(UUID.to_string()));
+        let live = crate::ProtocolDescriptor::detect_by_name("openai.live").unwrap();
+        assert_eq!(live.session_from_headers(&get), Some(UUID.to_string()));
         // Priority: standard header wins over grok.
         let both = hdr(&[("session-id", "std-1"), ("x-grok-conv-id", UUID)]);
         assert_eq!(
-            extract_session_id("openai.responses", body, &both),
+            responses.session_from_headers(&both),
             Some("std-1".to_string())
         );
         let claude_first = hdr(&[
@@ -213,7 +130,7 @@ mod tests {
             ("x-grok-conv-id", UUID),
         ]);
         assert_eq!(
-            extract_session_id("openai.responses", body, &claude_first),
+            responses.session_from_headers(&claude_first),
             Some("cc-1".to_string())
         );
     }
@@ -221,12 +138,10 @@ mod tests {
     /// Source 9: absent on protocols without the grok route.
     #[test]
     fn grok_conv_id_ignored_on_other_protocols() {
-        let body = br#"{"model":"m"}"#;
         let get = hdr(&[("x-grok-conv-id", UUID)]);
-        assert_eq!(
-            extract_session_id("openai.chat_completions", body, &get),
-            None
-        );
-        assert_eq!(extract_session_id("anthropic.messages", body, &get), None);
+        for name in ["openai.chat_completions", "anthropic.messages"] {
+            let d = crate::ProtocolDescriptor::detect_by_name(name).unwrap();
+            assert_eq!(d.session_from_headers(&get), None, "{name}");
+        }
     }
 }

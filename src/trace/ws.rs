@@ -167,6 +167,12 @@ impl WsTurnState {
             error: None,
             model_name: String::new(),
             user_id: String::new(),
+            // WS turns are attributed later (P4 live.rs merge); harness
+            // fields stay empty until then.
+            harness: String::new(),
+            harness_candidates: Vec::new(),
+            harness_anomaly: false,
+            harness_enrich: Vec::new(),
         }
     }
 }

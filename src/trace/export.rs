@@ -200,6 +200,30 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // Trace-level attributes (session/tags/name) are copied onto
             // every span in the trace (spec section 3).
             let mut attributes = Vec::new();
+            // F2 harness wire (trace-level, propagated to both spans):
+            // tag harness:<name> + langfuse.trace.metadata.{harness,…}.
+            let harness_tag = (!r.harness.is_empty()).then(|| format!("harness:{}", r.harness));
+            let tags: Vec<&str> = match &harness_tag {
+                Some(t) => vec![LANGFUSE_TRACE_TAG, t.as_str()],
+                None => vec![LANGFUSE_TRACE_TAG],
+            };
+            let mut trace_extra: Vec<serde_json::Value> = Vec::new();
+            if !r.harness.is_empty() {
+                trace_extra.push(kv("langfuse.trace.metadata.harness", &r.harness));
+            }
+            if r.harness_anomaly {
+                trace_extra.push(kv(
+                    "langfuse.trace.metadata.harness_protocol_anomaly",
+                    "true",
+                ));
+            }
+            if r.harness_candidates.len() > 1 {
+                let joined = r.harness_candidates.join(",");
+                trace_extra.push(kv("langfuse.trace.metadata.harness_candidates", &joined));
+            }
+            for (k, v) in &r.harness_enrich {
+                trace_extra.push(kv(&format!("langfuse.trace.metadata.{k}"), v));
+            }
             if !r.session_id.is_empty() {
                 // P2-14: single official key — dual spelling converged.
                 attributes.push(kv("langfuse.session.id", &r.session_id));
@@ -207,7 +231,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             attributes.extend([
                 kv("protocol", &r.protocol),
                 kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
-                kv_array("langfuse.trace.tags", &[LANGFUSE_TRACE_TAG]),
+                kv_array("langfuse.trace.tags", &tags),
                 kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_AGENT),
                 kv("user_input", &r.user_input),
                 kv("final_output", &r.final_output),
@@ -230,6 +254,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 let tool_calls_json = serde_json::to_string(&r.tool_calls).unwrap_or_default();
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
+            attributes.extend(trace_extra.iter().cloned());
             let agent_span_id = span_id_for(&r.session_id, &r.user_input, &r.raw_request);
             let mut agent_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
@@ -276,7 +301,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // generation child, so observation-level session filters see usage.
             let mut generation_attributes: Vec<serde_json::Value> = vec![
                 kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
-                kv_array("langfuse.trace.tags", &[LANGFUSE_TRACE_TAG]),
+                kv_array("langfuse.trace.tags", &tags),
                 kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
             ];
             if !r.session_id.is_empty() {
@@ -290,6 +315,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
             }
             generation_attributes.extend(usage_attrs);
+            generation_attributes.extend(trace_extra.iter().cloned());
             let mut generation_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
                 "spanId": span_id_for(&r.session_id, GEN_SPAN_ID_SEED, &r.raw_request),
@@ -618,6 +644,44 @@ mod tests {
             assert_eq!(
                 s["status"]["message"], "response.failed: upstream 500",
                 "statusMessage must carry the error text: {s}"
+            );
+        }
+    }
+
+    /// F2: harness attribution rides trace.tags + trace.metadata, on both
+    /// spans; enrich pairs land as langfuse.trace.metadata.<key>.
+    #[test]
+    fn harness_turn_emits_tag_and_metadata() {
+        let mut r = record("sess-h");
+        r.harness = "claude-code".to_string();
+        r.harness_candidates = vec!["claude-code".to_string(), "codex".to_string()];
+        r.harness_enrich
+            .push(("cc_account".to_string(), "acc-1".to_string()));
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 2);
+        for s in spans {
+            let value = |k: &str| {
+                span_attr(s, k)
+                    .and_then(|v| v["stringValue"].as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            assert_eq!(value("langfuse.trace.metadata.harness"), "claude-code");
+            assert_eq!(value("langfuse.trace.metadata.cc_account"), "acc-1");
+            assert_eq!(
+                value("langfuse.trace.metadata.harness_candidates"),
+                "claude-code,codex"
+            );
+            let tags = span_attr(s, "langfuse.trace.tags")
+                .and_then(|v| v["arrayValue"]["values"].as_array())
+                .unwrap_or_else(|| panic!("tags missing: {s}"));
+            assert!(
+                tags.iter()
+                    .any(|t| t["stringValue"] == "harness:claude-code"),
+                "harness tag on every span: {tags:?}"
             );
         }
     }

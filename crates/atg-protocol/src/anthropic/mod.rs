@@ -1,14 +1,5 @@
 //! anthropic.messages — Messages API descriptor.
 //! https://platform.claude.com/docs/en/api/messages
-use crate::session::metadata_envelope_transform;
-
-/// user_id transform for the anthropic table row: runs the three-form reader
-/// (JSON envelope / legacy composite / object) on the raw string.
-fn user_id_transform(v: &str) -> Option<String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(v).unwrap_or(serde_json::Value::String(v.to_string()));
-    crate::session::metadata_user_id_session(&parsed)
-}
 
 pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     name: "anthropic.messages",
@@ -17,8 +8,10 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     input_shape: crate::InputShape::Messages,
     user_input: None,
     final_output: None,
-    // Body: metadata.session_id (client convention) then metadata.user_id
-    // legacy composite (Claude Code convention, transform extracts uuid).
+    // Generic body mounts only. The Claude Code user_id shapes (envelope /
+    // legacy composite) are HARNESS session rules (atg-harness
+    // claude_code.rs), evaluated between these body sources and the header
+    // sources — same effective priority as the pre-v0.3.0 table rows.
     body_sources: &[
         // Shared v0.2.0 top-level sources (modeltrace nine-source port).
         crate::BodySource {
@@ -26,25 +19,11 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
             two_form: false,
             transform: None,
         },
-        // anthropic-specific: metadata.session_id (client convention),
-        // then metadata.user_id — plain JSON envelope {session_id}, or
-        // the Claude Code legacy composite (transform extracts uuid).
+        // anthropic-specific: metadata.session_id (client convention).
         crate::BodySource {
             path: &["metadata", "session_id"],
             two_form: false,
             transform: None,
-        },
-        crate::BodySource {
-            path: &["metadata", "user_id"],
-            two_form: false,
-            transform: Some(user_id_transform),
-        },
-        // metadata itself as a JSON envelope string {"user_id": ...} —
-        // a real Claude Code traffic form (v0.2.0 covered it).
-        crate::BodySource {
-            path: &["metadata"],
-            two_form: false,
-            transform: Some(metadata_envelope_transform),
         },
     ],
     header_sources: &[
