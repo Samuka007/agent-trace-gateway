@@ -11,9 +11,32 @@
 
 - **bench 进 CI**：sse_bench 目前 debug 自 ignore、release 手跑（数字 372–787µs，已由 RustGate 本机独立复核真实）；挂进 CI release job 或 xtask 以防门禁失效
 - **openai.live descriptor 死数据**：sse_rules/usage_frames 无消费者（ws.rs 仍手写 match，正确但属第二协议分支点）——二选一：WsTurnState 接引擎（加 TurnMarkers/EndTurn action）或删表字段注明不可表
-- **error 标记扩展**：response.failed/incomplete 仅落 TurnRecord.error，generation span status 与 error.type 属性扩展待做
+- **error 标记扩展**：response.failed/incomplete 落 TurnRecord.error 且 agent+generation 双 span 挂 native status（v0.2.2 已做）；error.type 属性、非流式失败响应与 ws `response.done(status=failed)` 的标记仍待做
 - **SseAction::Usage 死载荷**：引擎忽略路径参数改 unit 变体（API 卫生）
-- **req_buf 多次 parse 收敛**：logging 钩子对 req_buf 的 session/user_input/messages 三次 parse 合并为一次（C14 全量纪律的 req 侧）
+- **req_buf 多次 parse 收敛**：session/user_input/model/end_user 已收敛为单次 parse（v0.2.2 已做）；剩 extract_messages 在空 session 兜底路径的二次 parse
+
+## [0.2.2] - 2026-09-09
+
+Langfuse 官方语义对齐：审计 P0 五项 + 全部语义歧义（AMB）清零。数据路径（SSE 单遍零拷贝）零改动、零新依赖；RustGate 守门累计五轮放行（§D 阶段 4 轮 + §E Round 2/3/4 复审，Round 4 PASS 零 BLOCK 零歧义）。
+
+### 修复（Langfuse 语义）
+
+- **P0-1 trace/span id 随机化**：确定性派生 id 在 Langfuse spanId upsert 下 85% 吞数、长会话巨型 trace——改 per-turn 随机 id（`replayed_turns_get_distinct_ids` 反向钉子），会话归组唯一靠 `langfuse.session.id` — `126272b`
+- **P0-2 usage 互斥桶**：OpenAI inclusive input（cached_tokens 与 cache_write_tokens 均含于 input）生产侧派生为 exclusive 桶（input − cache_read − cache_creation，saturating clamp）；官方依据：OpenAI cookbook per-run spending controller（ordinary = input − cached − written）+ Langfuse 归一化表（flat `langfuse.observation.usage_details` "stored unchanged; values must already be exclusive"）— `126272b`、`4913756`
+- **P0-3 observation.input/output**：agent 根 span 发官方内容键 `langfuse.observation.input/output`（空串省略，空输出噪声一并消灭）— `126272b`
+- **P0-4 session 传播 + AMB-6**：`langfuse.session.id` 复制到 generation 子 span（observation 级过滤可见 usage）；双拼写收敛为官方单键（负向钉子防回潮）— `126272b`、`def4793`
+- **P0-5 model.name**：`langfuse.observation.model.name` 挂 generation 子 span（TurnRecord.model_name，单次 req parse 填充，空则省略）— `126272b`
+- **P1-6 langfuse.user.id**：agent+generation 双 span 非空发射（R2-1，死字段落地）— `def4793`
+- **P1-7 ingestion header**：`x-langfuse-ingestion-version: 4`（v4 实时摄入）— `126272b`
+- **R2-2 单次 parse**：logging 钩子 req_buf 单次 parse 共享给 session/user_input/model/end_user 提取器（C14 req 侧纪律）— `def4793`
+- **AMB-1**：TurnUsage 文档改派生互斥桶语义（input_tokens 已减 cache，防 records/导出消费者二次扣减）+ usage_from_obj 减法注释引官方依据 — `4913756`
+- **AMB-2**：usage_details 跳过 0 值条目（0 ≙ 未报告；Langfuse `total` 按在场桶求和，省略无损，消灭 `{"input":0,"output":0}` 空转噪声）— `4913756`
+- **AMB-7**：errored turn 的 native OTLP status（code=2 + message）同时挂 agent 与 generation span（Langfuse level/statusMessage 按 span 映射，generation 过滤的错误视图不缺数据）— `9e025ec`
+- **incidental**：chat ToolChunk name 首次命中即定（重发 name 的兼容网关不再拼出重复名）；删除零调用者 `extract_end_user`/`extract_model_name` — `680f2f0`
+
+### 验证
+
+CT104 实跑（RustGate 本机独立复跑数字一致）：lib **33/33**（+3 新钉子：usage_details_skips_zero_entries / errored_turn_marks_both_spans / chat_tool_name_first_hit_wins）、clippy `--all-targets -D warnings` clean、全量 debug 套件 **33+20 全绿**；release bench（数据路径与 v0.2.1 相同、零回归）：SSE 264KB 重组 435µs、anthropic 3000 帧/50 工具 4.42ms（CT104；bench 断言全过。v0.2.1 所引 372µs 为 RustGate 主机，数字机器相关）。
 
 ## [0.2.1] - 2026-09-08
 
