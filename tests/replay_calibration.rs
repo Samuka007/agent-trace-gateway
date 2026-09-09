@@ -71,7 +71,7 @@ fn replay_calibration() {
                 let eligible = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
                     .is_some_and(|d| d.stitch_eligible);
                 if eligible {
-                    if let Some(messages) = unpack::extract_messages(body) {
+                    if let Some(messages) = parsed.as_ref().and_then(unpack::extract_messages) {
                         if messages.len() >= 2 {
                             let (synthetic, bp) = stitcher.assign(scope, &messages);
                             prefix_assigned += 1;

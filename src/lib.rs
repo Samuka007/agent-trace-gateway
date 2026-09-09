@@ -48,9 +48,9 @@ pub mod gateway_app {
         pub req_buf: Vec<u8>,
         pub resp_buf: Vec<u8>,
         pub resp_content_type: String,
-        pub ws_client_parser: crate::trace::ws::WsFrameParser,
-        pub ws_server_parser: crate::trace::ws::WsFrameParser,
-        pub ws_turn: crate::trace::ws::WsTurnState,
+        pub ws_client_parser: atg_protocol::openai::live::WsFrameParser,
+        pub ws_server_parser: atg_protocol::openai::live::WsFrameParser,
+        pub ws_turn: atg_protocol::openai::live::WsTurnState,
         /// Turn timing (unix nanoseconds). start set at request start,
         /// end set when the record is finalized.
         pub start_ns: u64,
@@ -66,9 +66,9 @@ pub mod gateway_app {
                 req_buf: Vec::new(),
                 resp_buf: Vec::new(),
                 resp_content_type: String::new(),
-                ws_client_parser: crate::trace::ws::WsFrameParser::new(true),
-                ws_server_parser: crate::trace::ws::WsFrameParser::new(false),
-                ws_turn: crate::trace::ws::WsTurnState::default(),
+                ws_client_parser: atg_protocol::openai::live::WsFrameParser::new(true),
+                ws_server_parser: atg_protocol::openai::live::WsFrameParser::new(false),
+                ws_turn: atg_protocol::openai::live::WsTurnState::default(),
                 start_ns: now_ns(),
                 end_ns: 0,
             }
@@ -248,9 +248,15 @@ pub mod gateway_app {
             } else {
                 hfacts.name.to_string()
             };
-            let mut session_id = parsed_req
+            // Request-side facts: ONE descriptor lookup + ONE pass over
+            // the parsed body (F6 single entry; the old scattered
+            // detect_by_name calls and the messages re-parse are gone).
+            let tf = parsed_req
                 .as_ref()
-                .and_then(|req| unpack::resolve_session(protocol, req, &header_get, &hfacts))
+                .and_then(|req| unpack::turn_facts(protocol, req, &header_get, &hfacts));
+            let mut session_id = tf
+                .as_ref()
+                .and_then(|f| f.session_id.clone())
                 .unwrap_or_default();
             let mut session_synthetic = false;
             // F3 tightening (user ruling): the stitcher runs ONLY for
@@ -258,10 +264,8 @@ pub mod gateway_app {
             // SDK traffic is stateless single-shot, force-stitching is
             // noise) and only mints a session when the replayed chain has
             // >=2 messages (a single message cannot evidence continuity).
-            let stitch_eligible = parsed_req.as_ref().is_some_and(|req| {
-                atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
-                    .is_some_and(|d| d.stitch_eligible)
-                    && req["messages"].as_array().is_some_and(|m| m.len() >= 2)
+            let stitch_eligible = tf.as_ref().is_some_and(|f| {
+                f.stitch_eligible && f.messages.as_ref().is_some_and(|m| m.len() >= 2)
             });
             self.turns_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -280,9 +284,9 @@ pub mod gateway_app {
                 .unwrap_or_default();
             let mut breakpoint = false;
             if session_id.is_empty() && stitch_eligible {
-                if let Some(messages) = unpack::extract_messages(&ctx.req_buf) {
+                if let Some(messages) = tf.as_ref().and_then(|f| f.messages.as_ref()) {
                     let scope = header_get("authorization").unwrap_or_default();
-                    let (synthetic, is_bp) = self.stitcher.assign(&scope, &messages);
+                    let (synthetic, is_bp) = self.stitcher.assign(&scope, messages);
                     session_id = synthetic;
                     breakpoint = is_bp;
                     session_synthetic = !session_id.is_empty();
@@ -313,27 +317,15 @@ pub mod gateway_app {
                         );
                     }
                 }
-                let user_input = parsed_req
+                let user_input = tf
                     .as_ref()
-                    .and_then(|req| {
-                        atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
-                            .and_then(|d| d.user_input(req))
-                    })
+                    .map(|f| f.user_input.clone())
                     .unwrap_or_default();
-                let model_name = parsed_req
+                let model_name = tf
                     .as_ref()
-                    .and_then(|req| {
-                        Some(req["model"].as_str().unwrap_or_default().to_string())
-                            .filter(|s| !s.is_empty())
-                    })
+                    .map(|f| f.model_name.clone())
                     .unwrap_or_default();
-                let user_id = parsed_req
-                    .as_ref()
-                    .and_then(|req| {
-                        atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
-                            .and_then(|d| d.end_user(req))
-                    })
-                    .unwrap_or_default();
+                let user_id = tf.as_ref().map(|f| f.user_id.clone()).unwrap_or_default();
                 ctx.end_ns = now_ns();
                 self.push_record(atg_model::TurnRecord {
                     protocol: protocol.to_string(),
@@ -359,7 +351,7 @@ pub mod gateway_app {
                 return;
             }
             if let Some(mut record) =
-                unpack::unpack_nonstreaming(protocol, &ctx.req_buf, &ctx.resp_buf)
+                unpack::unpack_nonstreaming(protocol, parsed_req.as_ref(), &ctx.resp_buf)
             {
                 record.session_id = session_id;
                 record.breakpoint = breakpoint;

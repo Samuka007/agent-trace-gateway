@@ -82,21 +82,6 @@ pub struct SseOutcome {
     pub error: Option<String>,
 }
 
-impl SseAccum {
-    pub fn finish(mut self, strategy: ToolCallStrategy) -> Vec<ToolCall> {
-        if strategy == ToolCallStrategy::DeltaAssembly {
-            if let Some((_, call)) = self.pending.take() {
-                self.tools.push(call);
-            }
-        } else if strategy == ToolCallStrategy::ChunkedToolCalls {
-            self.chat_tools.sort_by_key(|(i, _)| *i);
-            self.tools
-                .extend(self.chat_tools.into_iter().map(|(_, c)| c));
-        }
-        self.tools
-    }
-}
-
 /// Rule matching: `on` gates on the frame's data `type` ("*" = any); the
 /// inner delta-type gate distinguishes anthropic's content_block_delta kinds.
 fn matches_rule(rule: &SseRule, event: Option<&str>, v: &serde_json::Value) -> bool {
@@ -133,26 +118,6 @@ pub fn apply_sse_rule(
             SseAction::Text(path) => {
                 if let Some(t) = resolve_path(v, path).as_str() {
                     acc.text.push_str(t);
-                }
-            }
-            SseAction::Usage(_) => {
-                // Harvest through the descriptor's usage_frames (last-wins
-                // merge keeps anthropic's split frames correct).
-                for uf in d.usage_frames {
-                    let event_matches = match (uf.on_event, event) {
-                        (Some(ev), Some(e)) => ev == e,
-                        (None, _) => true,
-                        _ => false,
-                    };
-                    if event_matches {
-                        let usage = resolve_path(v, uf.obj_path);
-                        if !usage.is_null() {
-                            atg_model::merge_usage(
-                                &mut acc.usage,
-                                atg_protocol::usage::usage_from_obj(d, usage),
-                            );
-                        }
-                    }
                 }
             }
             SseAction::ToolOpen => {
@@ -264,6 +229,13 @@ pub fn stream_response(d: &ProtocolDescriptor, body: &[u8]) -> SseOutcome {
         }
         let event = v["type"].as_str();
         apply_sse_rule(&mut acc, d, event, &v);
+        // Usage harvest is FRAME-driven (descriptor usage_frames), never
+        // rule-gated: anthropic carries no Usage SSE action (its usage
+        // rides message_start/message_delta events) — gating on an action
+        // silently dropped streaming anthropic usage pre-v0.3.0.
+        if let Some(u) = atg_protocol::usage::usage_from_sse_frame(d, &v) {
+            atg_model::merge_usage(&mut acc.usage, u);
+        }
     }
     let text = std::mem::take(&mut acc.text);
     let usage = acc.usage.take();
@@ -335,6 +307,28 @@ pub fn nonstreaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pre-v0.3.0 gap pin: streaming anthropic usage rides
+    /// message_start/message_delta (split frames, last-wins merge) — the
+    /// harvest must be frame-driven, not gated on a Usage SSE action
+    /// (anthropic's table carries none).
+    #[test]
+    fn anthropic_stream_usage_accumulates_across_frames() {
+        let d = atg_protocol::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"cache_read_input_tokens\":3}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n",
+        );
+        let out = stream_response(d, body.as_bytes());
+        assert_eq!(out.text, "hi");
+        let u = out
+            .usage
+            .expect("streaming anthropic usage must accumulate");
+        assert_eq!(u.input_tokens, Some(12));
+        assert_eq!(u.cache_read_tokens, Some(3));
+        assert_eq!(u.output_tokens, Some(7));
+    }
 
     fn chat_chunk(name: &str, arguments: &str) -> String {
         format!(

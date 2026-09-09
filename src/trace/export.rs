@@ -10,9 +10,6 @@ use tokio::sync::mpsc;
 const QUEUE_CAPACITY: usize = 1024;
 const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Distinct span-id derivation seed for the generation child span.
-const GEN_SPAN_ID_SEED: &str = "\u{0}gen";
-
 use atg_model::{
     usage_details_json, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT, ATTR_OBSERVATION_OUTPUT,
     ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID, GENERATION_SPAN_NAME,
@@ -260,9 +257,9 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
             attributes.extend(trace_extra.iter().cloned());
-            let agent_span_id = span_id_for(&r.session_id, &r.user_input, &r.raw_request);
+            let agent_span_id = random_span_id();
             let mut agent_span = serde_json::json!({
-                "traceId": trace_id_for(&r.session_id),
+                "traceId": random_trace_id(),
                 "spanId": agent_span_id,
                 "name": "agent.turn",
                 "kind": 3,
@@ -322,8 +319,8 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             generation_attributes.extend(usage_attrs);
             generation_attributes.extend(trace_extra.iter().cloned());
             let mut generation_span = serde_json::json!({
-                "traceId": trace_id_for(&r.session_id),
-                "spanId": span_id_for(&r.session_id, GEN_SPAN_ID_SEED, &r.raw_request),
+                "traceId": random_trace_id(),
+                "spanId": random_span_id(),
                 "parentSpanId": agent_span_id,
                 "name": GENERATION_SPAN_NAME,
                 "kind": 3,
@@ -403,20 +400,6 @@ fn random_bytes(n: usize) -> Vec<u8> {
         }
     }
     buf
-}
-
-/// Trace id: random per turn. One trace == one request/turn; session
-/// grouping is carried by the langfuse.session.id attribute — a
-/// deterministic session-hash trace id was pure risk (Langfuse upserts
-/// span ids, so distinct turns sharing ids get silently swallowed).
-fn trace_id_for(_session_id: &str) -> String {
-    random_trace_id()
-}
-
-/// Span id: random per span (turns and their generation children each get a
-/// fresh id; Langfuse upserts span ids, so collisions are silently dropped).
-fn span_id_for(_session_id: &str, _user_input: &str, _raw_request: &str) -> String {
-    random_span_id()
 }
 
 /// Test helper: current health counters.
@@ -624,7 +607,7 @@ mod tests {
             "duplicate span ids across turns: {ids:?}"
         );
         // Same request replayed N times -> N distinct trace ids.
-        let mut trace_ids: Vec<String> = (0..5).map(|_| trace_id_for("sess-1")).collect();
+        let mut trace_ids: Vec<String> = (0..5).map(|_| random_trace_id()).collect();
         trace_ids.sort();
         let before = trace_ids.len();
         trace_ids.dedup();

@@ -79,4 +79,5 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     usage_inclusion: crate::TokenInclusion::Exclusive,
     final_output_path: &["content"],
     stitch_eligible: true,
+    turn_markers: None,
 };

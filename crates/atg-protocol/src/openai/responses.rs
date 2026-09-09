@@ -58,12 +58,6 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
             delta_type: None,
             action: crate::SseAction::ToolDone,
         },
-        crate::SseRule {
-            on: "response.completed",
-            data_type: None,
-            delta_type: None,
-            action: crate::SseAction::Usage(&["response", "usage"]),
-        },
     ],
     tool_calls: crate::ToolCallStrategy::DoneItems,
     usage_frames: &[crate::UsageFrame {
@@ -79,6 +73,7 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     usage_inclusion: crate::TokenInclusion::Inclusive,
     final_output_path: &["output"],
     stitch_eligible: true,
+    turn_markers: None,
 };
 
 /// responses input reader (named fn referenced by the descriptor): bare items

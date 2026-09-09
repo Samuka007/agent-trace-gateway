@@ -60,8 +60,6 @@ pub enum ToolCallStrategy {
 pub enum SseAction {
     /// Append text from a Value path to the output.
     Text(&'static [&'static str]),
-    /// Harvest usage from a Value path (partial; merged last-wins).
-    Usage(&'static [&'static str]),
     /// Open/extend a tool_use block (name from block path, args appended).
     ToolOpen,
     /// Append argument bytes for the pending tool block.
@@ -89,6 +87,13 @@ pub struct SseRule {
 pub struct UsageFrame {
     pub on_event: Option<&'static str>,
     pub obj_path: &'static [&'static str],
+}
+
+/// WebSocket turn boundary events (openai.live): the client frame that
+/// opens a turn and the server frame that closes it (carrying usage).
+pub struct TurnMarkers {
+    pub start: &'static str,
+    pub end: &'static str,
 }
 
 /// Field spellings for one protocol's usage object (protocol knowledge lives
@@ -146,6 +151,8 @@ pub struct ProtocolDescriptor {
     /// shared prefixes is noise. anthropic/responses carry session
     /// semantics (multi-turn replay); live has no replayable messages.
     pub stitch_eligible: bool,
+    /// WS turn boundaries (live only; None for SSE protocols).
+    pub turn_markers: Option<TurnMarkers>,
 }
 
 /// A body session source: a value path plus an optional transform. The

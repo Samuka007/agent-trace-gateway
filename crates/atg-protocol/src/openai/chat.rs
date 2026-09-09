@@ -44,12 +44,6 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
             delta_type: None,
             action: crate::SseAction::ToolChunk,
         },
-        crate::SseRule {
-            on: "*",
-            data_type: None,
-            delta_type: None,
-            action: crate::SseAction::Usage(&["usage"]),
-        },
     ],
     tool_calls: crate::ToolCallStrategy::ChunkedToolCalls,
     usage_frames: &[crate::UsageFrame {
@@ -66,4 +60,5 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     final_output_path: &["choices", "0", "message", "content"],
     // USER RULING: stateless SDK traffic — the stitcher must not mint sessions.
     stitch_eligible: false,
+    turn_markers: None,
 };
