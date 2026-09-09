@@ -37,11 +37,21 @@ pub const ATTR_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
 pub const ATTR_USAGE_TOTAL_TOKENS: &str = "gen_ai.usage.total_tokens";
 pub const ATTR_USAGE_DETAILS: &str = "langfuse.observation.usage_details";
 
-/// Per-turn token usage as reported by the model protocol. Missing fields are
-/// `None` (the protocol simply did not report them) — never defaulted to 0,
-/// so Langfuse-side fill-rate metrics stay truthful.
+/// Per-turn token usage in Langfuse's mutually-exclusive bucket form.
+/// `input_tokens` is a DERIVED exclusive bucket: for Inclusive protocols
+/// (OpenAI responses/chat/live), `usage_from_obj` has already subtracted
+/// cache_read/cache_creation from the protocol-reported input count — the
+/// protocol-original value survives only in `raw_response`. Consumers of
+/// this struct (records endpoint, exporters) must NOT subtract the cache
+/// buckets again — that would double-discount. Exclusive protocols
+/// (Anthropic) report natively exclusive buckets and pass through
+/// unchanged. Missing fields are `None` (unreported) — never defaulted
+/// to 0, so Langfuse-side fill-rate metrics stay truthful.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TurnUsage {
+    /// Derived exclusive bucket: for Inclusive protocols the cache counts
+    /// are already subtracted here (see usage_from_obj; the original count
+    /// lives in raw_response).
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
@@ -143,8 +153,21 @@ pub fn usage_from_obj(
         cache_creation_tokens: read(shape.cache_write),
         total_tokens: opt_u64(&usage["total_tokens"]),
     };
-    // Exclusive-bucket semantics: OpenAI's input count INCLUDES cached
-    // tokens; Langfuse usage buckets are mutually exclusive, so subtract.
+    // Exclusive-bucket derivation, official basis:
+    // - OpenAI: the `input_tokens_details` (responses/live) /
+    //   `prompt_tokens_details` (chat) sub-counts — cached_tokens AND
+    //   cache_write_tokens — are INCLUSIVE, i.e. contained in the parent
+    //   input/prompt count. OpenAI's per-run spending controller cookbook
+    //   (developers.openai.com/cookbook, actual_cost) prices "ordinary"
+    //   input as input_tokens - cached - written, proving both details
+    //   sub-fields sit inside input_tokens (cache-write is billed
+    //   separately but counted inside).
+    // - Langfuse: token-and-cost-tracking, "Usage types are mutually
+    //   exclusive buckets" — every usage_details key is a non-overlapping
+    //   bucket, and the normalization table says flat
+    //   `langfuse.observation.usage_details` is "stored unchanged; values
+    //   must already be exclusive" — so the subtraction MUST happen here,
+    //   producer-side (Langfuse does not normalize flat keys).
     // (Anthropic's input is already exclusive — unchanged.)
     if d.usage_inclusion == crate::trace::descriptor::TokenInclusion::Inclusive {
         if let (Some(input), Some(cached)) = (u.input_tokens, u.cache_read_tokens) {
@@ -162,25 +185,26 @@ fn opt_u64(v: &Value) -> Option<u64> {
 }
 
 /// Build the `langfuse.observation.usage_details` attribute value in the OTLP
-/// KV form modeltrace writes (a JSON object keyed by usage dimension; entries
-/// appear only for reported dimensions).
+/// KV form modeltrace writes (a JSON object keyed by usage dimension).
+/// Entries appear only for reported, NON-ZERO dimensions: Langfuse treats
+/// usage_details keys as optional per-bucket counters and derives `total`
+/// as the sum of the buckets present ("total is the sum of the buckets",
+/// token-and-cost-tracking), so a 0-valued bucket is indistinguishable
+/// from an unreported one — omitting zeros is loss-free and kills the
+/// canary's `{"input":0,"output":0}` idle-turn noise. (Anthropic never
+/// reports `total`; Langfuse derives it — likewise omitted.)
 pub fn usage_details_json(usage: &TurnUsage) -> String {
     let mut detail = serde_json::Map::new();
-    if let Some(v) = usage.input_tokens {
-        detail.insert("input".to_string(), Value::from(v));
-    }
-    if let Some(v) = usage.output_tokens {
-        detail.insert("output".to_string(), Value::from(v));
-    }
-    if let Some(v) = usage.cache_read_tokens {
-        detail.insert("cache_read_input_tokens".to_string(), Value::from(v));
-    }
-    if let Some(v) = usage.cache_creation_tokens {
-        detail.insert("cache_creation_input_tokens".to_string(), Value::from(v));
-    }
-    if let Some(v) = usage.total_tokens {
-        detail.insert("total".to_string(), Value::from(v));
-    }
+    let mut put = |key: &str, val: Option<u64>| {
+        if val.is_some_and(|v| v > 0) {
+            detail.insert(key.to_string(), Value::from(val.unwrap()));
+        }
+    };
+    put("input", usage.input_tokens);
+    put("output", usage.output_tokens);
+    put("cache_read_input_tokens", usage.cache_read_tokens);
+    put("cache_creation_input_tokens", usage.cache_creation_tokens);
+    put("total", usage.total_tokens);
     Value::Object(detail).to_string()
 }
 
@@ -283,6 +307,29 @@ mod tests {
     fn empty_usage_is_not_exported() {
         let u = TurnUsage::default();
         assert!(u.is_empty());
+    }
+
+    /// AMB-2: zero-valued buckets are omitted — 0 ≙ unreported. Langfuse
+    /// derives `total` from the buckets present, so this is loss-free and
+    /// kills the canary's `{"input":0,"output":0}` idle-turn noise.
+    #[test]
+    fn usage_details_skips_zero_entries() {
+        let u = TurnUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_creation_tokens: Some(0),
+            total_tokens: Some(0),
+        };
+        assert_eq!(usage_details_json(&u), "{}");
+        let u = TurnUsage {
+            input_tokens: Some(5),
+            output_tokens: Some(0),
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            total_tokens: Some(5),
+        };
+        assert_eq!(usage_details_json(&u), r#"{"input":5,"total":5}"#);
     }
 
     /// R1 nails: openai cache tokens arrive on NESTED paths — each
