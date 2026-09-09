@@ -165,6 +165,8 @@ impl WsTurnState {
             end_ns: 0,
             usage: self.usage.take(),
             error: None,
+            model_name: String::new(),
+            user_id: String::new(),
         }
     }
 }

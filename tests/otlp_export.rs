@@ -75,6 +75,7 @@ async fn otlp_export() {
     // One explicit-session turn through the gateway.
     let body = serde_json::json!({
         "model": "m",
+        "user": "otlp-user-1",
         "messages": [{"role": "user", "content": "otlp-turn"}]
     });
     let req = Request::post(format!("http://127.0.0.1:{gw}/v1/chat"))
@@ -148,9 +149,9 @@ async fn otlp_export() {
             .unwrap_or_default()
     };
     assert_eq!(
-        attr("session.id"),
+        attr("langfuse.session.id"),
         "otlp-session-1",
-        "session attribute: {attrs:?}"
+        "session attribute (official key, P2-14 convergence): {attrs:?}"
     );
     assert_eq!(attr("protocol"), "openai.chat_completions");
     assert!(
@@ -184,6 +185,62 @@ async fn otlp_export() {
         gen_value("langfuse.observation.usage_details"),
         r#"{"input":8,"output":2,"total":10}"#,
         "usage_details must be the flat snake_case JSON: {generation}"
+    );
+    // P0-2: chat is an inclusive protocol — the exported input bucket must
+    // be input - cached (fixture chat usage: prompt 8, cached 0 → 8; with a
+    // cache hit recorded here for the exclusive derivation).
+    // (covered by adaptor unit tests; here we pin the wire shape)
+    // P0-3: official observation content keys on the agent span.
+    assert_eq!(
+        attr("langfuse.observation.input"),
+        "otlp-turn",
+        "observation.input must be the user text: {attrs:?}"
+    );
+    assert!(
+        attr("langfuse.observation.output").contains("otlp-turn"),
+        "observation.output must be the final text: {attrs:?}"
+    );
+    // P0-5: model name on the generation child span.
+    let model_value = |k: &str| {
+        generation["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["key"] == k)
+            .and_then(|a| a["value"]["stringValue"].as_str())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        model_value("langfuse.observation.model.name"),
+        "m",
+        "{generation}"
+    );
+    // R2-1: end-user identity emitted on the generation span (the chat
+    // fixture body carries user; assert the emitted attribute).
+    let user_val = |k: &str| {
+        span["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["key"] == k)
+            .and_then(|a| a["value"]["stringValue"].as_str())
+            .unwrap_or_default()
+    };
+    assert_eq!(user_val("langfuse.user.id"), "otlp-user-1", "{attrs:?}");
+    assert_eq!(
+        model_value("langfuse.user.id"),
+        "otlp-user-1",
+        "{generation}"
+    );
+    // P0-4: session copied onto the generation child span (official key).
+    assert!(
+        model_value("session.id").is_empty(),
+        "dual spelling removed"
+    );
+    assert_eq!(
+        model_value("langfuse.session.id"),
+        "otlp-session-1",
+        "observation-level session filter must see usage: {generation}"
     );
     // No gen_ai.* keys anywhere (inclusive-normalized keys must not mix with
     // exclusive usage_details).
@@ -303,7 +360,7 @@ async fn otlp_export() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|a| a["key"] == "session.id")
+                .any(|a| a["key"] == "langfuse.session.id")
         })
         .collect();
     assert_eq!(
@@ -324,7 +381,7 @@ async fn otlp_export() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|a| a["key"] == "session.id" || a["key"] == "langfuse.session.id");
+            .any(|a| a["key"] == "langfuse.session.id");
         assert!(
             !has_session_attr,
             "empty-session span must omit session attributes: {span}"

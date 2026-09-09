@@ -229,8 +229,14 @@ pub fn apply_sse_rule(
                                 acc.chat_tools.last_mut().unwrap()
                             }
                         };
+                        // First hit wins: compatible gateways may resend the
+                        // function name on later chunks — appending would
+                        // duplicate it. Arguments stay append-only (they are
+                        // genuinely chunked).
                         if let Some(n) = tc["function"]["name"].as_str() {
-                            entry.1.name.push_str(n);
+                            if entry.1.name.is_empty() {
+                                entry.1.name = n.to_string();
+                            }
                         }
                         if let Some(a) = tc["function"]["arguments"].as_str() {
                             entry.1.arguments.push_str(a);
@@ -315,11 +321,56 @@ pub fn nonstreaming(
     let user_input = d.user_input(req)?;
     let final_output = d.final_output(resp).unwrap_or_default();
     let usage = crate::trace::adaptor::usage_from_nonstreaming(d, resp);
+    let model_name = req["model"].as_str().unwrap_or_default().to_string();
+    let user_id = d.end_user(req).unwrap_or_default();
     Some(crate::trace::store::TurnRecord {
         protocol: d.name.to_string(),
         user_input,
         final_output,
         usage,
+        model_name,
+        user_id,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chat_chunk(name: &str, arguments: &str) -> String {
+        format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "function": {"name": name, "arguments": arguments}
+                    }]}
+                }]
+            })
+        )
+    }
+
+    /// Incidental (R3 #4): a chat tool name re-sent on later chunks must be
+    /// recorded once (first hit wins) — appending would duplicate it on
+    /// name-resending compatible gateways. Chunked arguments still
+    /// concatenate.
+    #[test]
+    fn chat_tool_name_first_hit_wins() {
+        let d =
+            crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.chat_completions")
+                .unwrap();
+        let body =
+            chat_chunk("read_file", r#"{"pa"#) + &chat_chunk("read_file", r#"th":"/tmp/x"}"#);
+        let out = stream_response(d, body.as_bytes());
+        assert_eq!(out.tools.len(), 1);
+        assert_eq!(
+            out.tools[0].name, "read_file",
+            "re-sent name must not concatenate: {:?}",
+            out.tools[0].name
+        );
+        assert_eq!(out.tools[0].arguments, r#"{"path":"/tmp/x"}"#);
+    }
 }

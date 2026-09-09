@@ -14,7 +14,8 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 const GEN_SPAN_ID_SEED: &str = "\u{0}gen";
 
 use crate::trace::adaptor::{
-    usage_details_json, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, GENERATION_SPAN_NAME,
+    usage_details_json, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT, ATTR_OBSERVATION_OUTPUT,
+    ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID, GENERATION_SPAN_NAME,
     LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
 };
 
@@ -124,7 +125,11 @@ async fn flush_batch(
     let payload = build_otlp_json(batch);
     let mut req = client
         .post(normalize_endpoint_path(endpoint))
-        .header("content-type", "application/json");
+        .header("content-type", "application/json")
+        .header(
+            crate::trace::adaptor::INGESTION_VERSION_HEADER,
+            crate::trace::adaptor::INGESTION_VERSION,
+        );
     if let Some(auth) = auth_header {
         req = req.header("authorization", auth);
     }
@@ -196,7 +201,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // every span in the trace (spec section 3).
             let mut attributes = Vec::new();
             if !r.session_id.is_empty() {
-                attributes.push(kv("session.id", &r.session_id));
+                // P2-14: single official key — dual spelling converged.
                 attributes.push(kv("langfuse.session.id", &r.session_id));
             }
             attributes.extend([
@@ -210,19 +215,52 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 kv("raw_response", &r.raw_response),
                 kv("breakpoint", if r.breakpoint { "true" } else { "false" }),
             ]);
+            // P0-3: official observation content keys (UI panel reads these);
+            // empty strings are omitted.
+            if !r.user_input.is_empty() {
+                attributes.push(kv(ATTR_OBSERVATION_INPUT, &r.user_input));
+            }
+            if !r.user_id.is_empty() {
+                attributes.push(kv(ATTR_USER_ID, &r.user_id));
+            }
+            if !r.final_output.is_empty() {
+                attributes.push(kv(ATTR_OBSERVATION_OUTPUT, &r.final_output));
+            }
             if !r.tool_calls.is_empty() {
                 let tool_calls_json = serde_json::to_string(&r.tool_calls).unwrap_or_default();
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
-            let agent_span = serde_json::json!({
+            let agent_span_id = span_id_for(&r.session_id, &r.user_input, &r.raw_request);
+            let mut agent_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
-                "spanId": span_id_for(&r.session_id, &r.user_input, &r.raw_request),
+                "spanId": agent_span_id,
                 "name": "agent.turn",
                 "kind": 3,
                 "startTimeUnixNano": r.start_ns.to_string(),
                 "endTimeUnixNano": r.end_ns.to_string(),
                 "attributes": attributes
             });
+            // AMB-7: native OTLP span status. Langfuse's native-OTLP
+            // property mapping derives each observation's `level` from
+            // `span.status.code` and its `statusMessage` from
+            // `span.status.message` (observation-level mapping table:
+            // level ← "Inferred from span.status.code", statusMessage ←
+            // "Inferred from span.status.message"). The mapping is
+            // per-span, so the generation child carries the same ERROR
+            // status as its agent parent — generation-filtered error views
+            // would otherwise lose errored turns. Native form chosen over
+            // a `langfuse.observation.status_message` attribute because
+            // the native block sets both level and message in one field.
+            let status = r.error.as_ref().map(|err| {
+                serde_json::json!({
+                    // OTLP StatusCode::Error — Langfuse maps to level=ERROR.
+                    "code": 2,
+                    "message": err
+                })
+            });
+            if let Some(s) = &status {
+                agent_span["status"] = s.clone();
+            }
             // Generation child span: carries the usage_details (exclusive
             // buckets) — the only span type Langfuse reads usage from. The
             // child span id is derived with a distinct seed so it never
@@ -233,24 +271,40 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 }
                 _ => Vec::new(),
             };
-            let generation_attributes: Vec<serde_json::Value> = [
+            // Trace-level attributes (session/tags/name) are copied onto
+            // every span in the trace (spec section 3) — including the
+            // generation child, so observation-level session filters see usage.
+            let mut generation_attributes: Vec<serde_json::Value> = vec![
                 kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
                 kv_array("langfuse.trace.tags", &[LANGFUSE_TRACE_TAG]),
                 kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
-            ]
-            .into_iter()
-            .chain(usage_attrs)
-            .collect();
-            let generation_span = serde_json::json!({
+            ];
+            if !r.session_id.is_empty() {
+                // P2-14: single official key (dual spelling converged).
+                generation_attributes.push(kv("langfuse.session.id", &r.session_id));
+            }
+            if !r.user_id.is_empty() {
+                generation_attributes.push(kv(ATTR_USER_ID, &r.user_id));
+            }
+            if !r.model_name.is_empty() {
+                generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
+            }
+            generation_attributes.extend(usage_attrs);
+            let mut generation_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
                 "spanId": span_id_for(&r.session_id, GEN_SPAN_ID_SEED, &r.raw_request),
-                "parentSpanId": span_id_for(&r.session_id, &r.user_input, &r.raw_request),
+                "parentSpanId": agent_span_id,
                 "name": GENERATION_SPAN_NAME,
                 "kind": 3,
                 "startTimeUnixNano": r.start_ns.to_string(),
                 "endTimeUnixNano": r.end_ns.to_string(),
                 "attributes": generation_attributes
             });
+            // AMB-7: same ERROR status as the agent span (mapping is
+            // per-span — see the status block above).
+            if let Some(s) = &status {
+                generation_span["status"] = s.clone();
+            }
             vec![agent_span, generation_span]
         })
         .collect();
@@ -320,33 +374,18 @@ fn random_bytes(n: usize) -> Vec<u8> {
     buf
 }
 
-/// Trace id: deterministic per explicit session (all turns of one session
-/// share one trace); empty sessions get a fresh random trace per turn so
-/// session-less turns never collapse into one shared trace.
-fn trace_id_for(session_id: &str) -> String {
-    if session_id.is_empty() {
-        return random_trace_id();
-    }
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"trace:");
-    h.update(session_id.as_bytes());
-    hex::encode(&h.finalize()[..16])
+/// Trace id: random per turn. One trace == one request/turn; session
+/// grouping is carried by the langfuse.session.id attribute — a
+/// deterministic session-hash trace id was pure risk (Langfuse upserts
+/// span ids, so distinct turns sharing ids get silently swallowed).
+fn trace_id_for(_session_id: &str) -> String {
+    random_trace_id()
 }
 
-/// Span id: deterministic per (session, turn content) for explicit sessions;
-/// random when sessionless (mirrors trace_id_for's per-turn uniqueness).
-fn span_id_for(session_id: &str, user_input: &str, raw_request: &str) -> String {
-    if session_id.is_empty() {
-        return random_span_id();
-    }
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"span:");
-    h.update(session_id.as_bytes());
-    h.update(user_input.as_bytes());
-    h.update(raw_request.len().to_be_bytes());
-    hex::encode(&h.finalize()[..8])
+/// Span id: random per span (turns and their generation children each get a
+/// fresh id; Langfuse upserts span ids, so collisions are silently dropped).
+fn span_id_for(_session_id: &str, _user_input: &str, _raw_request: &str) -> String {
+    random_span_id()
 }
 
 /// Test helper: current health counters.
@@ -442,7 +481,8 @@ mod tests {
                 .and_then(|v| v["stringValue"].as_str())
                 .unwrap_or_else(|| panic!("{k} missing: {span}"))
         };
-        assert_eq!(value("session.id"), "sess-1");
+        // P2-14: single official key (dual spelling converged).
+        assert_eq!(value("langfuse.session.id"), "sess-1");
         assert_eq!(value("langfuse.session.id"), "sess-1");
         assert_eq!(value("langfuse.trace.name"), "agent.turn");
         assert_eq!(value("langfuse.observation.type"), "agent");
@@ -526,30 +566,60 @@ mod tests {
         assert!(span_attr(agent, "langfuse.observation.usage_details").is_none());
     }
 
-    /// G2: two session-less turns must not collapse into one trace.
+    /// G2/P0-1: ids are random per turn — replaying the same record twice
+    /// (same session, same content) must yield distinct trace/span ids so
+    /// Langfuse's span upsert never silently swallows turns.
     #[test]
-    fn empty_session_gets_unique_trace_ids() {
-        let t1 = trace_id_for("");
-        let t2 = trace_id_for("");
-        assert_ne!(t1, t2, "session-less turns share a trace id");
-        assert_eq!(t1.len(), 32);
-        let s1 = span_id_for("", "same input", "same raw");
-        let s2 = span_id_for("", "same input", "same raw");
-        assert_ne!(s1, s2, "session-less spans share a span id");
-        assert_eq!(s1.len(), 16);
+    fn replayed_turns_get_distinct_ids() {
+        // 5 identical records -> 10 distinct ids (agent + generation each).
+        let mut records = Vec::new();
+        for _ in 0..5 {
+            records.push(record("sess-1"));
+        }
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&records)).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        let mut ids: Vec<&str> = spans
+            .iter()
+            .map(|s| s["spanId"].as_str().unwrap())
+            .collect();
+        ids.sort();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            before,
+            "duplicate span ids across turns: {ids:?}"
+        );
+        // Same request replayed N times -> N distinct trace ids.
+        let mut trace_ids: Vec<String> = (0..5).map(|_| trace_id_for("sess-1")).collect();
+        trace_ids.sort();
+        let before = trace_ids.len();
+        trace_ids.dedup();
+        assert_eq!(trace_ids.len(), before, "replayed turns shared a trace id");
     }
 
-    /// Explicit sessions keep the deterministic id scheme (same session ->
-    /// same trace id, spanning turns).
+    /// AMB-7: an errored turn marks BOTH spans — Langfuse infers each
+    /// observation's level from its own span.status.code (per-span
+    /// mapping), so the generation child needs the ERROR status for
+    /// generation-scoped error views.
     #[test]
-    fn explicit_session_keeps_deterministic_ids() {
-        assert_eq!(trace_id_for("abc"), trace_id_for("abc"));
-        assert_ne!(trace_id_for("abc"), trace_id_for("abd"));
-        let payload: serde_json::Value =
-            serde_json::from_str(&build_otlp_json(&[record("abc")])).unwrap();
-        let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
-        assert_eq!(span["traceId"], trace_id_for("abc"));
-        assert_eq!(span["spanId"], span_id_for("abc", "", ""));
+    fn errored_turn_marks_both_spans() {
+        let mut r = record("sess-err");
+        r.error = Some("response.failed: upstream 500".to_string());
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 2);
+        for s in spans {
+            assert_eq!(s["status"]["code"], 2, "both spans must be ERROR: {s}");
+            assert_eq!(
+                s["status"]["message"], "response.failed: upstream 500",
+                "statusMessage must carry the error text: {s}"
+            );
+        }
     }
 
     /// The otelcol OTLP/HTTP receiver only accepts POSTs on /v1/traces; a
