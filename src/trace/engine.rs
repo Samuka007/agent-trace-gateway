@@ -315,11 +315,15 @@ pub fn nonstreaming(
     let user_input = d.user_input(req)?;
     let final_output = d.final_output(resp).unwrap_or_default();
     let usage = crate::trace::adaptor::usage_from_nonstreaming(d, resp);
+    let model_name = req["model"].as_str().unwrap_or_default().to_string();
+    let user_id = d.end_user(req).unwrap_or_default();
     Some(crate::trace::store::TurnRecord {
         protocol: d.name.to_string(),
         user_input,
         final_output,
         usage,
+        model_name,
+        user_id,
         ..Default::default()
     })
 }

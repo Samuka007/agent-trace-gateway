@@ -14,8 +14,9 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 const GEN_SPAN_ID_SEED: &str = "\u{0}gen";
 
 use crate::trace::adaptor::{
-    usage_details_json, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, GENERATION_SPAN_NAME,
-    LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
+    usage_details_json, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT, ATTR_OBSERVATION_OUTPUT,
+    ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME,
+    LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
 };
 
 #[derive(Default)]
@@ -124,7 +125,11 @@ async fn flush_batch(
     let payload = build_otlp_json(batch);
     let mut req = client
         .post(normalize_endpoint_path(endpoint))
-        .header("content-type", "application/json");
+        .header("content-type", "application/json")
+        .header(
+            crate::trace::adaptor::INGESTION_VERSION_HEADER,
+            crate::trace::adaptor::INGESTION_VERSION,
+        );
     if let Some(auth) = auth_header {
         req = req.header("authorization", auth);
     }
@@ -210,19 +215,34 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 kv("raw_response", &r.raw_response),
                 kv("breakpoint", if r.breakpoint { "true" } else { "false" }),
             ]);
+            // P0-3: official observation content keys (UI panel reads these);
+            // empty strings are omitted.
+            if !r.user_input.is_empty() {
+                attributes.push(kv(ATTR_OBSERVATION_INPUT, &r.user_input));
+            }
+            if !r.final_output.is_empty() {
+                attributes.push(kv(ATTR_OBSERVATION_OUTPUT, &r.final_output));
+            }
             if !r.tool_calls.is_empty() {
                 let tool_calls_json = serde_json::to_string(&r.tool_calls).unwrap_or_default();
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
-            let agent_span = serde_json::json!({
+            let agent_span_id = span_id_for(&r.session_id, &r.user_input, &r.raw_request);
+            let mut agent_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
-                "spanId": span_id_for(&r.session_id, &r.user_input, &r.raw_request),
+                "spanId": agent_span_id,
                 "name": "agent.turn",
                 "kind": 3,
                 "startTimeUnixNano": r.start_ns.to_string(),
                 "endTimeUnixNano": r.end_ns.to_string(),
                 "attributes": attributes
             });
+            if let Some(err) = &r.error {
+                agent_span["status"] = serde_json::json!({
+                    "code": 2,
+                    "message": err
+                });
+            }
             // Generation child span: carries the usage_details (exclusive
             // buckets) — the only span type Langfuse reads usage from. The
             // child span id is derived with a distinct seed so it never
@@ -233,18 +253,26 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 }
                 _ => Vec::new(),
             };
-            let generation_attributes: Vec<serde_json::Value> = [
+            // Trace-level attributes (session/tags/name) are copied onto
+            // every span in the trace (spec section 3) — including the
+            // generation child, so observation-level session filters see usage.
+            let mut generation_attributes: Vec<serde_json::Value> = vec![
                 kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
                 kv_array("langfuse.trace.tags", &[LANGFUSE_TRACE_TAG]),
                 kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
-            ]
-            .into_iter()
-            .chain(usage_attrs)
-            .collect();
+            ];
+            if !r.session_id.is_empty() {
+                generation_attributes.push(kv("session.id", &r.session_id));
+                generation_attributes.push(kv("langfuse.session.id", &r.session_id));
+            }
+            if !r.model_name.is_empty() {
+                generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
+            }
+            generation_attributes.extend(usage_attrs);
             let generation_span = serde_json::json!({
                 "traceId": trace_id_for(&r.session_id),
                 "spanId": span_id_for(&r.session_id, GEN_SPAN_ID_SEED, &r.raw_request),
-                "parentSpanId": span_id_for(&r.session_id, &r.user_input, &r.raw_request),
+                "parentSpanId": agent_span_id,
                 "name": GENERATION_SPAN_NAME,
                 "kind": 3,
                 "startTimeUnixNano": r.start_ns.to_string(),
@@ -320,33 +348,18 @@ fn random_bytes(n: usize) -> Vec<u8> {
     buf
 }
 
-/// Trace id: deterministic per explicit session (all turns of one session
-/// share one trace); empty sessions get a fresh random trace per turn so
-/// session-less turns never collapse into one shared trace.
-fn trace_id_for(session_id: &str) -> String {
-    if session_id.is_empty() {
-        return random_trace_id();
-    }
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"trace:");
-    h.update(session_id.as_bytes());
-    hex::encode(&h.finalize()[..16])
+/// Trace id: random per turn. One trace == one request/turn; session
+/// grouping is carried by the langfuse.session.id attribute — a
+/// deterministic session-hash trace id was pure risk (Langfuse upserts
+/// span ids, so distinct turns sharing ids get silently swallowed).
+fn trace_id_for(_session_id: &str) -> String {
+    random_trace_id()
 }
 
-/// Span id: deterministic per (session, turn content) for explicit sessions;
-/// random when sessionless (mirrors trace_id_for's per-turn uniqueness).
-fn span_id_for(session_id: &str, user_input: &str, raw_request: &str) -> String {
-    if session_id.is_empty() {
-        return random_span_id();
-    }
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"span:");
-    h.update(session_id.as_bytes());
-    h.update(user_input.as_bytes());
-    h.update(raw_request.len().to_be_bytes());
-    hex::encode(&h.finalize()[..8])
+/// Span id: random per span (turns and their generation children each get a
+/// fresh id; Langfuse upserts span ids, so collisions are silently dropped).
+fn span_id_for(_session_id: &str, _user_input: &str, _raw_request: &str) -> String {
+    random_span_id()
 }
 
 /// Test helper: current health counters.
@@ -526,30 +539,32 @@ mod tests {
         assert!(span_attr(agent, "langfuse.observation.usage_details").is_none());
     }
 
-    /// G2: two session-less turns must not collapse into one trace.
+    /// G2/P0-1: ids are random per turn — replaying the same record twice
+    /// (same session, same content) must yield distinct trace/span ids so
+    /// Langfuse's span upsert never silently swallows turns.
     #[test]
-    fn empty_session_gets_unique_trace_ids() {
-        let t1 = trace_id_for("");
-        let t2 = trace_id_for("");
-        assert_ne!(t1, t2, "session-less turns share a trace id");
-        assert_eq!(t1.len(), 32);
-        let s1 = span_id_for("", "same input", "same raw");
-        let s2 = span_id_for("", "same input", "same raw");
-        assert_ne!(s1, s2, "session-less spans share a span id");
-        assert_eq!(s1.len(), 16);
-    }
-
-    /// Explicit sessions keep the deterministic id scheme (same session ->
-    /// same trace id, spanning turns).
-    #[test]
-    fn explicit_session_keeps_deterministic_ids() {
-        assert_eq!(trace_id_for("abc"), trace_id_for("abc"));
-        assert_ne!(trace_id_for("abc"), trace_id_for("abd"));
+    fn replayed_turns_get_distinct_ids() {
+        // 5 identical records -> 10 distinct ids (agent + generation each).
+        let mut records = Vec::new();
+        for _ in 0..5 {
+            records.push(record("sess-1"));
+        }
         let payload: serde_json::Value =
-            serde_json::from_str(&build_otlp_json(&[record("abc")])).unwrap();
-        let span = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
-        assert_eq!(span["traceId"], trace_id_for("abc"));
-        assert_eq!(span["spanId"], span_id_for("abc", "", ""));
+            serde_json::from_str(&build_otlp_json(&records)).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        let mut ids: Vec<&str> = spans.iter().map(|s| s["spanId"].as_str().unwrap()).collect();
+        ids.sort();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "duplicate span ids across turns: {ids:?}");
+        // Same request replayed N times -> N distinct trace ids.
+        let mut trace_ids: Vec<String> = (0..5).map(|_| trace_id_for("sess-1")).collect();
+        trace_ids.sort();
+        let before = trace_ids.len();
+        trace_ids.dedup();
+        assert_eq!(trace_ids.len(), before, "replayed turns shared a trace id");
     }
 
     /// The otelcol OTLP/HTTP receiver only accepts POSTs on /v1/traces; a

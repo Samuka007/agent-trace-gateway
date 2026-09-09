@@ -185,6 +185,39 @@ async fn otlp_export() {
         r#"{"input":8,"output":2,"total":10}"#,
         "usage_details must be the flat snake_case JSON: {generation}"
     );
+    // P0-2: chat is an inclusive protocol — the exported input bucket must
+    // be input - cached (fixture chat usage: prompt 8, cached 0 → 8; with a
+    // cache hit recorded here for the exclusive derivation).
+    // (covered by adaptor unit tests; here we pin the wire shape)
+    // P0-3: official observation content keys on the agent span.
+    assert_eq!(
+        attr("langfuse.observation.input"),
+        "otlp-turn",
+        "observation.input must be the user text: {attrs:?}"
+    );
+    assert!(
+        attr("langfuse.observation.output")
+            .contains("otlp-turn"),
+        "observation.output must be the final text: {attrs:?}"
+    );
+    // P0-5: model name on the generation child span.
+    let model_value = |k: &str| {
+        generation["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["key"] == k)
+            .and_then(|a| a["value"]["stringValue"].as_str())
+            .unwrap_or_default()
+    };
+    assert_eq!(model_value("langfuse.observation.model.name"), "m", "{generation}");
+    // P0-4: session.id (both forms) copied onto the generation child span.
+    assert_eq!(model_value("session.id"), "otlp-session-1", "{generation}");
+    assert_eq!(
+        model_value("langfuse.session.id"),
+        "otlp-session-1",
+        "observation-level session filter must see usage: {generation}"
+    );
     // No gen_ai.* keys anywhere (inclusive-normalized keys must not mix with
     // exclusive usage_details).
     for s in spans {

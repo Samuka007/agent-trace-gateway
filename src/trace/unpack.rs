@@ -54,6 +54,22 @@ pub fn extract_user_input(protocol: &str, request_body: &[u8]) -> Option<String>
     d.user_input(&req)
 }
 
+/// Extract the requested model name from a request body (all three protocols
+/// carry it at body.model).
+/// Extract the end-user identity (langfuse.user.id) from a request body.
+pub fn extract_end_user(protocol: &str, request_body: &[u8]) -> Option<String> {
+    let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
+    d.end_user(&req)
+}
+
+pub fn extract_model_name(protocol: &str, request_body: &[u8]) -> Option<String> {
+    crate::trace::descriptor::ProtocolDescriptor::detect_by_name(protocol)?;
+    let req: serde_json::Value = serde_json::from_slice(request_body).ok()?;
+    Some(req["model"].as_str().unwrap_or_default().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Extract the full messages array from a chat/anthropic request body for
 /// prefix stitching. Returns None for non-message protocols.
 pub fn extract_messages(request_body: &[u8]) -> Option<Vec<serde_json::Value>> {

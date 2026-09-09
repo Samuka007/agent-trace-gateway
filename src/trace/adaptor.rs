@@ -20,6 +20,15 @@ pub const OBSERVATION_TYPE_AGENT: &str = "agent";
 pub const OBSERVATION_TYPE_GENERATION: &str = "generation";
 pub const GENERATION_SPAN_NAME: &str = "agent.turn.generation";
 
+/// Official observation content keys (UI panel reads input/output).
+pub const ATTR_OBSERVATION_INPUT: &str = "langfuse.observation.input";
+pub const ATTR_OBSERVATION_OUTPUT: &str = "langfuse.observation.output";
+/// Generation-exclusive model name.
+pub const ATTR_MODEL_NAME: &str = "langfuse.observation.model.name";
+/// Ingestion version header (v4 = current Langfuse OTLP protocol).
+pub const INGESTION_VERSION_HEADER: &str = "x-langfuse-ingestion-version";
+pub const INGESTION_VERSION: &str = "4";
+
 /// gen_ai.* attribute keys (values written only when Some).
 pub const ATTR_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 pub const ATTR_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
@@ -125,13 +134,25 @@ pub fn usage_from_obj(
     let read = |alts: &[&[&str]]| -> Option<u64> {
         alts.iter().find_map(|p| opt_u64(resolve_path(usage, p)))
     };
-    TurnUsage {
+    let mut u = TurnUsage {
         input_tokens: read(shape.input),
         output_tokens: read(shape.output),
         cache_read_tokens: read(shape.cache_read),
         cache_creation_tokens: read(shape.cache_write),
         total_tokens: opt_u64(&usage["total_tokens"]),
+    };
+    // Exclusive-bucket semantics: OpenAI's input count INCLUDES cached
+    // tokens; Langfuse usage buckets are mutually exclusive, so subtract.
+    // (Anthropic's input is already exclusive — unchanged.)
+    if d.usage_inclusion == crate::trace::descriptor::TokenInclusion::Inclusive {
+        if let (Some(input), Some(cached)) = (u.input_tokens, u.cache_read_tokens) {
+            u.input_tokens = Some(input.saturating_sub(cached));
+        }
+        if let (Some(input), Some(creation)) = (u.input_tokens, u.cache_creation_tokens) {
+            u.input_tokens = Some(input.saturating_sub(creation));
+        }
     }
+    u
 }
 
 fn opt_u64(v: &Value) -> Option<u64> {
@@ -273,7 +294,8 @@ mod tests {
             r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":22,"total_tokens":122,"input_tokens_details":{"cached_tokens":64,"cache_write_tokens":2}}}}"#,
         );
         let u = usage_from_sse_frame(d, &v).expect("usage");
-        assert_eq!(u.input_tokens, Some(100));
+        // P0-2: inclusive input is derived exclusive (100 - 64 - 2 = 34).
+        assert_eq!(u.input_tokens, Some(34));
         assert_eq!(u.output_tokens, Some(22));
         assert_eq!(u.total_tokens, Some(122));
         assert_eq!(u.cache_read_tokens, Some(64), "nested details path");
@@ -289,10 +311,35 @@ mod tests {
             r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":40}}}"#,
         );
         let u = usage_from_sse_frame(d, &v).expect("usage");
-        assert_eq!(u.input_tokens, Some(100));
+        // P0-2: inclusive prompt_tokens (100) derives exclusive input (60).
+        assert_eq!(u.input_tokens, Some(60));
         assert_eq!(u.output_tokens, Some(5));
         assert_eq!(u.total_tokens, Some(105));
         assert_eq!(u.cache_read_tokens, Some(40), "nested details path");
+    }
+
+    /// P0-2: inclusive protocols derive the exclusive input bucket —
+    /// input(100 with cached 64 + creation 2 inside) exports as 34.
+    #[test]
+    fn inclusive_input_derives_exclusive_bucket() {
+        let d = crate::trace::descriptor::ProtocolDescriptor::detect_by_name("openai.responses")
+            .unwrap();
+        let v = frame(
+            r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":22,"total_tokens":122,"input_tokens_details":{"cached_tokens":64,"cache_write_tokens":2}}}}"#,
+        );
+        let u = usage_from_sse_frame(d, &v).expect("usage");
+        assert_eq!(
+            u.input_tokens,
+            Some(34),
+            "inclusive input must be derived exclusive: input - cached - write"
+        );
+        assert_eq!(u.cache_read_tokens, Some(64));
+        assert_eq!(u.cache_creation_tokens, Some(2));
+        // usage_details reflects the derived buckets.
+        assert_eq!(
+            usage_details_json(&u),
+            r#"{"cache_creation_input_tokens":2,"cache_read_input_tokens":64,"input":34,"output":22,"total":122}"#
+        );
     }
 
     #[test]
@@ -303,7 +350,8 @@ mod tests {
             r#"{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":100,"output_tokens":8,"total_tokens":108,"input_token_details":{"cached_tokens":30}}}}"#,
         );
         let u = usage_from_sse_frame(d, &v).expect("usage");
-        assert_eq!(u.input_tokens, Some(100));
+        // P0-2: inclusive live input derives exclusive input (70).
+        assert_eq!(u.input_tokens, Some(70));
         assert_eq!(u.output_tokens, Some(8));
         assert_eq!(u.total_tokens, Some(108));
         assert_eq!(u.cache_read_tokens, Some(30), "nested live details path");

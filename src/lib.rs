@@ -252,6 +252,9 @@ pub mod gateway_app {
                 }
                 let user_input =
                     unpack::extract_user_input(protocol, &ctx.req_buf).unwrap_or_default();
+                let model_name =
+                    unpack::extract_model_name(protocol, &ctx.req_buf).unwrap_or_default();
+                let user_id = unpack::extract_end_user(protocol, &ctx.req_buf).unwrap_or_default();
                 ctx.end_ns = now_ns();
                 self.push_record(crate::trace::store::TurnRecord {
                     protocol: protocol.to_string(),
@@ -266,6 +269,8 @@ pub mod gateway_app {
                     end_ns: ctx.end_ns,
                     usage,
                     error,
+                    model_name,
+                    user_id,
                 });
                 return;
             }

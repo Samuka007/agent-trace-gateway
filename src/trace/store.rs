@@ -28,6 +28,12 @@ pub struct TurnRecord {
     /// Token usage reported by the model protocol (None = not reported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::trace::adaptor::TurnUsage>,
+    /// Model name from the request body (generation-exclusive attribute).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_name: String,
+    /// End-user identity (langfuse.user.id; OpenAI user/safety_identifier).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user_id: String,
     /// Protocol error marker (response.failed / event:error) when the turn
     /// terminated abnormally; serde-skipped when None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
