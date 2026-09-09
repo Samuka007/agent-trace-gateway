@@ -11,9 +11,10 @@ const QUEUE_CAPACITY: usize = 1024;
 const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 use atg_model::{
-    usage_details_json, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT, ATTR_OBSERVATION_OUTPUT,
-    ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID, GENERATION_SPAN_NAME,
-    LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT, OBSERVATION_TYPE_GENERATION,
+    usage_details_json, ATTR_COMPLETION_START_TIME, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT,
+    ATTR_OBSERVATION_OUTPUT, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID,
+    GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT,
+    OBSERVATION_TYPE_GENERATION,
 };
 
 #[derive(Default)]
@@ -226,6 +227,12 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             for (k, v) in &r.harness_enrich {
                 trace_extra.push(kv(&format!("langfuse.trace.metadata.{k}"), v));
             }
+            // P1-10: modeltrace-aligned trace metadata — the entry protocol
+            // and the client-declared model (queryable cross-line).
+            trace_extra.push(kv("langfuse.trace.metadata.entry_protocol", &r.protocol));
+            if !r.model_name.is_empty() {
+                trace_extra.push(kv("langfuse.trace.metadata.client_model", &r.model_name));
+            }
             if !r.session_id.is_empty() {
                 // P2-14: single official key — dual spelling converged.
                 attributes.push(kv("langfuse.session.id", &r.session_id));
@@ -316,6 +323,12 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             if !r.model_name.is_empty() {
                 generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
             }
+            // P1-8: generation-exclusive completion start (ISO 8601 Z,
+            // nanosecond precision) — first output byte on the wire
+            // (streaming) or the request start (non-streaming).
+            if let Some(ns) = r.completion_start_ns {
+                generation_attributes.push(kv(ATTR_COMPLETION_START_TIME, &iso8601_z(ns)));
+            }
             generation_attributes.extend(usage_attrs);
             generation_attributes.extend(trace_extra.iter().cloned());
             let mut generation_span = serde_json::json!({
@@ -352,6 +365,33 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
 
 fn kv(key: &str, value: &str) -> serde_json::Value {
     serde_json::json!({"key": key, "value": {"stringValue": value}})
+}
+
+/// Unix nanoseconds → ISO 8601 UTC string with nanosecond precision
+/// (e.g. "2026-09-09T03:12:59.123456789Z"). Civil-from-days per Howard
+/// Hinnant's algorithm (std-only; no chrono dependency).
+fn iso8601_z(ns: u64) -> String {
+    let secs = (ns / 1_000_000_000) as i64;
+    let nanos = ns % 1_000_000_000;
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    // days since 1970-01-01 → (y, m, d) in the proleptic Gregorian calendar.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let (hh, mm, ss) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{nanos:09}Z")
 }
 
 /// OTLP string-array attribute (Langfuse tags carry array semantics; see
@@ -671,6 +711,44 @@ mod tests {
                     .any(|t| t["stringValue"] == "harness:claude-code"),
                 "harness tag on every span: {tags:?}"
             );
+        }
+    }
+
+    /// P1-8/P1-10: generation span carries the ISO-8601 completion start
+    /// (nanosecond precision); trace metadata carries entry_protocol and
+    /// client_model on both spans.
+    #[test]
+    fn completion_start_and_trace_metadata_wire() {
+        let mut r = record("sess-p18");
+        r.model_name = "m".to_string();
+        // 2026-09-09T00:00:00.000000042Z
+        r.completion_start_ns = Some(1_788_912_000_000_000_042);
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        let agent = &spans[0];
+        let generation = &spans[1];
+        let value = |s: &serde_json::Value, k: &str| -> String {
+            span_attr(s, k)
+                .and_then(|v| v["stringValue"].as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(
+            value(generation, "langfuse.observation.completion_start_time"),
+            "2026-09-09T00:00:00.000000042Z",
+            "ISO 8601 Z with nanosecond precision"
+        );
+        // Generation-exclusive: never on the agent span.
+        assert!(span_attr(agent, "langfuse.observation.completion_start_time").is_none());
+        // P1-10 trace metadata, modeltrace-aligned key names.
+        for s in [agent, generation] {
+            assert_eq!(
+                value(s, "langfuse.trace.metadata.entry_protocol"),
+                "openai.responses"
+            );
+            assert_eq!(value(s, "langfuse.trace.metadata.client_model"), "m");
         }
     }
 

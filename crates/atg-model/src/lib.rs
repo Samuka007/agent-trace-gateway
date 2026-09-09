@@ -26,6 +26,9 @@ pub const ATTR_OBSERVATION_OUTPUT: &str = "langfuse.observation.output";
 pub const ATTR_USER_ID: &str = "langfuse.user.id";
 /// Generation-exclusive model name.
 pub const ATTR_MODEL_NAME: &str = "langfuse.observation.model.name";
+/// Generation-exclusive timestamp for when the model began generating
+/// (ISO 8601, UTC, nanosecond precision).
+pub const ATTR_COMPLETION_START_TIME: &str = "langfuse.observation.completion_start_time";
 /// Ingestion version header (v4 = current Langfuse OTLP protocol).
 pub const INGESTION_VERSION_HEADER: &str = "x-langfuse-ingestion-version";
 pub const INGESTION_VERSION: &str = "4";
@@ -175,6 +178,12 @@ pub struct TurnRecord {
     /// and excluded from session hit-rate numerators (§E ruling).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub session_synthetic: bool,
+    /// When the model began generating (first output byte on the wire:
+    /// first SSE body chunk / first WS server frame; non-streaming =
+    /// request start). Unix nanoseconds; exported as
+    /// langfuse.observation.completion_start_time (generation-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_start_ns: Option<u64>,
 }
 
 /// One tool invocation observed in a turn.

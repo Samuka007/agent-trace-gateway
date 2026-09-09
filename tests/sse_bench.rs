@@ -59,9 +59,11 @@ fn bench_sse_reassembly_256k() {
     let (elapsed, text_len) = median_of3(run);
     println!("SSE 264KB reassembly: {elapsed:?} (text {text_len} bytes)");
     assert!(text_len > 0);
-    // Hard gate: <= 1.7ms (v0.2.0 baseline); target 0.8ms.
+    // Gate: <= 700µs (measured 372-435µs across machines; ~2x margin per
+    // the v0.3.0 ruling — tight enough to catch regressions, loose enough
+    // to survive CI-runner jitter). v0.2.0 baseline was 1.7ms.
     assert!(
-        elapsed <= std::time::Duration::from_millis(1),
+        elapsed <= std::time::Duration::from_micros(700),
         "SSE reassembly regressed: {elapsed:?}"
     );
 }

@@ -30,13 +30,19 @@ jobs:
         run: rustup component add rustfmt clippy
 
       - name: rustfmt
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        run: cargo test
+        run: cargo test --workspace
+
+      - name: bench gate (release)
+        # F5: the SSE performance gate executes in CI — 264KB reassembly
+        # must stay <= 700µs (v0.3.0 ruling; ~2x margin over the measured
+        # 372-435µs).
+        run: cargo test --release --test sse_bench
 
   image:
     needs: test

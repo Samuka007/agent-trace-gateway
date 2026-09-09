@@ -55,6 +55,10 @@ pub mod gateway_app {
         /// end set when the record is finalized.
         pub start_ns: u64,
         pub end_ns: u64,
+        /// P1-8: first output byte on the wire (first SSE body chunk /
+        /// first WS server frame of the turn) — the truthful
+        /// completion-start moment, reset per turn.
+        pub first_output_ns: Option<u64>,
     }
 
     #[async_trait]
@@ -71,6 +75,7 @@ pub mod gateway_app {
                 ws_turn: atg_protocol::openai::live::WsTurnState::default(),
                 start_ns: now_ns(),
                 end_ns: 0,
+                first_output_ns: None,
             }
         }
 
@@ -208,15 +213,22 @@ pub mod gateway_app {
             if session.was_upgraded() {
                 if let Some(b) = body {
                     for payload in ctx.ws_server_parser.push(b) {
+                        if ctx.ws_turn.active() && ctx.first_output_ns.is_none() {
+                            ctx.first_output_ns = Some(now_ns());
+                        }
                         if let Some(mut record) = ctx.ws_turn.apply_server_frame(&payload) {
                             ctx.end_ns = now_ns();
                             record.start_ns = ctx.start_ns;
                             record.end_ns = ctx.end_ns;
+                            record.completion_start_ns = ctx.first_output_ns.take();
                             self.push_record(record);
                         }
                     }
                 }
             } else if let Some(b) = body {
+                if ctx.resp_buf.is_empty() && !b.is_empty() {
+                    ctx.first_output_ns = Some(now_ns());
+                }
                 ctx.resp_buf.extend_from_slice(b);
             }
             Ok(None)
@@ -347,6 +359,7 @@ pub mod gateway_app {
                     harness_anomaly: hfacts.protocol_anomaly,
                     harness_enrich,
                     session_synthetic,
+                    completion_start_ns: ctx.first_output_ns,
                 });
                 return;
             }
@@ -360,6 +373,7 @@ pub mod gateway_app {
                 record.harness_anomaly = hfacts.protocol_anomaly;
                 record.harness_enrich = harness_enrich;
                 record.session_synthetic = session_synthetic;
+                record.completion_start_ns = Some(ctx.start_ns);
                 record.raw_request = raw_request;
                 record.raw_response = raw_response;
                 ctx.end_ns = now_ns();
