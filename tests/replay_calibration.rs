@@ -66,17 +66,35 @@ fn replay_calibration() {
                 report.push_str(&format!("{name}: 显式 ID ({s})\n"));
             }
             None => {
-                if let Some(messages) = unpack::extract_messages(body) {
-                    let (synthetic, bp) = stitcher.assign(scope, &messages);
-                    prefix_assigned += 1;
-                    breakpoints += usize::from(bp);
-                    report.push_str(&format!(
-                        "{name}: 前缀会话 {synthetic} (breakpoint={bp}, messages={})\n",
-                        messages.len()
-                    ));
-                } else {
+                // F3 (user ruling): only session-semantics protocols may
+                // stitch; chat SDK traffic is stateless single-shot.
+                let eligible = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
+                    .is_some_and(|d| d.stitch_eligible);
+                if eligible {
+                    if let Some(messages) = unpack::extract_messages(body) {
+                        if messages.len() >= 2 {
+                            let (synthetic, bp) = stitcher.assign(scope, &messages);
+                            prefix_assigned += 1;
+                            breakpoints += usize::from(bp);
+                            report.push_str(&format!(
+                                "{name}: 前缀会话 {synthetic} (breakpoint={bp}, messages={})\n",
+                                messages.len()
+                            ));
+                            continue;
+                        }
+                        no_session += 1;
+                        report.push_str(&format!(
+                            "{name}: 单消息无连续性证据，不合成 (F3 链长>=2)\n"
+                        ));
+                        continue;
+                    }
                     no_session += 1;
                     report.push_str(&format!("{name}: 无 messages 数组，单轮轨迹\n"));
+                } else {
+                    no_session += 1;
+                    report.push_str(&format!(
+                        "{name}: chat 无会话语义，退出指纹兜底 (F3 用户裁定)\n"
+                    ));
                 }
             }
         }
@@ -98,25 +116,18 @@ fn replay_calibration() {
     std::fs::create_dir_all(manifest_dir().join("target")).unwrap();
     std::fs::write(&out_path, &report).unwrap();
 
-    // Assertions on the calibration matrix (real samples, 11 total):
-    // claude_cli_request.json + claude_cli_tooluse_request.json +
-    // codex_turn1.json + codex_real_toolturn.json carry explicit ids.
+    // F3 re-baselined matrix (real samples, 11 total): the four CC/codex
+    // fixtures still carry explicit ids (harness pipeline); the six omp
+    // chat samples NO LONGER stitch (user ruling: stateless SDK traffic);
+    // bare_item (responses, no messages array) stays session-less.
     assert_eq!(explicit, 4, "four explicit-id samples expected: {report}");
-    // The six omp bailian/tool samples are all id-less and have messages.
     assert_eq!(
-        prefix_assigned, 6,
-        "six prefix-assignable samples: {report}"
+        prefix_assigned, 0,
+        "chat samples must not stitch after the F3 ruling: {report}"
     );
-    // Among those six, omp_tool_turn4/turn5 form one strict-prefix chain; the
-    // fixture ordering triggers no same-head breakpoint.
+    assert_eq!(breakpoints, 0, "no breakpoint expected: {report}");
     assert_eq!(
-        breakpoints, 0,
-        "no breakpoint expected in fixture order: {report}"
-    );
-    // bare_item_request.json (openai.responses, no messages array) is the
-    // single-turn sample.
-    assert_eq!(
-        no_session, 1,
-        "only the bare-item sample is session-less: {report}"
+        no_session, 7,
+        "six chat samples (ruled out) + bare-item are session-less: {report}"
     );
 }

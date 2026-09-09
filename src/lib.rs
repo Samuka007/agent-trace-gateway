@@ -252,12 +252,19 @@ pub mod gateway_app {
                 .as_ref()
                 .and_then(|req| unpack::resolve_session(protocol, req, &header_get, &hfacts))
                 .unwrap_or_default();
+            let mut session_synthetic = false;
+            // F3 tightening (user ruling): the stitcher runs ONLY for
+            // protocols with session semantics (anthropic/responses — chat
+            // SDK traffic is stateless single-shot, force-stitching is
+            // noise) and only mints a session when the replayed chain has
+            // >=2 messages (a single message cannot evidence continuity).
+            let stitch_eligible = parsed_req.as_ref().is_some_and(|req| {
+                atg_protocol::ProtocolDescriptor::detect_by_name(protocol)
+                    .is_some_and(|d| d.stitch_eligible)
+                    && req["messages"].as_array().is_some_and(|m| m.len() >= 2)
+            });
             self.turns_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if !session_id.is_empty() {
-                self.turns_with_session
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
             if !harness.is_empty() {
                 self.turns_with_harness
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -272,13 +279,20 @@ pub mod gateway_app {
                 .map(|req| atg_harness::enrich(&hfacts, req))
                 .unwrap_or_default();
             let mut breakpoint = false;
-            if session_id.is_empty() {
+            if session_id.is_empty() && stitch_eligible {
                 if let Some(messages) = unpack::extract_messages(&ctx.req_buf) {
                     let scope = header_get("authorization").unwrap_or_default();
                     let (synthetic, is_bp) = self.stitcher.assign(&scope, &messages);
                     session_id = synthetic;
                     breakpoint = is_bp;
+                    session_synthetic = !session_id.is_empty();
                 }
+            }
+            // §E ruling: synthetic sessions stay out of the hit-rate
+            // numerator (they are fallbacks, not observed identifiers).
+            if !session_id.is_empty() && !session_synthetic {
+                self.turns_with_session
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let raw_request = self.cap.bound(&ctx.req_buf);
             let raw_response = self.cap.bound(&ctx.resp_buf);
@@ -340,6 +354,7 @@ pub mod gateway_app {
                     harness_candidates,
                     harness_anomaly: hfacts.protocol_anomaly,
                     harness_enrich,
+                    session_synthetic,
                 });
                 return;
             }
@@ -352,6 +367,7 @@ pub mod gateway_app {
                 record.harness_candidates = harness_candidates;
                 record.harness_anomaly = hfacts.protocol_anomaly;
                 record.harness_enrich = harness_enrich;
+                record.session_synthetic = session_synthetic;
                 record.raw_request = raw_request;
                 record.raw_response = raw_response;
                 ctx.end_ns = now_ns();

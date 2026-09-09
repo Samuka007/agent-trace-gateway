@@ -64,4 +64,6 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     },
     usage_inclusion: crate::TokenInclusion::Inclusive,
     final_output_path: &["choices", "0", "message", "content"],
+    // USER RULING: stateless SDK traffic — the stitcher must not mint sessions.
+    stitch_eligible: false,
 };

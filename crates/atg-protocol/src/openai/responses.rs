@@ -78,6 +78,7 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     },
     usage_inclusion: crate::TokenInclusion::Inclusive,
     final_output_path: &["output"],
+    stitch_eligible: true,
 };
 
 /// responses input reader (named fn referenced by the descriptor): bare items

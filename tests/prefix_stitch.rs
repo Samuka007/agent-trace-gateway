@@ -31,6 +31,17 @@ async fn post_chat(body: &str) {
     let _ = resp.collect().await.unwrap();
 }
 
+async fn post_anthropic(body: &str) {
+    let gw = common::stack::gateway_port();
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .unwrap();
+    let resp = client().request(req).await.expect("request");
+    assert_eq!(resp.status(), 200);
+    let _ = resp.collect().await.unwrap();
+}
+
 async fn records() -> Vec<serde_json::Value> {
     let gw = common::stack::gateway_port();
     let req = Request::get(format!("http://127.0.0.1:{gw}/__atg/records"))
@@ -44,79 +55,96 @@ async fn records() -> Vec<serde_json::Value> {
 async fn prefix_stitch() {
     start_stack(&[]).await;
 
+    // ---- Part A: chat exits the stitcher (USER RULING, F3) -------------
+    // openai.chat_completions SDK traffic is stateless single-shot — no
+    // session semantics, so no synthetic session may be minted from
+    // accidental prefix sharing (previously these stitched).
     let fixture_dir = format!(
         "{}/xtask/harness/fixtures/openai.chat_completions",
         manifest_dir()
     );
-    // Real omp tool-loop samples: turn4 (5 messages) then turn5 (7 messages).
-    // turn5's first 5 messages are byte-identical to turn4 -> strict prefix.
-    for name in ["omp_tool_turn4.json", "omp_tool_turn5.json"] {
+    for name in [
+        "omp_tool_turn4.json",
+        "omp_tool_turn5.json",
+        "omp_tool_turn3.json",
+    ] {
         let body = std::fs::read_to_string(format!("{fixture_dir}/{name}")).unwrap();
         post_chat(&body).await;
     }
-    // turn3 has a DIFFERENT system+first-user head than turn4/turn5, so it is
-    // its own conversation (new session, no breakpoint mark).
-    let turn3 = std::fs::read_to_string(format!("{fixture_dir}/omp_tool_turn3.json")).unwrap();
-    post_chat(&turn3).await;
-    // Compaction simulation: same head as turn4/turn5 but a SHORTER history
-    // (turn5 minus its last message). Must open a new segment with the
-    // breakpoint mark.
-    let turn5: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(format!("{fixture_dir}/omp_tool_turn5.json")).unwrap(),
-    )
-    .unwrap();
-    let mut compacted = turn5.clone();
-    compacted["messages"].as_array_mut().unwrap().pop();
-    post_chat(&compacted.to_string()).await;
-    // Single-shot unrelated request.
     post_chat(r#"{"model":"m","messages":[{"role":"user","content":"one-shot unrelated"}]}"#).await;
-
     let recs = records().await;
     let chat: Vec<_> = recs
         .iter()
         .filter(|r| r["protocol"] == "openai.chat_completions")
         .collect();
-    assert_eq!(
-        chat.len(),
-        5,
-        "five openai.chat_completions records expected: {recs:?}"
-    );
-
-    let s4 = chat[0]["session_id"].as_str().unwrap_or("");
-    let s5 = chat[1]["session_id"].as_str().unwrap_or("");
-    let s3 = chat[2]["session_id"].as_str().unwrap_or("");
-    let sc = chat[3]["session_id"].as_str().unwrap_or("");
-    let s1 = chat[4]["session_id"].as_str().unwrap_or("");
-
-    // No explicit id anywhere: synthetic prefix fingerprints.
-    for (i, s) in [s4, s5, s3, sc, s1].iter().enumerate() {
+    assert_eq!(chat.len(), 4, "four chat records expected: {recs:?}");
+    for (i, r) in chat.iter().enumerate() {
         assert!(
-            s.starts_with("pfx:"),
-            "record {i} must carry a synthetic prefix session, got '{s}'"
+            r["session_id"].as_str().unwrap_or("").is_empty(),
+            "chat record {i} must NOT get a synthetic session (user ruling): {r}"
+        );
+        assert_ne!(
+            r["breakpoint"], true,
+            "no stitcher run -> no breakpoint: {r}"
+        );
+        assert_ne!(
+            r["session_synthetic"], true,
+            "chat records must not be flagged synthetic: {r}"
         );
     }
-    // Strict prefix pair shares one session.
-    assert_eq!(s4, s5, "prefix turns must share one session: {s4} vs {s5}");
-    // Different head -> its own conversation.
-    assert_ne!(s3, s4, "different-head request must not merge");
-    // Same-head shortened history -> new segment, breakpoint marked.
-    assert_ne!(sc, s5, "compacted history must not merge into the chain");
+
+    // ---- Part B: anthropic.messages still stitches --------------------
+    // Same prefix relations as the original test, on a protocol WITH
+    // session semantics (multi-turn replay).
+    let a = r#"{"model":"m","messages":[{"role":"system","content":"st-sys"},{"role":"user","content":"st-u1"}]}"#;
+    let b = r#"{"model":"m","messages":[{"role":"system","content":"st-sys"},{"role":"user","content":"st-u1"},{"role":"assistant","content":"ok"},{"role":"user","content":"st-u2"}]}"#;
+    let c = r#"{"model":"m","messages":[{"role":"system","content":"other-sys"},{"role":"user","content":"st-u1"}]}"#;
+    // Compaction: same head, history shorter than the chain end (a again).
+    let single = r#"{"model":"m","messages":[{"role":"user","content":"one-shot"}]}"#;
+    post_anthropic(a).await;
+    post_anthropic(b).await;
+    post_anthropic(c).await;
+    post_anthropic(a).await;
+    post_anthropic(single).await;
+
+    let recs = records().await;
+    let anth: Vec<_> = recs
+        .iter()
+        .filter(|r| r["protocol"] == "anthropic.messages")
+        .collect();
+    assert_eq!(anth.len(), 5, "five anthropic records expected: {recs:?}");
+    let sid = |i: usize| anth[i]["session_id"].as_str().unwrap_or("").to_string();
+    // Strict prefix pair shares one synthetic session; different head gets
+    // its own; compaction opens a new segment with the breakpoint mark.
+    assert!(
+        sid(0).starts_with("pfx:"),
+        "head mints a session: {:#?}",
+        anth[0]
+    );
+    assert_eq!(sid(0), sid(1), "prefix turns must share one session");
+    assert_ne!(sid(2), sid(0), "different-head request must not merge");
+    assert_ne!(
+        sid(3),
+        sid(1),
+        "compacted history must not merge into the chain"
+    );
     assert_eq!(
-        chat[3]["breakpoint"], true,
-        "compacted segment must carry the breakpoint mark: {:?}",
-        chat[3]
+        anth[3]["breakpoint"], true,
+        "compacted segment must carry the breakpoint mark: {:#?}",
+        anth[3]
     );
-    // Single-shot is independent.
-    assert_ne!(s1, s4);
-    assert_ne!(s1, s3);
-    assert_ne!(s1, sc);
-    // No breakpoint for a pure extension or a fresh head.
-    assert_ne!(
-        chat[0]["breakpoint"], true,
-        "chain head is not a breakpoint"
+    // F3 chain->=2 gate: a single-message request cannot evidence
+    // continuity — no synthetic session (previously minted a fresh one).
+    assert!(
+        sid(4).is_empty(),
+        "single-message request must not mint a session: {:#?}",
+        anth[4]
     );
-    assert_ne!(
-        chat[1]["breakpoint"], true,
-        "prefix extension is not a breakpoint"
-    );
+    // Synthetic sessions are flagged on the wire-boundary record.
+    for i in [0usize, 1, 2, 3] {
+        assert_eq!(
+            anth[i]["session_synthetic"], true,
+            "stitched record {i} must be flagged synthetic"
+        );
+    }
 }

@@ -170,6 +170,11 @@ pub struct TurnRecord {
     /// emitted as langfuse.trace.metadata.<key>.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harness_enrich: Vec<(String, String)>,
+    /// The session id was synthesized by the prefix stitcher (not observed
+    /// on the wire) — exported as langfuse.trace.metadata.session_synthetic
+    /// and excluded from session hit-rate numerators (§E ruling).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_synthetic: bool,
 }
 
 /// One tool invocation observed in a turn.

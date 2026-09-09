@@ -217,6 +217,11 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                     "true",
                 ));
             }
+            // §E ruling: synthetic (stitcher-minted) sessions are tagged so
+            // Langfuse-side queries can exclude them from hit-rate numerators.
+            if r.session_synthetic {
+                trace_extra.push(kv("langfuse.trace.metadata.session_synthetic", "true"));
+            }
             if r.harness_candidates.len() > 1 {
                 let joined = r.harness_candidates.join(",");
                 trace_extra.push(kv("langfuse.trace.metadata.harness_candidates", &joined));

@@ -18,7 +18,9 @@ fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<B
 
 async fn post_chat(body: &str) {
     let gw = common::stack::gateway_port();
-    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/chat"))
+    // F3 (user ruling): chat exited the stitcher — the bounds test drives
+    // anthropic.messages, a stitch-eligible protocol, with the same bodies.
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages"))
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap();
@@ -40,7 +42,7 @@ async fn records() -> Vec<serde_json::Value> {
     serde_json::from_slice(&resp.collect().await.unwrap().to_bytes()).expect("records JSON")
 }
 
-fn chat_body(system: &str, user: &str) -> String {
+fn turn_body(system: &str, user: &str) -> String {
     serde_json::json!({
         "model": "m",
         "messages": [
@@ -61,17 +63,17 @@ async fn bounded_stitch_state() {
     .await;
 
     // Three distinct conversations against capacity 2.
-    post_chat(&chat_body("sys-A", "user-A")).await;
-    post_chat(&chat_body("sys-B", "user-B")).await;
-    post_chat(&chat_body("sys-C", "user-C")).await;
+    post_chat(&turn_body("sys-A", "user-A")).await;
+    post_chat(&turn_body("sys-B", "user-B")).await;
+    post_chat(&turn_body("sys-C", "user-C")).await;
     // Head A was the first inserted; with capacity 2 it is now evicted.
     // Re-sending A must NOT error and must NOT merge with the surviving chains.
-    post_chat(&chat_body("sys-A", "user-A")).await;
+    post_chat(&turn_body("sys-A", "user-A")).await;
 
     let recs = records().await;
     let chat: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "openai.chat_completions")
+        .filter(|r| r["protocol"] == "anthropic.messages")
         .collect();
     assert_eq!(chat.len(), 4);
 
@@ -104,11 +106,11 @@ async fn bounded_stitch_state() {
     // TTL: wait out the TTL, re-send A again — expired chain must open a new
     // session, still without error.
     tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-    post_chat(&chat_body("sys-A", "user-A")).await;
+    post_chat(&turn_body("sys-A", "user-A")).await;
     let recs = records().await;
     let chat: Vec<_> = recs
         .iter()
-        .filter(|r| r["protocol"] == "openai.chat_completions")
+        .filter(|r| r["protocol"] == "anthropic.messages")
         .collect();
     assert_eq!(chat.len(), 5);
     let ids: Vec<&str> = chat

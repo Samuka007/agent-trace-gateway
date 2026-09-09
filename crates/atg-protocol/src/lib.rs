@@ -138,6 +138,14 @@ pub struct ProtocolDescriptor {
     pub usage_inclusion: TokenInclusion,
     /// Non-streaming final-output extraction path.
     pub final_output_path: &'static [&'static str],
+    /// Whether the prefix stitcher may mint synthetic sessions for this
+    /// protocol. USER RULING (§E, Langfuse best-practices: "If your
+    /// application is single-request/single-response with no continuity
+    /// between calls, you probably don't need sessions"): chat-completions
+    /// SDK traffic is stateless — force-stitching sessions from accidental
+    /// shared prefixes is noise. anthropic/responses carry session
+    /// semantics (multi-turn replay); live has no replayable messages.
+    pub stitch_eligible: bool,
 }
 
 /// A body session source: a value path plus an optional transform. The

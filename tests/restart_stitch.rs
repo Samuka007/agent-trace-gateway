@@ -23,7 +23,8 @@ fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<B
 }
 
 async fn post(port: u16, body: &str, session_header: Option<&str>) {
-    let mut req = Request::post(format!("http://127.0.0.1:{port}/v1/chat"))
+    // F3: stitch flow on a stitch-eligible protocol (chat exited).
+    let mut req = Request::post(format!("http://127.0.0.1:{port}/v1/messages"))
         .header("content-type", "application/json");
     if let Some(h) = session_header {
         req = req.header("x-claude-code-session-id", h);

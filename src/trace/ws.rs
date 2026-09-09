@@ -173,6 +173,7 @@ impl WsTurnState {
             harness_candidates: Vec::new(),
             harness_anomaly: false,
             harness_enrich: Vec::new(),
+            session_synthetic: false,
         }
     }
 }
