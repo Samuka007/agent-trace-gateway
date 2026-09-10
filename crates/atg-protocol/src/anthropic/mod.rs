@@ -4,6 +4,7 @@
 pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     name: "anthropic.messages",
     path_prefixes: &["/v1/messages"],
+    loose_endpoints: &["messages"],
     messages_path: Some("messages"),
     input_shape: crate::InputShape::Messages,
     user_input: None,

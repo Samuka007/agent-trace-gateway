@@ -96,6 +96,19 @@ pub struct TurnMarkers {
     pub end: &'static str,
 }
 
+/// Two-level path detection result: which descriptor matched, and whether
+/// by the exact prefix table (loose=false) or a loose endpoint variant
+/// (loose=true — upstream-gated recording applies).
+pub struct PathMatch {
+    pub descriptor: &'static ProtocolDescriptor,
+    pub loose: bool,
+}
+
+/// Sub-resources that may follow a loose endpoint and still loose-match —
+/// known protocol continuations (anthropic count_tokens). Anything else
+/// after the endpoint disqualifies the loose match.
+pub const LOOSE_SUBRESOURCES: &[&str] = &["count_tokens"];
+
 /// Field spellings for one protocol's usage object (protocol knowledge lives
 /// here, never in code or_else chains).
 /// Field spellings as ALTERNATIVE full paths (segments for resolve_path);
@@ -121,6 +134,15 @@ pub enum TokenInclusion {
 pub struct ProtocolDescriptor {
     pub name: &'static str,
     pub path_prefixes: &'static [&'static str],
+    /// Loose endpoint-name variants ("responses", "messages",
+    /// "chat/completions"): when NO exact prefix matched, a path that
+    /// ENDS with one of these segment sequences (or continues into a
+    /// whitelisted sub-resource) loosely matches this protocol — base
+    /// URLs without /v1 (e.g. omp configured with a bare host).
+    /// Tail-anchored on purpose: a mid-path segment alone must NOT match
+    /// (a business API route like /api/messages/list is not a model
+    /// endpoint). Loose hits are also upstream-gated (2xx) by the caller.
+    pub loose_endpoints: &'static [&'static str],
     /// Key holding the replayable messages array; None = fingerprint skipped.
     pub messages_path: Option<&'static str>,
     pub input_shape: InputShape,
@@ -192,6 +214,42 @@ impl ProtocolDescriptor {
     /// The descriptor by protocol name (e.g. "openai.responses").
     pub fn detect_by_name(name: &str) -> Option<&'static ProtocolDescriptor> {
         DESCRIPTORS.iter().copied().find(|d| d.name == name)
+    }
+
+    /// Two-level path match: exact prefix first (existing semantics), then
+    /// a loose endpoint-segment match at any depth. Table order resolves
+    /// cross-protocol loose ambiguity deterministically.
+    pub fn detect_path(path: &str) -> Option<PathMatch> {
+        if let Some(descriptor) = Self::detect(path) {
+            return Some(PathMatch {
+                descriptor,
+                loose: false,
+            });
+        }
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        for descriptor in DESCRIPTORS {
+            for endpoint in descriptor.loose_endpoints {
+                let ep: Vec<&str> = endpoint.split('/').filter(|s| !s.is_empty()).collect();
+                if ep.is_empty() {
+                    continue;
+                }
+                for start in 0..=segments.len().saturating_sub(ep.len()) {
+                    if segments[start..start + ep.len()] != ep[..] {
+                        continue;
+                    }
+                    let tail = &segments[start + ep.len()..];
+                    let anchored = tail.is_empty()
+                        || (tail.len() == 1 && LOOSE_SUBRESOURCES.contains(&tail[0]));
+                    if anchored {
+                        return Some(PathMatch {
+                            descriptor,
+                            loose: true,
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Session id from body sources in priority order (body before header).
@@ -358,6 +416,46 @@ mod tests {
         );
         assert!(ProtocolDescriptor::detect("/v1/models").is_none());
         assert!(ProtocolDescriptor::detect("/__atg/records").is_none());
+    }
+
+    /// Two-level detection: exact prefixes keep their semantics; loose
+    /// endpoint variants match when the path ENDS with the endpoint
+    /// sequence (or continues into a whitelisted sub-resource) and no
+    /// exact prefix hit (base URLs without /v1).
+    #[test]
+    fn detect_path_two_level_exact_then_loose() {
+        // Exact first — unchanged.
+        let m = ProtocolDescriptor::detect_path("/v1/responses").unwrap();
+        assert_eq!(m.descriptor.name, "openai.responses");
+        assert!(!m.loose);
+        let m = ProtocolDescriptor::detect_path("/compatible-mode/v1/chat/completions").unwrap();
+        assert_eq!(m.descriptor.name, "openai.chat_completions");
+        assert!(!m.loose, "compatible-mode stays an exact rule");
+        // Loose at any depth.
+        for path in ["/responses", "/foo/v1/responses", "/api/responses"] {
+            let m = ProtocolDescriptor::detect_path(path).unwrap();
+            assert_eq!(m.descriptor.name, "openai.responses", "{path}");
+            assert!(m.loose, "{path}");
+        }
+        let m = ProtocolDescriptor::detect_path("/messages").unwrap();
+        assert_eq!(m.descriptor.name, "anthropic.messages");
+        assert!(m.loose);
+        let m = ProtocolDescriptor::detect_path("/gateway/chat/completions").unwrap();
+        assert_eq!(m.descriptor.name, "openai.chat_completions");
+        assert!(m.loose);
+        // Whitelisted sub-resources past the endpoint still loose-match.
+        let m = ProtocolDescriptor::detect_path("/messages/count_tokens").unwrap();
+        assert_eq!(m.descriptor.name, "anthropic.messages");
+        assert!(m.loose);
+        // Tail-anchoring (SHOULD-G2 ruling): a mid-path endpoint segment
+        // or an unknown continuation is NOT a model endpoint — a business
+        // API named /api/messages must not mint loose turns.
+        assert!(ProtocolDescriptor::detect_path("/api/messages/list").is_none());
+        assert!(ProtocolDescriptor::detect_path("/responses/feedback").is_none());
+        assert!(ProtocolDescriptor::detect_path("/messages/list").is_none());
+        // No endpoint segment anywhere: no match at all.
+        assert!(ProtocolDescriptor::detect_path("/__atg/records").is_none());
+        assert!(ProtocolDescriptor::detect_path("/v1/embeddings").is_none());
     }
 
     /// anthropic usage locations: message_start.message.usage +

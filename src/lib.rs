@@ -26,6 +26,10 @@ pub mod gateway_app {
         /// session id, turns with a harness attribution. Denominator
         /// filtering (session-semantics traffic only) is query-side.
         pub turns_total: std::sync::atomic::AtomicU64,
+        /// Loose path matches (endpoint-variant detection) — counted per
+        /// loose-hit request regardless of whether a record was produced
+        /// (config debugging: base URLs without /v1).
+        pub loose_path_matches: std::sync::atomic::AtomicU64,
         pub turns_with_session: std::sync::atomic::AtomicU64,
         pub turns_with_harness: std::sync::atomic::AtomicU64,
     }
@@ -148,6 +152,9 @@ pub mod gateway_app {
                     .failed_frames
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let turns_total = self.turns_total.load(std::sync::atomic::Ordering::Relaxed);
+                let loose_path_matches = self
+                    .loose_path_matches
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let turns_with_session = self
                     .turns_with_session
                     .load(std::sync::atomic::Ordering::Relaxed);
@@ -160,6 +167,7 @@ pub mod gateway_app {
                     "dropped": dropped,
                     "failed_frames": failed_frames,
                     "turns_total": turns_total,
+                    "loose_path_matches": loose_path_matches,
                     "turns_with_session": turns_with_session,
                     "turns_with_harness": turns_with_harness
                 })
@@ -241,9 +249,30 @@ pub mod gateway_app {
 
         async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
             let path = session.req_header().uri.path();
-            let Some(protocol) = unpack::detect_protocol(path) else {
+            let Some(matched) = atg_protocol::ProtocolDescriptor::detect_path(path) else {
                 return;
             };
+            let protocol = matched.descriptor.name;
+            // Loose (endpoint-variant) match: count it, log the first one
+            // (path + protocol — base-URL misconfiguration debugging), and
+            // record ONLY on a 2xx upstream response. Exact matches keep
+            // their existing semantics: every turn records, errors carry
+            // the error marker.
+            let loose = matched.loose;
+            let record_allowed = if loose {
+                let total = self
+                    .loose_path_matches
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if total == 0 {
+                    eprintln!("ATG: loose path match path={path} protocol={protocol}");
+                }
+                (200..300).contains(&ctx.resp_status)
+            } else {
+                true
+            };
+            if loose && !record_allowed {
+                return;
+            }
             // G3: HTTP/proxy-level failure marker — protocol terminal error
             // frames (error_marker) only cover in-stream failures; a 4xx/5xx
             // JSON body or a proxy error previously exported as a
@@ -489,6 +518,7 @@ pub mod gateway_app {
             upstream: upstream.to_string(),
             failed_frames: std::sync::atomic::AtomicU64::new(0),
             turns_total: std::sync::atomic::AtomicU64::new(0),
+            loose_path_matches: std::sync::atomic::AtomicU64::new(0),
             turns_with_session: std::sync::atomic::AtomicU64::new(0),
             turns_with_harness: std::sync::atomic::AtomicU64::new(0),
             store: TraceStore::new(),
