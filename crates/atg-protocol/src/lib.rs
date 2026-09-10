@@ -96,6 +96,14 @@ pub struct TurnMarkers {
     pub end: &'static str,
 }
 
+/// Two-level path detection result: which descriptor matched, and whether
+/// by the exact prefix table (loose=false) or a loose endpoint variant
+/// (loose=true — upstream-gated recording applies).
+pub struct PathMatch {
+    pub descriptor: &'static ProtocolDescriptor,
+    pub loose: bool,
+}
+
 /// Field spellings for one protocol's usage object (protocol knowledge lives
 /// here, never in code or_else chains).
 /// Field spellings as ALTERNATIVE full paths (segments for resolve_path);
@@ -121,6 +129,13 @@ pub enum TokenInclusion {
 pub struct ProtocolDescriptor {
     pub name: &'static str,
     pub path_prefixes: &'static [&'static str],
+    /// Loose endpoint-name variants ("responses", "messages",
+    /// "chat/completions"): when NO exact prefix matched, a path whose
+    /// segment sequence contains one of these at ANY depth loosely matches
+    /// this protocol (base URLs without /v1 — e.g. omp configured with a
+    /// bare host). Loose hits are upstream-gated (2xx) by the caller: a
+    /// 404 on an unknown route must not mint a fake turn.
+    pub loose_endpoints: &'static [&'static str],
     /// Key holding the replayable messages array; None = fingerprint skipped.
     pub messages_path: Option<&'static str>,
     pub input_shape: InputShape,
@@ -192,6 +207,34 @@ impl ProtocolDescriptor {
     /// The descriptor by protocol name (e.g. "openai.responses").
     pub fn detect_by_name(name: &str) -> Option<&'static ProtocolDescriptor> {
         DESCRIPTORS.iter().copied().find(|d| d.name == name)
+    }
+
+    /// Two-level path match: exact prefix first (existing semantics), then
+    /// a loose endpoint-segment match at any depth. Table order resolves
+    /// cross-protocol loose ambiguity deterministically.
+    pub fn detect_path(path: &str) -> Option<PathMatch> {
+        if let Some(descriptor) = Self::detect(path) {
+            return Some(PathMatch {
+                descriptor,
+                loose: false,
+            });
+        }
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        for descriptor in DESCRIPTORS {
+            for endpoint in descriptor.loose_endpoints {
+                let ep: Vec<&str> = endpoint.split('/').filter(|s| !s.is_empty()).collect();
+                if ep.is_empty() {
+                    continue;
+                }
+                if segments.windows(ep.len()).any(|w| w == ep) {
+                    return Some(PathMatch {
+                        descriptor,
+                        loose: true,
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// Session id from body sources in priority order (body before header).
@@ -358,6 +401,39 @@ mod tests {
         );
         assert!(ProtocolDescriptor::detect("/v1/models").is_none());
         assert!(ProtocolDescriptor::detect("/__atg/records").is_none());
+    }
+
+    /// Two-level detection: exact prefixes keep their semantics; loose
+    /// endpoint variants match at any segment depth when no exact prefix
+    /// hit (base URLs without /v1).
+    #[test]
+    fn detect_path_two_level_exact_then_loose() {
+        // Exact first — unchanged.
+        let m = ProtocolDescriptor::detect_path("/v1/responses").unwrap();
+        assert_eq!(m.descriptor.name, "openai.responses");
+        assert!(!m.loose);
+        let m = ProtocolDescriptor::detect_path("/compatible-mode/v1/chat/completions").unwrap();
+        assert_eq!(m.descriptor.name, "openai.chat_completions");
+        assert!(!m.loose, "compatible-mode stays an exact rule");
+        // Loose at any depth.
+        for path in ["/responses", "/foo/v1/responses", "/api/responses"] {
+            let m = ProtocolDescriptor::detect_path(path).unwrap();
+            assert_eq!(m.descriptor.name, "openai.responses", "{path}");
+            assert!(m.loose, "{path}");
+        }
+        let m = ProtocolDescriptor::detect_path("/messages").unwrap();
+        assert_eq!(m.descriptor.name, "anthropic.messages");
+        assert!(m.loose);
+        let m = ProtocolDescriptor::detect_path("/gateway/chat/completions").unwrap();
+        assert_eq!(m.descriptor.name, "openai.chat_completions");
+        assert!(m.loose);
+        // Sub-resources past the endpoint still loose-match (count_tokens).
+        let m = ProtocolDescriptor::detect_path("/messages/count_tokens").unwrap();
+        assert_eq!(m.descriptor.name, "anthropic.messages");
+        assert!(m.loose);
+        // No endpoint segment anywhere: no match at all.
+        assert!(ProtocolDescriptor::detect_path("/__atg/records").is_none());
+        assert!(ProtocolDescriptor::detect_path("/v1/embeddings").is_none());
     }
 
     /// anthropic usage locations: message_start.message.usage +

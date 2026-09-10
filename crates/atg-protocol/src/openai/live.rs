@@ -9,6 +9,8 @@ use atg_model::{ToolCall, TurnRecord};
 pub static DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
     name: "openai.live",
     path_prefixes: &[],
+    // WS upgrade connections: no HTTP path to match.
+    loose_endpoints: &[],
     messages_path: None,
     input_shape: crate::InputShape::Responses,
     user_input: None,

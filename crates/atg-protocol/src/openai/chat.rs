@@ -3,6 +3,7 @@
 pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     name: "openai.chat_completions",
     path_prefixes: &["/v1/chat", "/compatible-mode/v1/chat"],
+    loose_endpoints: &["chat/completions"],
     messages_path: Some("messages"),
     input_shape: crate::InputShape::Messages,
     user_input: None,

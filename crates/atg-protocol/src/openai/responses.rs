@@ -3,6 +3,7 @@
 pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     name: "openai.responses",
     path_prefixes: &["/v1/responses", "/compatible-mode/v1/responses"],
+    loose_endpoints: &["responses"],
     messages_path: None,
     input_shape: crate::InputShape::Responses,
     user_input: Some(responses_user_input),
