@@ -482,9 +482,8 @@ mod tests {
         assert_eq!(tools[0].arguments, r#"{"path":"/tmp/x"}"#);
         // custom_tool_call symmetry (NIT): the streaming ToolDone action
         // accepts it with the arguments|input dual read — so must we.
-        let custom = value(
-            r#"{"output":[{"type":"custom_tool_call","name":"probe","input":"raw-input"}]}"#,
-        );
+        let custom =
+            value(r#"{"output":[{"type":"custom_tool_call","name":"probe","input":"raw-input"}]}"#);
         let tools = d.nonstreaming_tools.unwrap()(&custom);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "probe");

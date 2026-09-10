@@ -159,10 +159,8 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
             let _ = req.collect().await;
             let mut r = Response::new(full("bad gateway".to_string()));
             *r.status_mut() = hyper::StatusCode::BAD_GATEWAY;
-            r.headers_mut().insert(
-                hyper::header::CONTENT_TYPE,
-                "text/plain".parse().unwrap(),
-            );
+            r.headers_mut()
+                .insert(hyper::header::CONTENT_TYPE, "text/plain".parse().unwrap());
             Ok(r)
         }
         ("POST", "/v1/responses") => {

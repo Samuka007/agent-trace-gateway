@@ -381,21 +381,21 @@ pub mod gateway_app {
             }
             match unpack::unpack_nonstreaming(protocol, parsed_req.as_ref(), &ctx.resp_buf) {
                 Some(mut record) => {
-                record.session_id = session_id;
-                record.breakpoint = breakpoint;
-                record.harness = harness;
-                record.harness_candidates = harness_candidates;
-                record.harness_anomaly = hfacts.protocol_anomaly;
-                record.harness_enrich = harness_enrich;
-                record.session_synthetic = session_synthetic;
-                record.completion_start_ns = Some(ctx.start_ns);
-                record.error = record.error.take().or(http_error);
-                record.raw_request = raw_request;
-                record.raw_response = raw_response;
-                ctx.end_ns = now_ns();
-                record.start_ns = ctx.start_ns;
-                record.end_ns = ctx.end_ns;
-                self.push_record(record);
+                    record.session_id = session_id;
+                    record.breakpoint = breakpoint;
+                    record.harness = harness;
+                    record.harness_candidates = harness_candidates;
+                    record.harness_anomaly = hfacts.protocol_anomaly;
+                    record.harness_enrich = harness_enrich;
+                    record.session_synthetic = session_synthetic;
+                    record.completion_start_ns = Some(ctx.start_ns);
+                    record.error = record.error.take().or(http_error);
+                    record.raw_request = raw_request;
+                    record.raw_response = raw_response;
+                    ctx.end_ns = now_ns();
+                    record.start_ns = ctx.start_ns;
+                    record.end_ns = ctx.end_ns;
+                    self.push_record(record);
                 }
                 None if http_error.is_some() => {
                     // NIT-B: a proxy-level failure (no upstream response,
@@ -406,7 +406,10 @@ pub mod gateway_app {
                     self.push_record(atg_model::TurnRecord {
                         protocol: protocol.to_string(),
                         session_id,
-                        user_input: tf.as_ref().map(|f| f.user_input.clone()).unwrap_or_default(),
+                        user_input: tf
+                            .as_ref()
+                            .map(|f| f.user_input.clone())
+                            .unwrap_or_default(),
                         raw_request,
                         raw_response,
                         harness,
@@ -417,7 +420,10 @@ pub mod gateway_app {
                         error: http_error,
                         start_ns: ctx.start_ns,
                         end_ns: ctx.end_ns,
-                        model_name: tf.as_ref().map(|f| f.model_name.clone()).unwrap_or_default(),
+                        model_name: tf
+                            .as_ref()
+                            .map(|f| f.model_name.clone())
+                            .unwrap_or_default(),
                         ..Default::default()
                     });
                 }
