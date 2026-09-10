@@ -255,6 +255,7 @@ impl WsTurnState {
             user_id: std::mem::take(&mut self.user_id),
             // WS turns carry no harness attribution yet (v0.3.0 scope).
             harness: String::new(),
+            dialect: String::new(),
             harness_candidates: Vec::new(),
             harness_anomaly: false,
             harness_enrich: Vec::new(),

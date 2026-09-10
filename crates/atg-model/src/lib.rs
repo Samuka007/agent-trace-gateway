@@ -162,6 +162,11 @@ pub struct TurnRecord {
     /// when unidentified (never blocks session extraction).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub harness: String,
+    /// The session-carrying dialect that matched ("claude-code" —
+    /// borrowed dialects are the norm: omp speaks claude-code while staying
+    /// harness=omp). Empty when no dialect shapes matched.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dialect: String,
     /// Same-strength identification conflicts (CC header + codex body etc.)
     /// — recorded as metadata, never force-disambiguated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

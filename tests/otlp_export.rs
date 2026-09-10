@@ -104,6 +104,22 @@ async fn otlp_export() {
     assert_eq!(resp.status(), StatusCode::OK);
     let _ = resp.collect().await.unwrap();
 
+    // Third turn: the production misattribution case, inverted — omp UA
+    // speaking the claude-code dialect (CC header) must attribute
+    // harness=omp + dialect=claude-code, with the session carried by the
+    // CC header mount.
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/chat"))
+        .header("content-type", "application/json")
+        .header("user-agent", "omp/18.1.0")
+        .header("x-claude-code-session-id", "omp-e2e-sess")
+        .body(Full::new(Bytes::from(
+            r#"{"model":"m","messages":[{"role":"user","content":"omp-dialect"}]}"#,
+        )))
+        .unwrap();
+    let resp = client().request(req).await.expect("omp request");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = resp.collect().await.unwrap();
+
     // Wait for the export flush.
     let mut exported = Vec::new();
     for _ in 0..50 {
@@ -138,8 +154,8 @@ async fn otlp_export() {
         .unwrap_or_else(|| panic!("OTLP spans missing: {payload}"));
     assert_eq!(
         spans.len(),
-        4,
-        "two turns, each with agent+generation span: {spans:?}"
+        6,
+        "three turns, each with agent+generation span: {spans:?}"
     );
     // P0-N1: each turn's agent+generation share ONE traceId and link
     // parentSpanId -> agent spanId; the two turns land in distinct traces.
@@ -350,7 +366,20 @@ async fn otlp_export() {
 
     // The record store still holds the record (export does not mutate it).
     let recs = records(gw).await;
-    assert_eq!(recs.len(), 2, "both turns must remain in the record store");
+    assert_eq!(recs.len(), 3, "all turns must remain in the record store");
+    let omp = recs
+        .iter()
+        .find(|r| r["user_input"] == "omp-dialect")
+        .unwrap_or_else(|| panic!("omp turn missing: {recs:?}"));
+    assert_eq!(omp["harness"], "omp", "identity from the UA: {omp:?}");
+    assert_eq!(
+        omp["dialect"], "claude-code",
+        "dialect from the shapes: {omp:?}"
+    );
+    assert_eq!(
+        omp["session_id"], "omp-e2e-sess",
+        "session carried by the CC dialect header mount: {omp:?}"
+    );
 
     // G1+G2: session-less responses turns (no session id anywhere, no
     // messages array) must not share one trace id and must carry no session

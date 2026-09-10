@@ -1,4 +1,4 @@
-//! Harness-layer behavior pins (design §1/§2 shapes, F2 acceptance).
+//! Harness-layer behavior pins (two-tier: identity vs dialect, v0.3.2).
 use crate::*;
 use serde_json::Value;
 
@@ -24,61 +24,135 @@ fn legacy_user_id() -> String {
     )
 }
 
+/// Design pin 1a: omp UA + CC header → identity=omp (dialect borrowed),
+/// session carried by the CC header via the protocol mount.
 #[test]
-fn cc_envelope_identifies_and_extracts_session() {
-    let req = body(&format!(
-        r#"{{"metadata":{{"user_id":"{{\"device_id\":\"d\",\"session_id\":\"{UUID}\"}}"}}}}"#
-    ));
-    let get = hdrs(&[]);
-    let facts = identify("anthropic.messages", Some(&req), None, &get);
-    assert_eq!(facts.name, "claude-code");
-    assert!(facts.candidates.contains(&"claude-code"));
-    assert!(!facts.protocol_anomaly);
-    assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
-    // Envelope form carries no account segment.
-    assert!(enrich(&facts, &req).is_empty());
-}
-
-#[test]
-fn cc_legacy_restores_session_and_account() {
-    let req = body(&format!(
-        r#"{{"metadata":{{"user_id":"{}"}}}}"#,
-        legacy_user_id()
-    ));
-    let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
-    assert_eq!(facts.name, "claude-code");
-    assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
-    let enrichments = enrich(&facts, &req);
+fn omp_ua_with_cc_dialect_header_attributed_as_omp() {
+    let req = body(r#"{"messages":[]}"#);
+    let get = hdrs(&[(crate::CC_SESSION_HEADER, "omp-sess-1")]);
+    let facts = identify("anthropic.messages", Some(&req), Some("omp/18.1.0"), &get);
+    assert_eq!(facts.identity, Some("omp"), "omp UA is identity-exclusive");
     assert_eq!(
-        enrichments,
-        vec![("cc_account".to_string(), "acc-123".to_string())],
-        "legacy account segment must surface as cc_account metadata"
+        facts.dialect, "claude-code",
+        "CC header signals the dialect"
+    );
+    assert_eq!(facts.harness_label(), "omp");
+    assert!(!facts.protocol_anomaly, "omp is legal on every protocol");
+    // Pipeline order: dialect body rule (no CC body shapes) -> protocol
+    // headers -> the CC header value.
+    assert!(session_from_body(&facts, &req).is_none());
+    let d = atg_protocol::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+    assert_eq!(
+        d.session_from_headers(&get).as_deref(),
+        Some("omp-sess-1"),
+        "session still extracts through the protocol mount"
     );
 }
 
+/// Design pin 1b: omp UA + CC envelope body → dialect session extracted,
+/// identity stays omp (the misattribution case from production, inverted).
 #[test]
-fn cc_metadata_envelope_string_form_still_extracts() {
-    // metadata itself is a JSON string {"user_id": "<legacy>"} — the
-    // pre-v0.3.0 fourth table row, preserved as a CC body shape.
-    let inner = legacy_user_id();
-    let req = body(&format!(r#"{{"metadata":"{{\"user_id\":\"{inner}\"}}"}}"#));
+fn omp_ua_with_cc_envelope_extracts_via_dialect() {
+    let req = body(&format!(
+        r#"{{"metadata":{{"user_id":"{{\"device_id\":\"d\",\"session_id\":\"{UUID}\"}}"}}}}"#
+    ));
+    let facts = identify(
+        "anthropic.messages",
+        Some(&req),
+        Some("omp/18.1.0"),
+        &hdrs(&[]),
+    );
+    assert_eq!(facts.identity, Some("omp"));
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(
+        session_from_body(&facts, &req).as_deref(),
+        Some(UUID),
+        "borrowed dialect rules extract the session"
+    );
+}
+
+/// Design pin 2: no UA + CC header → downgraded claude-code-compatible
+/// (shape-only assertion, not the identity); extraction unaffected.
+#[test]
+fn no_ua_cc_header_is_compatible_not_identity() {
+    let req = body(r#"{"messages":[]}"#);
+    let get = hdrs(&[(crate::CC_SESSION_HEADER, "cc-sess-9")]);
+    let facts = identify("anthropic.messages", Some(&req), None, &get);
+    assert_eq!(facts.identity, None, "no identity evidence");
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(facts.harness_label(), "claude-code-compatible");
+    let d = atg_protocol::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+    assert_eq!(d.session_from_headers(&get).as_deref(), Some("cc-sess-9"));
+}
+
+/// Shape-only envelope (no UA): compatible label, session STILL extracted
+/// through the dialect rule (extraction never degrades).
+#[test]
+fn no_ua_envelope_is_compatible_and_extracts() {
+    let req = body(&format!(
+        r#"{{"metadata":{{"user_id":"{{\"session_id\":\"{UUID}\"}}"}}}}"#
+    ));
     let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
-    assert_eq!(facts.name, "claude-code");
+    assert_eq!(facts.identity, None);
+    assert_eq!(facts.harness_label(), "claude-code-compatible");
     assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
 }
 
+/// v0.3.1 pin restored for the dialect era (BLOCK-G1, §5 row 6): the
+/// object user_id form {session_id} extracts through the dialect rule.
+/// Under the two-tier model it no longer claims the IDENTITY (compatible
+/// label) — the design's tightening; extraction semantics unchanged.
 #[test]
-fn cc_object_user_id_variant_identifies() {
+fn object_user_id_variant_extracts_via_dialect() {
     let req = body(&format!(
         r#"{{"metadata":{{"user_id":{{"session_id":"{UUID}"}}}}}}"#
     ));
     let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
-    assert_eq!(facts.name, "claude-code");
-    assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
+    assert_eq!(facts.identity, None, "object form is dialect-only");
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(facts.harness_label(), "claude-code-compatible");
+    assert_eq!(
+        session_from_body(&facts, &req).as_deref(),
+        Some(UUID),
+        "the dialect rule's object branch must extract"
+    );
 }
 
+/// v0.3.1 pin restored for the dialect era (BLOCK-G1, §5 row 4 — a REAL
+/// historical traffic form): metadata itself as a JSON envelope string
+/// {"user_id": …} reaches the same extraction.
 #[test]
-fn cc_ua_alone_identifies_without_session() {
+fn metadata_envelope_string_form_extracts_via_dialect() {
+    let inner = legacy_user_id();
+    let req = body(&format!(r#"{{"metadata":"{{\"user_id\":\"{inner}\"}}"}}"#));
+    let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(facts.harness_label(), "claude-code-compatible");
+    assert_eq!(
+        session_from_body(&facts, &req).as_deref(),
+        Some(UUID),
+        "the dialect rule's metadata-envelope branch must extract"
+    );
+}
+
+/// NIT: declared dialects must reference registered dialect tables (the
+/// field's validation surface — otherwise it is dead data).
+#[test]
+fn declared_dialects_are_registered() {
+    for h in HARNESSES {
+        for name in h.dialects {
+            assert!(
+                DIALECTS.iter().any(|d| d.name == *name),
+                "{} declares unregistered dialect {name}",
+                h.name
+            );
+        }
+    }
+}
+
+/// Design pin 3: claude-cli UA → the claude-code identity proper.
+#[test]
+fn claude_cli_ua_is_identity() {
     let req = body(r#"{"messages":[]}"#);
     let facts = identify(
         "anthropic.messages",
@@ -86,13 +160,142 @@ fn cc_ua_alone_identifies_without_session() {
         Some("claude-cli/2.1.230"),
         &hdrs(&[]),
     );
-    assert_eq!(facts.name, "claude-code");
+    assert_eq!(facts.identity, Some("claude-code"));
+    assert_eq!(facts.harness_label(), "claude-code");
+}
+
+/// Design pin 4 (CC tightening): the legacy composite is identity evidence
+/// on its own (CC ≤2.1.114 fingerprint); a conflicting UA wins over it.
+#[test]
+fn legacy_shape_alone_is_identity() {
+    let req = body(&format!(
+        r#"{{"metadata":{{"user_id":"{}"}}}}"#,
+        legacy_user_id()
+    ));
+    let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
+    assert_eq!(facts.identity, Some("claude-code"), "legacy = identity");
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
+    assert_eq!(
+        enrich(&facts, &req),
+        vec![("cc_account".to_string(), "acc-123".to_string())]
+    );
+    // Conflicting identity evidence outranks the legacy shape.
+    let facts = identify(
+        "anthropic.messages",
+        Some(&req),
+        Some("omp/18.1"),
+        &hdrs(&[]),
+    );
+    assert_eq!(
+        facts.identity,
+        Some("omp"),
+        "UA identity wins over legacy body fingerprint"
+    );
+}
+
+/// Design pin 5: codex unaffected — body fingerprint is identity evidence,
+/// and a CC header alongside is a dialect signal, not a conflict.
+#[test]
+fn codex_identity_survives_cc_dialect_shapes() {
+    let req = body(
+        r#"{"client_metadata":{"session_id":"01JULID","x-codex-turn-metadata":"{}","x-codex-installation-id":"inst-9"}}"#,
+    );
+    let facts = identify("openai.responses", Some(&req), None, &hdrs(&[]));
+    assert_eq!(facts.identity, Some("codex"));
+    assert_eq!(facts.dialect, "");
+    assert_eq!(
+        enrich(&facts, &req),
+        vec![("codex_installation".to_string(), "inst-9".to_string())]
+    );
+    let get = hdrs(&[(crate::CC_SESSION_HEADER, "cc-mixed")]);
+    let facts = identify("openai.responses", Some(&req), None, &get);
+    assert_eq!(facts.identity, Some("codex"), "identity beats shape class");
+    assert_eq!(
+        facts.dialect, "claude-code",
+        "CC header still signals dialect"
+    );
+    assert!(
+        session_from_body(&facts, &req).is_none(),
+        "cm session is a protocol mount"
+    );
+}
+
+/// Same-strength IDENTITY conflicts still record candidates.
+#[test]
+fn conflicting_identity_evidence_records_candidates() {
+    let req = body(
+        r#"{"metadata":{"user_id":"user_x"},"client_metadata":{"x-codex-turn-metadata":"{}"}}"#,
+    );
+    let facts = identify(
+        "openai.responses",
+        Some(&req),
+        Some("claude-cli/2.1.230"),
+        &hdrs(&[]),
+    );
+    assert_eq!(facts.identity, Some("claude-code"), "table-order tiebreak");
+    assert!(facts.candidates.contains(&"claude-code"));
+    assert!(facts.candidates.contains(&"codex"));
+    assert!(
+        facts.protocol_anomaly,
+        "CC identity is illegal on responses"
+    );
+}
+
+/// grok: own header convention is identity; off-route is an anomaly.
+#[test]
+fn grok_header_identity_and_anomaly_off_route() {
+    let get = hdrs(&[(crate::GROK_CONV_HEADER, UUID)]);
+    let facts = identify("openai.responses", None, None, &get);
+    assert_eq!(facts.identity, Some("grok"));
+    assert!(!facts.protocol_anomaly);
+    let facts = identify("openai.chat_completions", None, None, &get);
+    assert_eq!(facts.identity, Some("grok"));
+    assert!(facts.protocol_anomaly, "grok conv id off the grok route");
+}
+
+/// opencode: UA identity unlocks the x-session-* mounts; unidentified
+/// traffic cannot mint sessions from them.
+#[test]
+fn opencode_ua_unlocks_session_header_mounts() {
+    let req = body(r#"{"input":"x"}"#);
+    let get = hdrs(&[("x-session-id", "oc-42")]);
+    let facts = identify(
+        "openai.responses",
+        Some(&req),
+        Some("opencode/1.0 ai-sdk/5"),
+        &get,
+    );
+    assert_eq!(facts.identity, Some("opencode"));
+    assert_eq!(
+        session_from_headers(&facts, &get).as_deref(),
+        Some("oc-42"),
+        "opencode identity unlocks the x-session-* family"
+    );
+    let facts = identify("openai.responses", Some(&req), None, &get);
+    assert_eq!(facts.identity, None);
+    assert!(session_from_headers(&facts, &get).is_none());
+}
+
+/// Unknown: no evidence at all → empty label, no dialect.
+#[test]
+fn unknown_when_no_evidence() {
+    let req = body(r#"{"input":"x"}"#);
+    let facts = identify(
+        "openai.responses",
+        Some(&req),
+        Some("some-sdk/1"),
+        &hdrs(&[]),
+    );
+    assert_eq!(facts.identity, None);
+    assert_eq!(facts.dialect, "");
+    assert_eq!(facts.harness_label(), "");
     assert!(session_from_body(&facts, &req).is_none());
 }
 
-/// Ported from the protocol session tests: legacy-shape violations (63
-/// hex digits / non-hex run / missing session / truncated uuid / envelope
-/// without session_id) must neither identify nor extract.
+/// Malformed CC shapes neither identify nor extract (ported rejection
+/// matrix; the envelope-without-session_id case is now VALID JSON — the
+/// pre-port version was vacuously invalid).
 #[test]
 fn cc_malformed_shapes_do_not_identify_or_extract() {
     let mk = |core: &str| body(&format!(r#"{{"metadata":{{"user_id":"{core}"}}}}"#));
@@ -114,121 +317,14 @@ fn cc_malformed_shapes_do_not_identify_or_extract() {
             "0123456789abcdef".repeat(4),
             &UUID[..35]
         )),
-        // JSON envelope without session_id (properly escaped so the outer
-        // body is valid JSON — the pre-port version was vacuously invalid).
         mk(r#"{\"user_id\":\"someone\"}"#),
     ];
     for req in cases {
         let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
-        assert_eq!(facts.name, UNKNOWN, "shape violation must not identify");
+        assert_eq!(facts.identity, None, "shape violation must not identify");
         assert!(
             session_from_body(&facts, &req).is_none(),
             "must not extract from {req}"
         );
     }
-}
-
-#[test]
-fn cc_on_openai_protocol_is_an_anomaly_not_an_error() {
-    // Legality is a declaration: CC fingerprint on openai.* records the
-    // anomaly (mimicry is noise); session still extracts from the shape.
-    let req = body(&format!(
-        r#"{{"metadata":{{"user_id":"{{\"session_id\":\"{UUID}\"}}"}}}}"#
-    ));
-    let facts = identify("openai.chat_completions", Some(&req), None, &hdrs(&[]));
-    assert_eq!(facts.name, "claude-code");
-    assert!(
-        facts.protocol_anomaly,
-        "CC shape on openai.* must be flagged"
-    );
-    // Shape-gated extraction still runs (classification does not gate it).
-    assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
-}
-
-#[test]
-fn codex_body_fingerprint_with_installation_enrich() {
-    let req = body(
-        r#"{"client_metadata":{"session_id":"01JULID","x-codex-turn-metadata":"{}","x-codex-installation-id":"inst-9"}}"#,
-    );
-    let facts = identify("openai.responses", Some(&req), None, &hdrs(&[]));
-    assert_eq!(facts.name, "codex");
-    assert!(!facts.protocol_anomaly);
-    assert!(
-        session_from_body(&facts, &req).is_none(),
-        "cm session is a protocol mount"
-    );
-    assert_eq!(
-        enrich(&facts, &req),
-        vec![("codex_installation".to_string(), "inst-9".to_string())]
-    );
-}
-
-#[test]
-fn grok_header_fingerprint_and_anomaly_off_route() {
-    let get = hdrs(&[("x-grok-conv-id", UUID)]);
-    let facts = identify("openai.responses", None, None, &get);
-    assert_eq!(facts.name, "grok");
-    assert!(!facts.protocol_anomaly);
-    let facts = identify("openai.chat_completions", None, None, &get);
-    assert_eq!(facts.name, "grok");
-    assert!(facts.protocol_anomaly, "grok conv id off the grok route");
-}
-
-#[test]
-fn opencode_ua_unlocks_session_header_mounts() {
-    let req = body(r#"{"input":"x"}"#);
-    let get = hdrs(&[("x-session-id", "oc-42")]);
-    let facts = identify(
-        "openai.responses",
-        Some(&req),
-        Some("opencode/1.0 ai-sdk/5"),
-        &get,
-    );
-    assert_eq!(facts.name, "opencode");
-    assert_eq!(
-        session_from_headers(&facts, &get).as_deref(),
-        Some("oc-42"),
-        "opencode attribution unlocks the x-session-* family"
-    );
-    // Unidentified traffic must NOT mint sessions from the same header.
-    let facts = identify("openai.responses", Some(&req), None, &get);
-    assert_eq!(facts.name, UNKNOWN);
-    assert!(session_from_headers(&facts, &get).is_none());
-}
-
-#[test]
-fn unknown_when_no_evidence_and_session_unaffected() {
-    let req = body(r#"{"input":"x"}"#);
-    let facts = identify(
-        "openai.responses",
-        Some(&req),
-        Some("some-sdk/1"),
-        &hdrs(&[]),
-    );
-    assert_eq!(facts.name, UNKNOWN);
-    assert!(facts.candidates.is_empty());
-    assert!(!facts.protocol_anomaly);
-    assert!(session_from_body(&facts, &req).is_none());
-}
-
-#[test]
-fn conflicting_same_strength_evidence_records_candidates() {
-    // CC header (s=4) + codex body (s=4): conflict signal — both recorded,
-    // deterministic winner by table order.
-    let req = body(r#"{"client_metadata":{"x-codex-turn-metadata":"{}"}}"#);
-    let get = hdrs(&[("x-claude-code-session-id", "cc-s")]);
-    let facts = identify("openai.responses", Some(&req), None, &get);
-    assert!(facts.candidates.contains(&"claude-code"));
-    assert!(facts.candidates.contains(&"codex"));
-    assert_eq!(facts.name, "claude-code", "table-order tiebreak");
-    assert!(facts.protocol_anomaly, "CC header is illegal on responses");
-}
-
-#[test]
-fn higher_strength_beats_lower_regardless_of_order() {
-    // grok header (s=5) beats a CC UA (s=4).
-    let get = hdrs(&[("x-grok-conv-id", UUID)]);
-    let facts = identify("openai.responses", None, Some("claude-cli/2.1.230"), &get);
-    assert_eq!(facts.name, "grok");
-    assert_eq!(facts.candidates, vec!["grok"]);
 }

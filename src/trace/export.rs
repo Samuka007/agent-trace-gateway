@@ -209,6 +209,11 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             if !r.harness.is_empty() {
                 trace_extra.push(kv("langfuse.trace.metadata.harness", &r.harness));
             }
+            // Two-tier: the session-carrying dialect, independent of the
+            // identity (omp borrows the claude-code dialect).
+            if !r.dialect.is_empty() {
+                trace_extra.push(kv("langfuse.trace.metadata.dialect", &r.dialect));
+            }
             if r.harness_anomaly {
                 trace_extra.push(kv(
                     "langfuse.trace.metadata.harness_protocol_anomaly",
@@ -743,11 +748,13 @@ mod tests {
     }
 
     /// F2: harness attribution rides trace.tags + trace.metadata, on both
-    /// spans; enrich pairs land as langfuse.trace.metadata.<key>.
+    /// spans; enrich pairs land as langfuse.trace.metadata.<key>; the
+    /// borrowed dialect rides its own metadata.dialect key (omp case).
     #[test]
     fn harness_turn_emits_tag_and_metadata() {
         let mut r = record("sess-h");
-        r.harness = "claude-code".to_string();
+        r.harness = "omp".to_string();
+        r.dialect = "claude-code".to_string();
         r.harness_candidates = vec!["claude-code".to_string(), "codex".to_string()];
         r.harness_enrich
             .push(("cc_account".to_string(), "acc-1".to_string()));
@@ -763,7 +770,12 @@ mod tests {
                     .unwrap_or_default()
                     .to_string()
             };
-            assert_eq!(value("langfuse.trace.metadata.harness"), "claude-code");
+            assert_eq!(value("langfuse.trace.metadata.harness"), "omp");
+            assert_eq!(
+                value("langfuse.trace.metadata.dialect"),
+                "claude-code",
+                "borrowed dialect is independent of the identity"
+            );
             assert_eq!(value("langfuse.trace.metadata.cc_account"), "acc-1");
             assert_eq!(
                 value("langfuse.trace.metadata.harness_candidates"),
@@ -773,9 +785,8 @@ mod tests {
                 .and_then(|v| v["arrayValue"]["values"].as_array())
                 .unwrap_or_else(|| panic!("tags missing: {s}"));
             assert!(
-                tags.iter()
-                    .any(|t| t["stringValue"] == "harness:claude-code"),
-                "harness tag on every span: {tags:?}"
+                tags.iter().any(|t| t["stringValue"] == "harness:omp"),
+                "identity tag on every span: {tags:?}"
             );
         }
     }

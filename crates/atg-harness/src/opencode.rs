@@ -1,9 +1,9 @@
-//! opencode harness: UA-level client (`opencode/1.x ai-sdk/…`) whose
-//! affinity family (X-Session-Id / X-Session-Affinity / X-Opencode-Session
-//! / X-Conversation-ID, openai_gateway_scheduling.go:22-36) carried zero
-//! session rows in the 7d window — declared here as harness-scoped header
-//! mounts, consulted ONLY for opencode-attributed traffic (an unidentified
-//! client cannot mint sessions from these headers).
+//! opencode harness: identity via UA (`opencode/1.x ai-sdk/…`) or its own
+//! session header; the x-session-* affinity family
+//! (openai_gateway_scheduling.go:22-36) stays identity-gated — an
+//! unidentified client cannot mint sessions from these headers.
+use atg_protocol::mounts;
+
 pub static DESCRIPTOR: crate::HarnessDescriptor = crate::HarnessDescriptor {
     name: "opencode",
     protocols: &[
@@ -11,22 +11,24 @@ pub static DESCRIPTOR: crate::HarnessDescriptor = crate::HarnessDescriptor {
         "openai.chat_completions",
         "anthropic.messages",
     ],
-    identify: &[
+    identity: &[
         crate::Identifier {
             kind: crate::IdentKind::UaPrefix("opencode/"),
             strength: 4,
+            class: crate::EvidenceClass::Identity,
         },
         crate::Identifier {
-            kind: crate::IdentKind::HeaderPresent(atg_protocol::mounts::HDR_OPENCODE_SESSION),
+            kind: crate::IdentKind::HeaderPresent(mounts::HDR_OPENCODE_SESSION),
             strength: 4,
+            class: crate::EvidenceClass::Identity,
         },
     ],
-    session: None,
+    dialects: &[],
     session_header_mounts: &[
-        atg_protocol::mounts::HDR_SESSION,
-        atg_protocol::mounts::HDR_SESSION_AFFINITY,
-        atg_protocol::mounts::HDR_OPENCODE_SESSION,
-        atg_protocol::mounts::HDR_CONVERSATION_ID,
+        mounts::HDR_SESSION,
+        mounts::HDR_SESSION_AFFINITY,
+        mounts::HDR_OPENCODE_SESSION,
+        mounts::HDR_CONVERSATION_ID,
     ],
     enrich: &[],
 };
