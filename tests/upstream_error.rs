@@ -36,6 +36,51 @@ async fn upstream_error_passthrough() {
         "upstream error body lost: {text}"
     );
 
+    // G3: an HTTP-level failure on a protocol-detected path must mark the
+    // turn errored — the record exports status ERROR instead of a silently
+    // "successful" turn. /v1/messages/count_tokens detects anthropic
+    // (prefix) while the fixture answers 404 (unknown route).
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages/count_tokens"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(
+            r#"{"model":"m","messages":[{"role":"user","content":"g3-probe"}]}"#,
+        )))
+        .unwrap();
+    let resp = Client::builder(TokioExecutor::new())
+        .build_http::<Full<Bytes>>()
+        .request(req)
+        .await
+        .expect("request should reach gateway");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let _ = resp.collect().await;
+    // The logging hook runs asynchronously off the response path — poll
+    // briefly for the record to land.
+    let mut g3: Option<serde_json::Value> = None;
+    for _ in 0..20 {
+        let req = Request::get(format!("http://127.0.0.1:{gw}/__atg/records"))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = Client::builder(TokioExecutor::new())
+            .build_http::<Full<Bytes>>()
+            .request(req)
+            .await
+            .expect("records");
+        let recs: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.collect().await.unwrap().to_bytes()).expect("json");
+        g3 = recs
+            .into_iter()
+            .find(|r| r["protocol"] == "anthropic.messages" && r["user_input"] == "g3-probe");
+        if g3.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let g3 = g3.unwrap_or_else(|| panic!("g3 record never appeared"));
+    assert_eq!(
+        g3["error"], "http_status: 404",
+        "HTTP-level failure must mark the turn errored: {g3}"
+    );
+
     // Connection refused upstream: gateway must answer with a 5xx, not hang.
     let gw_port = gw + 100;
     let listen = format!("127.0.0.1:{gw_port}");

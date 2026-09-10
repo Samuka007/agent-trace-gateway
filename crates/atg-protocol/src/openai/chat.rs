@@ -61,4 +61,26 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     // USER RULING: stateless SDK traffic — the stitcher must not mint sessions.
     stitch_eligible: false,
     turn_markers: None,
+    nonstreaming_tools: Some(nonstreaming_tools),
 };
+
+/// Non-streaming message.tool_calls: choices[0].message.tool_calls[]
+/// entries carry function.name + function.arguments.
+fn nonstreaming_tools(resp: &serde_json::Value) -> Vec<atg_model::ToolCall> {
+    let Some(calls) = resp["choices"][0]["message"]["tool_calls"].as_array() else {
+        return Vec::new();
+    };
+    calls
+        .iter()
+        .map(|c| atg_model::ToolCall {
+            name: c["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            arguments: c["function"]["arguments"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect()
+}

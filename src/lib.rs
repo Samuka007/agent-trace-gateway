@@ -59,6 +59,9 @@ pub mod gateway_app {
         /// first WS server frame of the turn) — the truthful
         /// completion-start moment, reset per turn.
         pub first_output_ns: Option<u64>,
+        /// Upstream response status (0 = no upstream response arrived —
+        /// proxy-level failure); captured at upstream_response_filter.
+        pub resp_status: u16,
     }
 
     #[async_trait]
@@ -76,6 +79,7 @@ pub mod gateway_app {
                 start_ns: now_ns(),
                 end_ns: 0,
                 first_output_ns: None,
+                resp_status: 0,
             }
         }
 
@@ -197,6 +201,7 @@ pub mod gateway_app {
             resp: &mut pingora::http::ResponseHeader,
             ctx: &mut Self::CTX,
         ) -> Result<()> {
+            ctx.resp_status = resp.status.as_u16();
             if let Some(v) = resp.headers.get(http::header::CONTENT_TYPE) {
                 ctx.resp_content_type = v.to_str().unwrap_or("").to_string();
             }
@@ -234,10 +239,21 @@ pub mod gateway_app {
             Ok(None)
         }
 
-        async fn logging(&self, session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX) {
+        async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
             let path = session.req_header().uri.path();
             let Some(protocol) = unpack::detect_protocol(path) else {
                 return;
+            };
+            // G3: HTTP/proxy-level failure marker — protocol terminal error
+            // frames (error_marker) only cover in-stream failures; a 4xx/5xx
+            // JSON body or a proxy error previously exported as a
+            // successful turn. Protocol-level markers win when both exist.
+            let http_error = if let Some(e) = e {
+                Some(format!("proxy_error: {e:?}"))
+            } else if ctx.resp_status >= 400 {
+                Some(format!("http_status: {}", ctx.resp_status))
+            } else {
+                None
             };
             let header_get = |name: &str| -> Option<String> {
                 session
@@ -351,7 +367,6 @@ pub mod gateway_app {
                     start_ns: ctx.start_ns,
                     end_ns: ctx.end_ns,
                     usage,
-                    error,
                     model_name,
                     user_id,
                     harness,
@@ -360,6 +375,7 @@ pub mod gateway_app {
                     harness_enrich,
                     session_synthetic,
                     completion_start_ns: ctx.first_output_ns,
+                    error: error.or(http_error),
                 });
                 return;
             }
@@ -374,6 +390,7 @@ pub mod gateway_app {
                 record.harness_enrich = harness_enrich;
                 record.session_synthetic = session_synthetic;
                 record.completion_start_ns = Some(ctx.start_ns);
+                record.error = record.error.take().or(http_error);
                 record.raw_request = raw_request;
                 record.raw_response = raw_response;
                 ctx.end_ns = now_ns();

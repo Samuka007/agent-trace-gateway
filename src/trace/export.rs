@@ -264,9 +264,13 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
             attributes.extend(trace_extra.iter().cloned());
+            // P0-N1: one traceId per TURN — the agent root and its
+            // generation child share it; per-call random ids put the two
+            // spans in different traces with a dangling parentSpanId.
+            let trace_id = random_trace_id();
             let agent_span_id = random_span_id();
             let mut agent_span = serde_json::json!({
-                "traceId": random_trace_id(),
+                "traceId": trace_id,
                 "spanId": agent_span_id,
                 "name": "agent.turn",
                 "kind": 3,
@@ -297,11 +301,19 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             }
             // Generation child span: carries the usage_details (exclusive
             // buckets) — the only span type Langfuse reads usage from. The
-            // child span id is derived with a distinct seed so it never
-            // collides with the parent.
+            // child span id is fresh so it never collides with the parent
+            // (Langfuse upserts span ids — collisions are silently dropped).
             let usage_attrs: Vec<serde_json::Value> = match &r.usage {
-                Some(u) if !u.is_empty() => {
-                    vec![kv(ATTR_USAGE_DETAILS, &usage_details_json(u))]
+                Some(u) => {
+                    // G1: an all-zero usage passes the is_empty() gate but
+                    // serializes to "{}" — omit the attribute entirely
+                    // (zero ≙ unreported, same rule as the entry level).
+                    let details = usage_details_json(u);
+                    if details == "{}" {
+                        Vec::new()
+                    } else {
+                        vec![kv(ATTR_USAGE_DETAILS, &details)]
+                    }
                 }
                 _ => Vec::new(),
             };
@@ -332,7 +344,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             generation_attributes.extend(usage_attrs);
             generation_attributes.extend(trace_extra.iter().cloned());
             let mut generation_span = serde_json::json!({
-                "traceId": random_trace_id(),
+                "traceId": trace_id,
                 "spanId": random_span_id(),
                 "parentSpanId": agent_span_id,
                 "name": GENERATION_SPAN_NAME,
@@ -652,6 +664,60 @@ mod tests {
         let before = trace_ids.len();
         trace_ids.dedup();
         assert_eq!(trace_ids.len(), before, "replayed turns shared a trace id");
+    }
+
+    /// P0-N1: ONE traceId per turn — the agent root and its generation
+    /// child must share it (per-call random ids split the turn across two
+    /// traces with a dangling parentSpanId); turns stay mutually distinct.
+    #[test]
+    fn same_turn_spans_share_one_trace() {
+        let records: Vec<_> = (0..5).map(|_| record("sess-t")).collect();
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&records)).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 10);
+        let mut turn_trace_ids = Vec::new();
+        for pair in spans.chunks(2) {
+            let (agent, generation) = (&pair[0], &pair[1]);
+            assert_eq!(
+                agent["traceId"], generation["traceId"],
+                "agent+generation of one turn must share the traceId"
+            );
+            assert_eq!(
+                generation["parentSpanId"], agent["spanId"],
+                "generation must link to its agent parent"
+            );
+            assert_ne!(agent["spanId"], generation["spanId"]);
+            turn_trace_ids.push(agent["traceId"].as_str().unwrap_or_default().to_string());
+        }
+        turn_trace_ids.sort();
+        let before = turn_trace_ids.len();
+        turn_trace_ids.dedup();
+        assert_eq!(turn_trace_ids.len(), before, "turns must not share traces");
+    }
+
+    /// G1: an all-zero usage is unreported — the usage_details attribute
+    /// is omitted entirely, never an empty "{}" object.
+    #[test]
+    fn all_zero_usage_omits_usage_details() {
+        let mut r = record("sess-g1");
+        r.usage = Some(atg_model::TurnUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            total_tokens: Some(0),
+            ..Default::default()
+        });
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        for s in spans {
+            assert!(
+                span_attr(s, ATTR_USAGE_DETAILS).is_none(),
+                "all-zero usage must not emit usage_details: {s}"
+            );
+        }
     }
 
     /// AMB-7: an errored turn marks BOTH spans — Langfuse infers each
