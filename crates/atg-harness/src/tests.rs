@@ -98,6 +98,58 @@ fn no_ua_envelope_is_compatible_and_extracts() {
     assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
 }
 
+/// v0.3.1 pin restored for the dialect era (BLOCK-G1, §5 row 6): the
+/// object user_id form {session_id} extracts through the dialect rule.
+/// Under the two-tier model it no longer claims the IDENTITY (compatible
+/// label) — the design's tightening; extraction semantics unchanged.
+#[test]
+fn object_user_id_variant_extracts_via_dialect() {
+    let req = body(&format!(
+        r#"{{"metadata":{{"user_id":{{"session_id":"{UUID}"}}}}}}"#
+    ));
+    let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
+    assert_eq!(facts.identity, None, "object form is dialect-only");
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(facts.harness_label(), "claude-code-compatible");
+    assert_eq!(
+        session_from_body(&facts, &req).as_deref(),
+        Some(UUID),
+        "the dialect rule's object branch must extract"
+    );
+}
+
+/// v0.3.1 pin restored for the dialect era (BLOCK-G1, §5 row 4 — a REAL
+/// historical traffic form): metadata itself as a JSON envelope string
+/// {"user_id": …} reaches the same extraction.
+#[test]
+fn metadata_envelope_string_form_extracts_via_dialect() {
+    let inner = legacy_user_id();
+    let req = body(&format!(r#"{{"metadata":"{{\"user_id\":\"{inner}\"}}"}}"#));
+    let facts = identify("anthropic.messages", Some(&req), None, &hdrs(&[]));
+    assert_eq!(facts.dialect, "claude-code");
+    assert_eq!(facts.harness_label(), "claude-code-compatible");
+    assert_eq!(
+        session_from_body(&facts, &req).as_deref(),
+        Some(UUID),
+        "the dialect rule's metadata-envelope branch must extract"
+    );
+}
+
+/// NIT: declared dialects must reference registered dialect tables (the
+/// field's validation surface — otherwise it is dead data).
+#[test]
+fn declared_dialects_are_registered() {
+    for h in HARNESSES {
+        for name in h.dialects {
+            assert!(
+                DIALECTS.iter().any(|d| d.name == *name),
+                "{} declares unregistered dialect {name}",
+                h.name
+            );
+        }
+    }
+}
+
 /// Design pin 3: claude-cli UA → the claude-code identity proper.
 #[test]
 fn claude_cli_ua_is_identity() {

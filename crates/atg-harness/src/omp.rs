@@ -9,12 +9,12 @@
 //! tables' mounts carry the session (extraction unchanged).
 pub static DESCRIPTOR: crate::HarnessDescriptor = crate::HarnessDescriptor {
     name: "omp",
-    // Multi-protocol egress: everything ATG speaks.
+    // Multi-protocol egress, observed shapes only (宁缺勿造): live has
+    // ZERO production evidence and is deliberately absent.
     protocols: &[
         "anthropic.messages",
         "openai.responses",
         "openai.chat_completions",
-        "openai.live",
     ],
     identity: &[crate::Identifier {
         kind: crate::IdentKind::UaPrefix("omp/"),
