@@ -1,11 +1,10 @@
-//! codex harness: openai.responses client whose fingerprint lives in the
-//! request body — `client_metadata` carrying x-codex-* keys (turn
-//! metadata / installation id). Its session value needs no harness rule:
-//! client_metadata.session_id is already an openai.responses body mount
-//! (pck ≡ cm in the observed fleet, design §1).
+//! codex harness: openai.responses client whose identity fingerprint lives
+//! in the request body — `client_metadata` carrying x-codex-* keys (turn
+//! metadata / installation id). Its session value needs no dialect rule:
+//! client_metadata.session_id is already an openai.responses body mount.
 use serde_json::Value;
 
-/// Body fingerprint: any x-codex-* key inside client_metadata.
+/// Identity body fingerprint: any x-codex-* key inside client_metadata.
 fn codex_metadata_shape(req: &Value) -> bool {
     req["client_metadata"]
         .as_object()
@@ -23,18 +22,20 @@ fn installation_id(req: &Value) -> Option<String> {
 pub static DESCRIPTOR: crate::HarnessDescriptor = crate::HarnessDescriptor {
     name: "codex",
     protocols: &["openai.responses", "openai.live"],
-    identify: &[
+    identity: &[
         crate::Identifier {
             kind: crate::IdentKind::Body(codex_metadata_shape),
             strength: 4,
+            class: crate::EvidenceClass::Identity,
         },
         crate::Identifier {
             kind: crate::IdentKind::UaPrefix("codex"),
             strength: 4,
+            class: crate::EvidenceClass::Identity,
         },
     ],
-    // No body session rule: cm.session_id is a protocol mount already.
-    session: None,
+    dialects: &[],
+    // No session mounts: cm.session_id is a protocol body mount already.
     session_header_mounts: &[],
     enrich: &[("codex_installation", installation_id)],
 };

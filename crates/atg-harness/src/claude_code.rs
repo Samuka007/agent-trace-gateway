@@ -1,9 +1,13 @@
-//! claude-code harness: the dominant anthropic.messages client.
-//! Session shapes (design §1, 7d evidence): ≥~2.1.22x JSON envelope
-//! `metadata.user_id` string `{"device_id":…,"session_id":…}` (474k rows),
-//! ≤2.1.114 legacy composite `user_<hex64>_account_<uuid>_session_<uuid36>`
-//! (13k rows, also restores the account identity), plus the header mount
-//! `x-claude-code-session-id` (declared by the anthropic protocol table).
+//! claude-code harness: the dominant anthropic.messages client — and the
+//! owner of the claude-code DIALECT (envelope/legacy/object/metadata-
+//! envelope body shapes + the CC session header), which other harnesses
+//! (omp) borrow while keeping their own identity.
+//!
+//! Identity evidence is TIGHT (v0.3.2 user ruling): the claude-cli UA, or
+//! the legacy composite user_id shape (a real CC ≤2.1.114 fingerprint)
+//! with no conflicting UA. The modern JSON envelope and the bare CC header
+//! are DIALECT shapes only — hitting them without identity evidence yields
+//! the downgraded "claude-code-compatible" assertion, not the identity.
 use atg_protocol::session::{
     claude_code_legacy_parts, metadata_envelope_transform, metadata_user_id_session,
 };
@@ -12,7 +16,7 @@ use serde_json::Value;
 /// Envelope shape: metadata.user_id is a JSON string object carrying a
 /// session_id key (device_id is the common first key — bonus, not required;
 /// loose matching survives key-set drift across CC versions, design §6 R3).
-fn envelope_shape(req: &Value) -> bool {
+pub(crate) fn envelope_shape(req: &Value) -> bool {
     let Some(raw) = req["metadata"]["user_id"].as_str() else {
         return false;
     };
@@ -23,14 +27,10 @@ fn envelope_shape(req: &Value) -> bool {
 }
 
 /// Legacy composite shape: the fixed user_<hex64>_account_…_session_… form.
-fn legacy_shape(req: &Value) -> bool {
+pub(crate) fn legacy_shape(req: &Value) -> bool {
     req["metadata"]["user_id"]
         .as_str()
-        .is_some_and(claude_code_legacy_parts_is_hit)
-}
-
-fn claude_code_legacy_parts_is_hit(raw: &str) -> bool {
-    claude_code_legacy_parts(raw).is_some()
+        .is_some_and(|raw| claude_code_legacy_parts(raw).is_some())
 }
 
 /// user_id object form {session_id}: a production-zero compatibility
@@ -52,10 +52,11 @@ fn metadata_envelope_shape(req: &Value) -> bool {
     })
 }
 
-/// Session rule: three-form reader on metadata.user_id (envelope / legacy /
-/// object), then the metadata-as-envelope form — exactly the two
-/// pre-v0.3.0 anthropic table rows, in the same order.
-fn session(req: &Value) -> Option<String> {
+/// Dialect session rule: three-form reader on metadata.user_id (envelope /
+/// legacy / object), then the metadata-as-envelope form — exactly the two
+/// pre-v0.3.0 anthropic table rows, in the same order. Runs for ANY
+/// claude-code-dialect traffic (CC itself, omp, or -compatible).
+fn dialect_session(req: &Value) -> Option<String> {
     if let Some(raw) = req["metadata"]["user_id"].as_str() {
         let parsed: Value = serde_json::from_str(raw).unwrap_or(Value::String(raw.to_string()));
         if let Some(sid) = metadata_user_id_session(&parsed) {
@@ -80,38 +81,39 @@ fn account(req: &Value) -> Option<String> {
     claude_code_legacy_parts(raw).and_then(|(_, account)| account)
 }
 
+/// The claude-code session-carrying dialect.
+pub static DIALECT: crate::Dialect = crate::Dialect {
+    name: "claude-code",
+    body_shapes: &[
+        envelope_shape,
+        legacy_shape,
+        object_shape,
+        metadata_envelope_shape,
+    ],
+    header_shapes: &[crate::CC_SESSION_HEADER],
+    session_body: Some(dialect_session),
+    owner: "claude-code",
+};
+
 pub static DESCRIPTOR: crate::HarnessDescriptor = crate::HarnessDescriptor {
     name: "claude-code",
     protocols: &["anthropic.messages"],
-    identify: &[
-        crate::Identifier {
-            kind: crate::IdentKind::Body(envelope_shape),
-            strength: 3,
-        },
+    // Identity-exclusive evidence ONLY (v0.3.2 tightening): the UA, or the
+    // legacy composite (CC ≤2.1.114 fingerprint). Envelope/header hits are
+    // dialect shapes — see DIALECT and the -compatible downgrade.
+    identity: &[
         crate::Identifier {
             kind: crate::IdentKind::Body(legacy_shape),
             strength: 3,
-        },
-        // Production-zero compatibility variants (design §1 rows 4/6) —
-        // rare shapes, still attributed for coverage.
-        crate::Identifier {
-            kind: crate::IdentKind::Body(object_shape),
-            strength: 3,
-        },
-        crate::Identifier {
-            kind: crate::IdentKind::Body(metadata_envelope_shape),
-            strength: 3,
+            class: crate::EvidenceClass::Identity,
         },
         crate::Identifier {
             kind: crate::IdentKind::UaPrefix("claude-cli/"),
             strength: 4,
-        },
-        crate::Identifier {
-            kind: crate::IdentKind::HeaderPresent(crate::CC_SESSION_HEADER),
-            strength: 4,
+            class: crate::EvidenceClass::Identity,
         },
     ],
-    session: Some(session),
+    dialects: &["claude-code"],
     session_header_mounts: &[],
     enrich: &[("cc_account", account)],
 };

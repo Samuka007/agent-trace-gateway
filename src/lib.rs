@@ -271,11 +271,10 @@ pub mod gateway_app {
             let ua = header_get("user-agent");
             let hfacts =
                 atg_harness::identify(protocol, parsed_req.as_ref(), ua.as_deref(), &header_get);
-            let harness = if hfacts.name == atg_harness::UNKNOWN {
-                String::new()
-            } else {
-                hfacts.name.to_string()
-            };
+            // Two-tier (v0.3.2): identity label for harness metadata/tags;
+            // the matched session-carrying dialect rides its own field.
+            let harness = hfacts.harness_label();
+            let dialect = hfacts.dialect.to_string();
             // Request-side facts: ONE descriptor lookup + ONE pass over
             // the parsed body (F6 single entry; the old scattered
             // detect_by_name calls and the messages re-parse are gone).
@@ -297,7 +296,9 @@ pub mod gateway_app {
             });
             self.turns_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if !harness.is_empty() {
+            // Annotation-rate metric counts the IDENTITY layer only
+            // (§6 ruling) — "-compatible" downgrades stay unannotated.
+            if hfacts.identity.is_some() {
                 self.turns_with_harness
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -370,6 +371,7 @@ pub mod gateway_app {
                     model_name,
                     user_id,
                     harness,
+                    dialect: dialect.clone(),
                     harness_candidates,
                     harness_anomaly: hfacts.protocol_anomaly,
                     harness_enrich,
@@ -384,6 +386,7 @@ pub mod gateway_app {
                     record.session_id = session_id;
                     record.breakpoint = breakpoint;
                     record.harness = harness;
+                    record.dialect = dialect;
                     record.harness_candidates = harness_candidates;
                     record.harness_anomaly = hfacts.protocol_anomaly;
                     record.harness_enrich = harness_enrich;
