@@ -128,18 +128,24 @@ pub fn responses_final_output(resp: &serde_json::Value) -> Option<String> {
     Some(out.join("\n"))
 }
 
-/// Non-streaming function_call items: output[] entries of type
-/// function_call carry name + complete arguments string.
+/// Non-streaming tool items: output[] entries of type function_call (or
+/// custom_tool_call) carry name + a complete arguments string (the
+/// `arguments` key, falling back to `input` — same dual-field read as the
+/// streaming ToolDone action).
 fn nonstreaming_tools(resp: &serde_json::Value) -> Vec<atg_model::ToolCall> {
     let Some(items) = resp["output"].as_array() else {
         return Vec::new();
     };
     items
         .iter()
-        .filter(|i| i["type"] == "function_call")
+        .filter(|i| i["type"] == "function_call" || i["type"] == "custom_tool_call")
         .map(|i| atg_model::ToolCall {
             name: i["name"].as_str().unwrap_or_default().to_string(),
-            arguments: i["arguments"].as_str().unwrap_or_default().to_string(),
+            arguments: i["arguments"]
+                .as_str()
+                .or_else(|| i["input"].as_str())
+                .unwrap_or_default()
+                .to_string(),
         })
         .collect()
 }

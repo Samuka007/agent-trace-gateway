@@ -15,6 +15,17 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.1] - 2026-09-10
+
+E2E NO-GO 修复批次（.tmp-e2e-otel-v030.md，RustGate 复审 PASS）+ 台账 NIT 两项。
+
+### 修复
+
+- **P0-N1（阻塞项）**：agent span 与 generation span 各自 `random_trace_id()` → 同一 turn 落两条 trace、parentSpanId 悬空（P0-1 随机化引入，确定性 id 时代共享值掩盖了此缺陷）。现在每 TurnRecord 生成一次 traceId，两 span 复用；spanId 保持各自独立随机。钉子：same_turn_spans_share_one_trace + otlp_export E2E wire 断言
+- **G1**：全零 usage 不再导出空对象 `usage_details="{}"`——属性整体省略（零值 ≙ 未报告）。钉子：all_zero_usage_omits_usage_details
+- **G2**：非流式 tool_calls 提取落地（descriptor 新字段 nonstreaming_tools：anthropic content[].tool_use / responses output[].function_call+custom_tool_call（arguments|input 双读，与流式 ToolDone 对称）/ chat choices[0].message.tool_calls[]；live=None 由 WS 组装自有）。钉子：nonstreaming_tools_extract_from_all_three_shapes
+- **G3**：HTTP/代理层失败置 TurnRecord.error——`http_status: <code>`（≥400）或 `proxy_error: <e>`，协议级 error marker 优先；NIT-B：响应体不可解析时发**最小错误记录**（此前该 turn 整个消失）。E2E：JSON-404 与 text-502 两探针
+
 ## [0.3.0] - 2026-09-09
 
 三层架构 reconcile（model / protocol / harness / trace 四层，Cargo workspace 编译期强制依赖红线）+ harness 能力。API 语义兼容（OTLP wire 仅新增属性）；行为变更逐条枚举于各 commit message。
