@@ -104,6 +104,11 @@ pub struct PathMatch {
     pub loose: bool,
 }
 
+/// Sub-resources that may follow a loose endpoint and still loose-match —
+/// known protocol continuations (anthropic count_tokens). Anything else
+/// after the endpoint disqualifies the loose match.
+pub const LOOSE_SUBRESOURCES: &[&str] = &["count_tokens"];
+
 /// Field spellings for one protocol's usage object (protocol knowledge lives
 /// here, never in code or_else chains).
 /// Field spellings as ALTERNATIVE full paths (segments for resolve_path);
@@ -130,11 +135,13 @@ pub struct ProtocolDescriptor {
     pub name: &'static str,
     pub path_prefixes: &'static [&'static str],
     /// Loose endpoint-name variants ("responses", "messages",
-    /// "chat/completions"): when NO exact prefix matched, a path whose
-    /// segment sequence contains one of these at ANY depth loosely matches
-    /// this protocol (base URLs without /v1 — e.g. omp configured with a
-    /// bare host). Loose hits are upstream-gated (2xx) by the caller: a
-    /// 404 on an unknown route must not mint a fake turn.
+    /// "chat/completions"): when NO exact prefix matched, a path that
+    /// ENDS with one of these segment sequences (or continues into a
+    /// whitelisted sub-resource) loosely matches this protocol — base
+    /// URLs without /v1 (e.g. omp configured with a bare host).
+    /// Tail-anchored on purpose: a mid-path segment alone must NOT match
+    /// (a business API route like /api/messages/list is not a model
+    /// endpoint). Loose hits are also upstream-gated (2xx) by the caller.
     pub loose_endpoints: &'static [&'static str],
     /// Key holding the replayable messages array; None = fingerprint skipped.
     pub messages_path: Option<&'static str>,
@@ -226,11 +233,19 @@ impl ProtocolDescriptor {
                 if ep.is_empty() {
                     continue;
                 }
-                if segments.windows(ep.len()).any(|w| w == ep) {
-                    return Some(PathMatch {
-                        descriptor,
-                        loose: true,
-                    });
+                for start in 0..=segments.len().saturating_sub(ep.len()) {
+                    if segments[start..start + ep.len()] != ep[..] {
+                        continue;
+                    }
+                    let tail = &segments[start + ep.len()..];
+                    let anchored = tail.is_empty()
+                        || (tail.len() == 1 && LOOSE_SUBRESOURCES.contains(&tail[0]));
+                    if anchored {
+                        return Some(PathMatch {
+                            descriptor,
+                            loose: true,
+                        });
+                    }
                 }
             }
         }
@@ -404,8 +419,9 @@ mod tests {
     }
 
     /// Two-level detection: exact prefixes keep their semantics; loose
-    /// endpoint variants match at any segment depth when no exact prefix
-    /// hit (base URLs without /v1).
+    /// endpoint variants match when the path ENDS with the endpoint
+    /// sequence (or continues into a whitelisted sub-resource) and no
+    /// exact prefix hit (base URLs without /v1).
     #[test]
     fn detect_path_two_level_exact_then_loose() {
         // Exact first — unchanged.
@@ -427,10 +443,16 @@ mod tests {
         let m = ProtocolDescriptor::detect_path("/gateway/chat/completions").unwrap();
         assert_eq!(m.descriptor.name, "openai.chat_completions");
         assert!(m.loose);
-        // Sub-resources past the endpoint still loose-match (count_tokens).
+        // Whitelisted sub-resources past the endpoint still loose-match.
         let m = ProtocolDescriptor::detect_path("/messages/count_tokens").unwrap();
         assert_eq!(m.descriptor.name, "anthropic.messages");
         assert!(m.loose);
+        // Tail-anchoring (SHOULD-G2 ruling): a mid-path endpoint segment
+        // or an unknown continuation is NOT a model endpoint — a business
+        // API named /api/messages must not mint loose turns.
+        assert!(ProtocolDescriptor::detect_path("/api/messages/list").is_none());
+        assert!(ProtocolDescriptor::detect_path("/responses/feedback").is_none());
+        assert!(ProtocolDescriptor::detect_path("/messages/list").is_none());
         // No endpoint segment anywhere: no match at all.
         assert!(ProtocolDescriptor::detect_path("/__atg/records").is_none());
         assert!(ProtocolDescriptor::detect_path("/v1/embeddings").is_none());
