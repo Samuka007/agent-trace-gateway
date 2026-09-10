@@ -153,6 +153,10 @@ pub struct ProtocolDescriptor {
     pub stitch_eligible: bool,
     /// WS turn boundaries (live only; None for SSE protocols).
     pub turn_markers: Option<TurnMarkers>,
+    /// Non-streaming tool-call extraction from the response body (G2: the
+    /// streaming strategies had no non-streaming counterpart — complete
+    /// tool items sit in the response body at rest).
+    pub nonstreaming_tools: Option<fn(&Value) -> Vec<atg_model::ToolCall>>,
 }
 
 /// A body session source: a value path plus an optional transform. The
@@ -452,5 +456,38 @@ mod tests {
             d.user_input.unwrap()(&body["input"]),
             Some("hi".to_string())
         );
+    }
+
+    /// G2: non-streaming tool extraction mirrors the streaming strategies —
+    /// anthropic content[].tool_use, responses output[].function_call and
+    /// chat choices[0].message.tool_calls[] all yield complete items.
+    #[test]
+    fn nonstreaming_tools_extract_from_all_three_shapes() {
+        let anth = value(
+            r#"{"content":[{"type":"text","text":"hi"},{"type":"tool_use","name":"get_weather","input":{"city":"Paris"}}]}"#,
+        );
+        let d = &anthropic::DESCRIPTOR;
+        let tools = d.nonstreaming_tools.unwrap()(&anth);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "get_weather");
+        assert_eq!(tools[0].arguments, r#"{"city":"Paris"}"#);
+
+        let resp = value(
+            r#"{"output":[{"type":"function_call","name":"read_file","arguments":"{\"path\":\"/tmp/x\"}"}]}"#,
+        );
+        let d = &openai::responses::DESCRIPTOR;
+        let tools = d.nonstreaming_tools.unwrap()(&resp);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "read_file");
+        assert_eq!(tools[0].arguments, r#"{"path":"/tmp/x"}"#);
+
+        let chat = value(
+            r#"{"choices":[{"message":{"tool_calls":[{"function":{"name":"f","arguments":"{}"}}]}}]}"#,
+        );
+        let d = &openai::chat::DESCRIPTOR;
+        let tools = d.nonstreaming_tools.unwrap()(&chat);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "f");
+        assert_eq!(tools[0].arguments, "{}");
     }
 }

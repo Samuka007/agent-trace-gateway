@@ -137,6 +137,22 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
             );
             Ok(r)
         }
+        // G3 probe: a protocol-detected path answering an HTTP-level
+        // failure with a JSON error body (anthropic-style) — the turn must
+        // export with an error marker, not as a silent success.
+        ("POST", "/v1/messages/count_tokens") => {
+            let _ = req.collect().await;
+            let mut r = Response::new(full(
+                r#"{"type":"error","error":{"type":"not_found_error","message":"unknown path"}}"#
+                    .to_string(),
+            ));
+            *r.status_mut() = hyper::StatusCode::NOT_FOUND;
+            r.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            );
+            Ok(r)
+        }
         ("POST", "/v1/responses") => {
             let body = req.collect().await.unwrap().to_bytes();
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();

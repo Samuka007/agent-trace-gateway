@@ -66,6 +66,7 @@ pub static DESCRIPTOR: ProtocolDescriptor = ProtocolDescriptor {
         start: "response.create",
         end: "response.done",
     }),
+    nonstreaming_tools: None, // WS turn assembly owns tool extraction.
 };
 
 /// Event names sourced from the descriptor table (no literals here).

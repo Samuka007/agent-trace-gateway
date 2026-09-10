@@ -293,6 +293,9 @@ pub fn nonstreaming(
     let usage = atg_protocol::usage::usage_from_nonstreaming(d, resp);
     let model_name = req["model"].as_str().unwrap_or_default().to_string();
     let user_id = d.end_user(req).unwrap_or_default();
+    // G2: complete tool items sit in the response body at rest — the
+    // descriptor's extractor mirrors the streaming strategies.
+    let tool_calls = d.nonstreaming_tools.map(|f| f(resp)).unwrap_or_default();
     Some(atg_model::TurnRecord {
         protocol: d.name.to_string(),
         user_input,
@@ -300,6 +303,7 @@ pub fn nonstreaming(
         usage,
         model_name,
         user_id,
+        tool_calls,
         ..Default::default()
     })
 }

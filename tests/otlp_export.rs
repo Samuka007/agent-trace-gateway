@@ -141,6 +141,16 @@ async fn otlp_export() {
         4,
         "two turns, each with agent+generation span: {spans:?}"
     );
+    // P0-N1: each turn's agent+generation share ONE traceId and link
+    // parentSpanId -> agent spanId; the two turns land in distinct traces.
+    assert_eq!(spans[0]["traceId"], spans[1]["traceId"], "turn 1 one trace");
+    assert_eq!(spans[2]["traceId"], spans[3]["traceId"], "turn 2 one trace");
+    assert_ne!(
+        spans[0]["traceId"], spans[2]["traceId"],
+        "turns must not share a trace"
+    );
+    assert_eq!(spans[1]["parentSpanId"], spans[0]["spanId"]);
+    assert_eq!(spans[3]["parentSpanId"], spans[2]["spanId"]);
     let span = &spans[0];
     // Session id present as an attribute; turn content carried verbatim.
     let attrs = span["attributes"].as_array().expect("span attributes");

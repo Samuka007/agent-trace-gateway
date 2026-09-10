@@ -74,6 +74,7 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     final_output_path: &["output"],
     stitch_eligible: true,
     turn_markers: None,
+    nonstreaming_tools: Some(nonstreaming_tools),
 };
 
 /// responses input reader (named fn referenced by the descriptor): bare items
@@ -125,4 +126,20 @@ pub fn responses_final_output(resp: &serde_json::Value) -> Option<String> {
         return None;
     }
     Some(out.join("\n"))
+}
+
+/// Non-streaming function_call items: output[] entries of type
+/// function_call carry name + complete arguments string.
+fn nonstreaming_tools(resp: &serde_json::Value) -> Vec<atg_model::ToolCall> {
+    let Some(items) = resp["output"].as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|i| i["type"] == "function_call")
+        .map(|i| atg_model::ToolCall {
+            name: i["name"].as_str().unwrap_or_default().to_string(),
+            arguments: i["arguments"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect()
 }

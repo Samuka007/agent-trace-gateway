@@ -80,4 +80,24 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
     final_output_path: &["content"],
     stitch_eligible: true,
     turn_markers: None,
+    nonstreaming_tools: Some(nonstreaming_tools),
 };
+
+/// Non-streaming tool_use blocks: content[] items of type tool_use carry
+/// name + input (a JSON value — serialized to the arguments string).
+fn nonstreaming_tools(resp: &serde_json::Value) -> Vec<atg_model::ToolCall> {
+    let Some(blocks) = resp["content"].as_array() else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter(|b| b["type"] == "tool_use")
+        .map(|b| atg_model::ToolCall {
+            name: b["name"].as_str().unwrap_or_default().to_string(),
+            arguments: match &b["input"] {
+                serde_json::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            },
+        })
+        .collect()
+}
