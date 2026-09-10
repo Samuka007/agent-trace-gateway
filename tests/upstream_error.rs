@@ -81,6 +81,45 @@ async fn upstream_error_passthrough() {
         "HTTP-level failure must mark the turn errored: {g3}"
     );
 
+    // NIT-B: an unparseable (non-JSON) error body on a detected path must
+    // still surface as a MINIMAL errored record — the turn must not vanish.
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/responses/healthz"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(r#"{"model":"m","input":"nitb"}"#)))
+        .unwrap();
+    let resp = Client::builder(TokioExecutor::new())
+        .build_http::<Full<Bytes>>()
+        .request(req)
+        .await
+        .expect("request should reach gateway");
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let _ = resp.collect().await;
+    let mut nitb: Option<serde_json::Value> = None;
+    for _ in 0..20 {
+        let req = Request::get(format!("http://127.0.0.1:{gw}/__atg/records"))
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = Client::builder(TokioExecutor::new())
+            .build_http::<Full<Bytes>>()
+            .request(req)
+            .await
+            .expect("records");
+        let recs: Vec<serde_json::Value> =
+            serde_json::from_slice(&resp.collect().await.unwrap().to_bytes()).expect("json");
+        nitb = recs
+            .into_iter()
+            .find(|r| r["protocol"] == "openai.responses" && r["user_input"] == "nitb");
+        if nitb.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let nitb = nitb.unwrap_or_else(|| panic!("minimal errored record never appeared"));
+    assert_eq!(
+        nitb["error"], "http_status: 502",
+        "unparseable error body must still record the failure: {nitb}"
+    );
+
     // Connection refused upstream: gateway must answer with a 5xx, not hang.
     let gw_port = gw + 100;
     let listen = format!("127.0.0.1:{gw_port}");

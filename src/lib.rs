@@ -379,9 +379,8 @@ pub mod gateway_app {
                 });
                 return;
             }
-            if let Some(mut record) =
-                unpack::unpack_nonstreaming(protocol, parsed_req.as_ref(), &ctx.resp_buf)
-            {
+            match unpack::unpack_nonstreaming(protocol, parsed_req.as_ref(), &ctx.resp_buf) {
+                Some(mut record) => {
                 record.session_id = session_id;
                 record.breakpoint = breakpoint;
                 record.harness = harness;
@@ -397,6 +396,32 @@ pub mod gateway_app {
                 record.start_ns = ctx.start_ns;
                 record.end_ns = ctx.end_ns;
                 self.push_record(record);
+                }
+                None if http_error.is_some() => {
+                    // NIT-B: a proxy-level failure (no upstream response,
+                    // or an unparseable error body) previously produced NO
+                    // record at all — the errored turn vanished. Emit a
+                    // minimal record so the failure is observable.
+                    ctx.end_ns = now_ns();
+                    self.push_record(atg_model::TurnRecord {
+                        protocol: protocol.to_string(),
+                        session_id,
+                        user_input: tf.as_ref().map(|f| f.user_input.clone()).unwrap_or_default(),
+                        raw_request,
+                        raw_response,
+                        harness,
+                        harness_candidates,
+                        harness_anomaly: hfacts.protocol_anomaly,
+                        harness_enrich,
+                        session_synthetic,
+                        error: http_error,
+                        start_ns: ctx.start_ns,
+                        end_ns: ctx.end_ns,
+                        model_name: tf.as_ref().map(|f| f.model_name.clone()).unwrap_or_default(),
+                        ..Default::default()
+                    });
+                }
+                None => {}
             }
         }
 

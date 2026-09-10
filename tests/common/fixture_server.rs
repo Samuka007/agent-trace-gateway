@@ -153,6 +153,18 @@ async fn handle(mut req: Request<Incoming>) -> Result<Response<BoxedBody>, Infal
             );
             Ok(r)
         }
+        // NIT-B probe: a protocol-detected path failing with a NON-JSON
+        // body — the turn must still surface as a minimal errored record.
+        ("POST", "/v1/responses/healthz") => {
+            let _ = req.collect().await;
+            let mut r = Response::new(full("bad gateway".to_string()));
+            *r.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+            r.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                "text/plain".parse().unwrap(),
+            );
+            Ok(r)
+        }
         ("POST", "/v1/responses") => {
             let body = req.collect().await.unwrap().to_bytes();
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
