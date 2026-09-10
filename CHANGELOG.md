@@ -15,6 +15,29 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.2] - 2026-09-10
+
+双批次（RustGate §G 双 PASS r2）：harness 两级归因 + 宽松路径匹配。
+
+### 两级归因：dialect 与 identity 解耦（生产误归因修复）
+
+omp 以 claude-code 方言发 anthropic messages（x-claude-code-session-id + CC 形态 metadata），此前被整批标 harness:claude-code。现在：
+- **identity 层**（metadata.harness / tags harness:*）：身份独占证据——UA 前缀（claude-cli/、omp/、codex、opencode/）、codex x-codex-* body 指纹、CC legacy 复合形态（≤2.1.114 指纹）；identity 类证据优先于一切形态证据（跨 strength）。
+- **dialect 层**（新独立键 metadata.dialect）：会话携带形态规则集（CC envelope/legacy/object/metadata-envelope + CC header）——借用方言是常态，omp 说 claude-code 方言但身份仍是 omp；session 提取按形态键控零漂移。
+- 无 identity 证据但方言形态命中 → 降级断言 "<dialect>-compatible"（不算本体）；CC 本体收紧：claude-cli UA 或 legacy 形态，纯 header/envelope 命中不再冒充本体。
+- 新增 **omp descriptor**（UaPrefix omp/ s=4，协议=实测三形态，宁缺勿造不含 live）；turns_with_harness 只计 identity 层。
+
+### 宽松路径匹配 + 上游门控（omp base URL 不带 /v1）
+
+omp 配裸 host 时 POST /responses 检测不命中→透明转发无 trace 且静默。现在：
+- **表驱动 loose_endpoints**（responses / messages / chat/completions；live 无）：无精确前缀命中时**尾锚定**匹配——端点段序列必须是路径结尾或延续进白名单子资源（count_tokens）；/api/messages/list 类业务路由不匹配。compatible-mode/v1/* 精确规则不变。
+- **detect_path 两级返回**（精确/宽松带 loose 标志）；**记录门控**：宽松命中仅上游 2xx 才记录（404/5xx 不产假 turn）；精确命中行为完全不变（错误 turn 照记）。
+- **可观测**：/__atg/health 增 loose_path_matches 计数 + 宽松命中首次采样日志（path+protocol，配置排障）。
+
+### 验证（CT104，--jobs 6）
+
+fmt+clippy clean；dialect 73 测试（harness 15 钉，含 BLOCK-G1 恢复的 object/metadata-envelope 提取钉）；loose 74 测试（protocol 20 钉 + E2E 四场景：/responses 200 记录、/responses 404 门控+计数、/v1/responses 404 精确回归照记、/chat/completions 变体记录）。
+
 ## [0.3.1] - 2026-09-10
 
 E2E NO-GO 修复批次（.tmp-e2e-otel-v030.md，RustGate 复审 PASS）+ 台账 NIT 两项。
