@@ -1,4 +1,5 @@
 // agent-trace-gateway library: harness modules + gateway app.
+pub mod atcd;
 pub mod harness;
 pub mod trace;
 

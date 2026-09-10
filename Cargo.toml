@@ -23,7 +23,9 @@ http-body-util = "0.1"
 tokio-stream = "0.1"
 parking_lot = "0.12.5"
 hex = "0.4.3"
-reqwest = "0.13.4"
+reqwest = { version = "0.13.4", features = ["json", "stream", "socks"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
 
 [lib]
 name = "agent_trace_gateway"
