@@ -7,7 +7,19 @@
 
 ## [Unreleased]
 
-### 客户端断开处理策略开关（drain switch，v0.3.6 特性）
+### 计划中（台账，未排期）
+
+### 已做（待随下版归档）
+
+- **bench 进 CI**：v0.3.0 已做（ci.yml release 模式真执行，门 264KB ≤700µs）
+- **openai.live descriptor 死数据**：v0.3.0 已做（ws.rs 并入 live.rs，TurnMarkers/sse_rules/usage_frames 全部被消费）
+- **error 标记扩展**：response.failed/incomplete 落 TurnRecord.error 且 agent+generation 双 span 挂 native status（v0.2.2 已做）；error.type 属性、非流式失败响应与 ws `response.done(status=failed)` 的标记仍待做
+- **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
+- **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
+
+## [0.3.6] - 2026-09-11
+
+### ① 客户端断开处理策略开关（drain switch）
 
 per-upstream 配置：客户端中途断开时对上游连接的处理策略。
 
@@ -20,13 +32,10 @@ per-upstream 配置：客户端中途断开时对上游连接的处理策略。
 - **机制说明（RustGate 复审后定稿）**：Pingora 响应泵把下游存活与上游消费结构性耦合（下游第一次读写失败即 try_join! 取消上游、丢弃连接），ProxyHttp 钩子内无法实现断开后 drain。**开关关闭（默认）= 全部请求保持 Pingora 泵，零回归**；**开关开启**才把 LLM API 请求（非 WebSocket 升级）交由网关自有 relay 转发（request_filter 短路）：reqwest 上游客户端（`.no_proxy()`——环境代理不劫持数据路径；`ATG_SNI` 在 https 上游时以 resolve 把 SNI 名钉到真实地址，裸 IP https 握手保持可用）+ pingora 下游 session 写出（h1/h2 分帧保持、hop-by-hop 头剥离、缺 framing 头时按泵规则补 chunked）。WS 升级与未知路径在两种模式下都保持 Pingora 泵不变。上游侧断连/半 body 仍归 ProxyError；响应完整交付后的拆除仍归 IdleNoise。
 - **已知限制**：①HTTP trailers 不经 relay 转发（reqwest bytes_stream 无 trailer API；LLM API 响应无 trailers，h1 泵本就不转发）；②请求上传在连上游前全量缓冲（LLM 请求量级成本可忽略）；③断开后存活探针复用泵原语 read_body_or_idle(true)——其全部结局（FIN/RST/body 后数据到达）在泵语义里都是会话拆除，relay 同口径记 cancelled。relay 吞吐 smoke 已补（6MB SSE live 转发 + 全量捕获钉子）。
 
-### 计划中（台账，未排期）
+### ② 其他
 
-- **bench 进 CI**：v0.3.0 已做（ci.yml release 模式真执行，门 264KB ≤700µs）
-- **openai.live descriptor 死数据**：v0.3.0 已做（ws.rs 并入 live.rs，TurnMarkers/sse_rules/usage_frames 全部被消费）
-- **error 标记扩展**：response.failed/incomplete 落 TurnRecord.error 且 agent+generation 双 span 挂 native status（v0.2.2 已做）；error.type 属性、非流式失败响应与 ws `response.done(status=failed)` 的标记仍待做
-- **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
-- **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
+- **ATG_SNI https 裸 IP 形态**：relay 客户端以 resolve(SNI 名 → 真实地址) 支持 `https://裸IP:端口` + ATG_SNI 的 SNI 覆盖（泵路径原有能力，relay 路径保持）。
+- **已知问题（v0.3.5 即存在，非本次引入）**：portless `ATG_UPSTREAM`（如 `https://host` 不带端口）在泵路径 panic（pingora HttpPeer::new 对无法解析地址 unwrap）；README 规定 upstream 需带端口。relay 的 parse_upstream 已支持 portless（默认 443/80）。
 
 ## [0.3.5] - 2026-09-11
 
