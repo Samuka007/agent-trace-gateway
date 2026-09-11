@@ -217,6 +217,12 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             if !r.client_ua.is_empty() {
                 trace_extra.push(kv("langfuse.trace.metadata.client_ua", &r.client_ua));
             }
+            // Salted API-credential fingerprint: key-reuse correlation
+            // without the key (16-hex salted sha256, plaintext never
+            // leaves the gateway).
+            if !r.api_key_fp.is_empty() {
+                trace_extra.push(kv("langfuse.trace.metadata.client_key_fp", &r.api_key_fp));
+            }
             if r.harness_anomaly {
                 trace_extra.push(kv(
                     "langfuse.trace.metadata.harness_protocol_anomaly",

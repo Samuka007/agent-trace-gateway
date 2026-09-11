@@ -84,6 +84,45 @@ pub mod gateway_app {
         }
     }
 
+    /// Salted API-credential fingerprint: sha256(salt || key), first 16
+    /// hex chars. The salt defaults to a compile-time value and can be
+    /// overridden via ATG_APIKEY_SALT (rotating the salt invalidates
+    /// cross-version correlation but never exposes the key). The raw key
+    /// is dropped immediately — no log, record or export path ever sees
+    /// the plaintext.
+    pub fn api_key_fp(key: &str) -> String {
+        use sha2::Digest;
+        let salt = std::env::var("ATG_APIKEY_SALT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "atg-apikey-fp-salt-v1".to_string());
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(salt.as_bytes());
+        hasher.update(key.as_bytes());
+        hex::encode(hasher.finalize())[..16].to_string()
+    }
+
+    /// Extract the request's API credential and fingerprint it:
+    /// anthropic.messages -> x-api-key header; openai.* -> Authorization
+    /// Bearer. None when the request carried no credential (internal
+    /// probes) — no error, no field.
+    fn request_api_key_fp(protocol: &str, header_get: &dyn Fn(&str) -> Option<String>) -> String {
+        let key = if protocol == "anthropic.messages" {
+            header_get("x-api-key")
+        } else {
+            header_get("authorization").and_then(|v| {
+                v.strip_prefix("Bearer ")
+                    .map(str::to_string)
+                    // Non-Bearer schemes are not API credentials here.
+                    .filter(|k| !k.is_empty())
+            })
+        };
+        match key {
+            Some(k) if !k.trim().is_empty() => api_key_fp(k.trim()),
+            _ => String::new(),
+        }
+    }
+
     fn now_ns() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -372,6 +411,9 @@ pub mod gateway_app {
                     None => u.to_string(),
                 })
                 .unwrap_or_default();
+            // Salted API-credential fingerprint (correlation without the
+            // key; plaintext never enters any downstream path).
+            let api_key_fp = request_api_key_fp(protocol, &header_get);
             // Request-side facts: ONE descriptor lookup + ONE pass over
             // the parsed body (F6 single entry; the old scattered
             // detect_by_name calls and the messages re-parse are gone).
@@ -470,6 +512,7 @@ pub mod gateway_app {
                     harness,
                     dialect: dialect.clone(),
                     client_ua: client_ua.clone(),
+                    api_key_fp: api_key_fp.clone(),
                     harness_candidates,
                     harness_anomaly: hfacts.protocol_anomaly,
                     harness_enrich,
@@ -486,6 +529,7 @@ pub mod gateway_app {
                     record.harness = harness;
                     record.dialect = dialect;
                     record.client_ua = client_ua;
+                    record.api_key_fp = api_key_fp;
                     record.harness_candidates = harness_candidates;
                     record.harness_anomaly = hfacts.protocol_anomaly;
                     record.harness_enrich = harness_enrich;

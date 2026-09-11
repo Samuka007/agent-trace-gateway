@@ -259,6 +259,7 @@ impl WsTurnState {
             harness: String::new(),
             dialect: String::new(),
             client_ua: String::new(),
+            api_key_fp: String::new(),
             harness_candidates: Vec::new(),
             harness_anomaly: false,
             harness_enrich: Vec::new(),
