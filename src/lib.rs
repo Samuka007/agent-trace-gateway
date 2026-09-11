@@ -496,9 +496,7 @@ pub mod gateway_app {
             }
         } else {
             match authority.rsplit_once(':') {
-                Some((h, p))
-                    if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) =>
-                {
+                Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
                     (h, p.parse::<u16>().unwrap_or(default_port))
                 }
                 _ => (authority, default_port),
