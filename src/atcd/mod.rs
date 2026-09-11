@@ -16,6 +16,7 @@
 //! 因此本原型只引用 codex 的 wire 常量与请求形状（`refresh` 模块，逐字
 //! 取自 codex-rs/login/src/auth/manager.rs），日后如需共享维护，切换到
 //! `codex-login::AuthManager` 是一个孤立改动点。
+pub mod oauth;
 pub mod persona;
 pub mod placement;
 pub mod proxy;

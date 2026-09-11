@@ -53,6 +53,26 @@ fn now_unix() -> i64 {
     now_unix_ms() / 1000
 }
 
+/// 非 codex 客户端的会话键：body 的 prompt_cache_key 优先，
+/// 否则用 body 前缀（4KB）散列——多轮重放的前缀是稳定的。
+fn derive_session_key(body: &[u8]) -> String {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(k) = v.get("prompt_cache_key").and_then(|x| x.as_str()) {
+            if !k.trim().is_empty() {
+                return format!("pck:{k}");
+            }
+        }
+    }
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(&body[..body.len().min(4096)]);
+    format!("pfx:{}", hex::encode(h.finalize())[..16].to_string())
+}
+
+fn header_f64(headers: &HeaderMap, name: &str) -> Option<f64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
 fn json_error(status: StatusCode, message: &str) -> HyperResponse {
     let body = serde_json::json!({"error": {"message": message}});
     Response::builder()
@@ -119,13 +139,15 @@ impl ProxyApp {
             return json_error(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
         }
 
-        // ── 绑定（仅路由粘性；身份是下游真实工件，不替换） ───────────
-        let existing = match &session_key {
-            Some(key) => self.store.binding(key).ok().flatten(),
-            None => None,
-        };
-        let account_id = match existing {
-            Some(b) => b.account_id,
+        // ── 绑定（仅路由粘性） ──────────────────────────────────────
+        // codex 下游（带 session-id 头）：身份是下游真实工件，透传不替换。
+        // 其余 responses 客户端（omp/opencode）：铸造 v7 身份树并逐轮合成
+        // turn 元数据——这是"第三方 ChatGPT 登录客户端"的自洽形态。
+        let codex_native = session_key.is_some();
+        let session_key = session_key.unwrap_or_else(|| derive_session_key(&body));
+        let existing = self.store.binding(&session_key).ok().flatten();
+        let (account_id, bound_session, bound_thread) = match existing {
+            Some(b) => (b.account_id, b.session_id, b.thread_id),
             None => {
                 let Some(account_id) = self.placement.place(&self.store) else {
                     return json_error(
@@ -133,23 +155,30 @@ impl ProxyApp {
                         "no available account in pool",
                     );
                 };
-                if let Some(key) = &session_key {
-                    let thread_id = parts
+                let bound_session = if codex_native {
+                    session_key.clone()
+                } else {
+                    rewrite::mint_session_id()
+                };
+                let bound_thread = if codex_native {
+                    parts
                         .headers
                         .get("thread-id")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or_default()
-                        .to_string();
-                    let _ = self.store.insert_binding(&BindingRow {
-                        session_key: key.clone(),
-                        account_id: account_id.clone(),
-                        thread_id,
-                        session_id: key.clone(),
-                        turns: 0,
-                        last_seen: now_unix_ms(),
-                    });
-                }
-                account_id
+                        .to_string()
+                } else {
+                    rewrite::mint_thread_id()
+                };
+                let _ = self.store.insert_binding(&BindingRow {
+                    session_key: session_key.clone(),
+                    account_id: account_id.clone(),
+                    thread_id: bound_thread.clone(),
+                    session_id: bound_session.clone(),
+                    turns: 0,
+                    last_seen: now_unix_ms(),
+                });
+                (account_id, bound_session, bound_thread)
             }
         };
 
@@ -193,17 +222,28 @@ impl ProxyApp {
         };
         let mut headers = parts.headers.clone();
         rewrite::strip_inbound(&mut headers);
-        rewrite::apply(
-            &mut headers,
-            &RewriteInput {
-                persona: &persona,
-                access_token: &access_token,
-                downstream_installation: downstream_installation.as_deref(),
-                inbound_turn_metadata: inbound_turn_metadata.as_ref(),
-            },
-        );
+        if codex_native {
+            rewrite::apply(
+                &mut headers,
+                &RewriteInput {
+                    persona: &persona,
+                    access_token: &access_token,
+                    downstream_installation: downstream_installation.as_deref(),
+                    inbound_turn_metadata: inbound_turn_metadata.as_ref(),
+                },
+            );
+        } else {
+            rewrite::apply_third_party(
+                &mut headers,
+                &persona,
+                &access_token,
+                &bound_session,
+                &bound_thread,
+                now_unix_ms(),
+            );
+        }
 
-        // body 外科替换：仅 installation 投影，其余字节不动
+        // body 外科替换：仅 installation 投影，其余字节不动（仅 codex 下游有）
         let body = rewrite::surgical_installation_replace(
             body,
             downstream_installation.as_deref(),
@@ -222,7 +262,7 @@ impl ProxyApp {
         {
             Ok(r) => r,
             Err(e) => {
-                self.record_turn(&account_id, &session_key);
+                self.record_turn(&account_id, &Some(session_key.clone()));
                 return json_error(StatusCode::BAD_GATEWAY, &format!("upstream error: {e}"));
             }
         };
@@ -235,15 +275,26 @@ impl ProxyApp {
                     if let Some(token) = account.access_token.as_deref() {
                         let mut headers = parts.headers.clone();
                         rewrite::strip_inbound(&mut headers);
-                        rewrite::apply(
-                            &mut headers,
-                            &RewriteInput {
-                                persona: &persona,
-                                access_token: token,
-                                downstream_installation: downstream_installation.as_deref(),
-                                inbound_turn_metadata: inbound_turn_metadata.as_ref(),
-                            },
-                        );
+                        if codex_native {
+                            rewrite::apply(
+                                &mut headers,
+                                &RewriteInput {
+                                    persona: &persona,
+                                    access_token: token,
+                                    downstream_installation: downstream_installation.as_deref(),
+                                    inbound_turn_metadata: inbound_turn_metadata.as_ref(),
+                                },
+                            );
+                        } else {
+                            rewrite::apply_third_party(
+                                &mut headers,
+                                &persona,
+                                token,
+                                &bound_session,
+                                &bound_thread,
+                                now_unix_ms(),
+                            );
+                        }
                         if let Ok(retried) =
                             client.post(&url).headers(headers).body(body).send().await
                         {
@@ -254,7 +305,14 @@ impl ProxyApp {
             }
         }
 
-        self.record_turn(&account_id, &session_key);
+        self.record_turn(&account_id, &Some(session_key.clone()));
+
+        // 配额观测：上游响应头里的窗口用量百分比落库，供放置过滤
+        let qp = header_f64(resp.headers(), "x-codex-primary-used-percent");
+        let qs = header_f64(resp.headers(), "x-codex-secondary-used-percent");
+        if qp.is_some() || qs.is_some() {
+            let _ = self.store.update_quota(&account_id, qp, qs, now_unix());
+        }
 
         // ── 回程：状态与头透传，SSE 流式 ────────────────────────────
         let mut builder = Response::builder().status(resp.status());

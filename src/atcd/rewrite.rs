@@ -87,6 +87,74 @@ pub fn turn_metadata_with_installation(
     http::HeaderValue::from_str(&out).ok()
 }
 
+/// 第三方 responses 客户端（omp/opencode）：铸造 v7 会话/线程 id。
+/// 与 codex 的 `SessionId::new` / `ThreadId::new` 同一原语。
+pub fn mint_session_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+pub fn mint_thread_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+/// 逐轮合成 turn 元数据：turn_id 新 v7、时戳取真实发送时刻，
+/// window 挂在 thread 名下（thread:0），thread_source 如实为 user。
+pub fn mint_turn_metadata(
+    installation_id: &str,
+    session_id: &str,
+    thread_id: &str,
+    now_unix_ms: i64,
+) -> http::HeaderValue {
+    let v = serde_json::json!({
+        "installation_id": installation_id,
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "window_id": format!("{thread_id}:0"),
+        "turn_id": uuid::Uuid::now_v7().to_string(),
+        "turn_started_at_unix_ms": now_unix_ms,
+        "thread_source": "user",
+    });
+    http::HeaderValue::from_str(&v.to_string()).expect("turn metadata header")
+}
+
+/// 第三方客户端的完整身份头：铸造的身份树 + 账号人设壳。
+/// instructions/工具表保留客户端自己的——第三方 ChatGPT 登录客户端
+/// 是官方容忍的自洽家族，不伪装成 codex。
+pub fn apply_third_party(
+    headers: &mut http::HeaderMap,
+    persona: &Persona,
+    access_token: &str,
+    session_id: &str,
+    thread_id: &str,
+    now_unix_ms: i64,
+) {
+    apply(
+        headers,
+        &RewriteInput {
+            persona,
+            access_token,
+            downstream_installation: None,
+            inbound_turn_metadata: None,
+        },
+    );
+    headers.insert("session-id", session_id.parse().unwrap());
+    headers.insert("thread-id", thread_id.parse().unwrap());
+    headers.insert(
+        "x-codex-window-id",
+        format!("{thread_id}:0").parse().unwrap(),
+    );
+    headers.insert("x-client-request-id", thread_id.parse().unwrap());
+    headers.insert(
+        "x-codex-turn-metadata",
+        mint_turn_metadata(
+            persona.installation_id.as_str(),
+            session_id,
+            thread_id,
+            now_unix_ms,
+        ),
+    );
+}
+
 /// body 外科替换：把下游 installation id 的全部出现换成账号人设的。
 /// 其余字节逐位不动。两者相同时原样返回。
 pub fn surgical_installation_replace(

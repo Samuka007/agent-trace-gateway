@@ -23,12 +23,19 @@ http-body-util = "0.1"
 tokio-stream = "0.1"
 parking_lot = "0.12.5"
 hex = "0.4.3"
-reqwest = { version = "0.13.4", features = ["json", "stream", "socks"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "socks", "rustls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 # 与 codex 同源的身份库：UA 的 OS 段与终端段由同一批库生成，保真由构造保证
 os_info = "3.15"
 codex-terminal-detection = { git = "https://github.com/openai/codex", package = "codex-terminal-detection" }
+# OAuth（device + 粘贴回调）：wire 镜像 codex-rs/login 源码（见 oauth.rs
+# 模块注释）。曾尝试直接引用 codex-login：其硬依赖 native-tls/openssl 在
+# nix 构建环境无法链接，且 tokio-tungstenite 走 codex 私有 fork 引发解析
+# 冲突，故撤引用、保留 wire 镜像。
+urlencoding = "2"
+url = "2"
+rand = "0.9"
 
 [lib]
 name = "agent_trace_gateway"

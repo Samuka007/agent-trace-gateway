@@ -13,13 +13,15 @@ pub trait Placement: Send + Sync {
 pub struct LruPlacement {
     /// 单账号同时承载的对话数上限——"一个人同时开的终端数"。
     pub max_sessions_per_account: i64,
+    /// 5h 窗口用量百分比天花板：临期的号不接新会话。
+    pub quota_ceiling_percent: f64,
 }
 
 impl Placement for LruPlacement {
     fn place(&self, store: &Store) -> Option<String> {
         let conn_store = store;
         let _ = conn_store;
-        store.place_lru(self.max_sessions_per_account)
+        store.place_lru(self.max_sessions_per_account, self.quota_ceiling_percent)
     }
 }
 
@@ -44,6 +46,9 @@ mod tests {
             proxy_url: None,
             state: state.into(),
             last_turn_at: last_turn,
+            primary_used_percent: None,
+            secondary_used_percent: None,
+            quota_updated_at: None,
         }
     }
 
@@ -55,7 +60,7 @@ mod tests {
         s.upsert_account(&account("a-cool", ACCOUNT_COOLING, 0), 1).unwrap();
         s.upsert_account(&account("a-full", ACCOUNT_ACTIVE, 0), 1).unwrap();
 
-        let p = LruPlacement { max_sessions_per_account: 1 };
+        let p = LruPlacement { max_sessions_per_account: 1, quota_ceiling_percent: 85.0 };
         // a-full 已有一个绑定，容量满；a-cool 冷却；先轮到最久未用的 a-idle
         s.insert_binding(&BindingRow {
             session_key: "sk".into(),

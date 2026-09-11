@@ -26,6 +26,9 @@ pub struct AccountRow {
     pub proxy_url: Option<String>,
     pub state: String,
     pub last_turn_at: i64,
+    pub primary_used_percent: Option<f64>,
+    pub secondary_used_percent: Option<f64>,
+    pub quota_updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +60,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   proxy_url       TEXT,
   state           TEXT NOT NULL DEFAULT 'active',
   last_turn_at    INTEGER NOT NULL DEFAULT 0,
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  primary_used_percent   REAL,
+  secondary_used_percent REAL,
+  quota_updated_at       INTEGER
 );
 CREATE TABLE IF NOT EXISTS bindings (
   session_key TEXT PRIMARY KEY,
@@ -83,11 +89,14 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
         proxy_url: r.get("proxy_url")?,
         state: r.get("state")?,
         last_turn_at: r.get("last_turn_at")?,
+        primary_used_percent: r.get("primary_used_percent")?,
+        secondary_used_percent: r.get("secondary_used_percent")?,
+        quota_updated_at: r.get("quota_updated_at")?,
     })
 }
 
 const ACCOUNT_COLS: &str = "account_id, label, refresh_token, access_token, expires_at, \
-     installation_id, version_pin, user_agent, originator, proxy_url, state, last_turn_at";
+     installation_id, version_pin, user_agent, originator, proxy_url, state, last_turn_at, primary_used_percent, secondary_used_percent, quota_updated_at";
 
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -106,8 +115,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"INSERT INTO accounts (account_id, label, refresh_token, access_token, expires_at,
-                   installation_id, version_pin, user_agent, originator, proxy_url, state, last_turn_at, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                   installation_id, version_pin, user_agent, originator, proxy_url, state, last_turn_at, primary_used_percent, secondary_used_percent, quota_updated_at, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
                ON CONFLICT(account_id) DO UPDATE SET
                    label=excluded.label, refresh_token=excluded.refresh_token,
                    version_pin=excluded.version_pin, user_agent=excluded.user_agent,
@@ -125,6 +134,9 @@ impl Store {
                 a.proxy_url,
                 a.state,
                 a.last_turn_at,
+                a.primary_used_percent,
+                a.secondary_used_percent,
+                a.quota_updated_at,
                 now,
             ],
         )?;
@@ -231,22 +243,53 @@ impl Store {
         Ok(())
     }
 
-    /// LRU 放置：active 状态、绑定数未达上限的账号里，取最久未轮转的。
-    pub fn place_lru(&self, max_sessions_per_account: i64) -> Option<String> {
+    /// LRU 放置：active、绑定数未达上限、配额未破天花板的账号里，取最久未轮转的。
+    pub fn place_lru(&self, max_sessions_per_account: i64, quota_ceiling: f64) -> Option<String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
                 r#"SELECT a.account_id FROM accounts a
                    LEFT JOIN bindings b ON b.account_id = a.account_id
                    WHERE a.state = 'active'
+                     AND (a.primary_used_percent IS NULL OR a.primary_used_percent < ?2)
                    GROUP BY a.account_id
                    HAVING COUNT(b.session_key) < ?1
                    ORDER BY a.last_turn_at ASC, a.account_id ASC
                    LIMIT 1"#,
             )
             .ok()?;
-        stmt.query_row([max_sessions_per_account], |r| r.get::<_, String>(0))
+        stmt
+            .query_row(rusqlite::params![max_sessions_per_account, quota_ceiling], |r| {
+                r.get::<_, String>(0)
+            })
             .ok()
+    }
+
+    /// 单账号绑定数（"这个人同时开着几个终端"）。
+    pub fn bindings_count(&self, account_id: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM bindings WHERE account_id = ?1",
+            [account_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// 捕获上游响应头里的窗口用量百分比（5h/7d），供放置过滤。
+    pub fn update_quota(
+        &self,
+        account_id: &str,
+        primary: Option<f64>,
+        secondary: Option<f64>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE accounts SET primary_used_percent = ?2, secondary_used_percent = ?3,
+             quota_updated_at = ?4 WHERE account_id = ?1",
+            rusqlite::params![account_id, primary, secondary, now],
+        )?;
+        Ok(())
     }
 }
 
@@ -269,6 +312,9 @@ mod tests {
             proxy_url: None,
             state: ACCOUNT_ACTIVE.into(),
             last_turn_at: 0,
+            primary_used_percent: None,
+            secondary_used_percent: None,
+            quota_updated_at: None,
         }
     }
 
