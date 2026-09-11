@@ -60,10 +60,13 @@
 
 ## 待办顺序（下次继续从此处开始）
 
-1. ~~R0-R3、R7~~ 已完成
-2. R4：WS V2 wire 设计 → 透传桥实现（进行中，.scratch/atcd-r4-ws-v2/）
-3. R8：CI nix 化 + runner 利用评估（进行中，.scratch/atcd-ci-nix/）
-4. R9：fork patch list 自动同步工具（进行中，.scratch/atcd-fork-patchlist/）
-5. 金样本扩容：codex TUI 模式（余）；~~opencode（实测跑通）、多轮对话样本~~ 已完成 → R7a（opencode_1.18.29 单轮 + turn2 + title 副请求）
-6. R3 剩余缺口：input items 内嵌身份、tools schema 深度差异——opencode 侧已实证（R7a：无内嵌身份项、tools 家族自洽）；omp 侧待真实流量捕获
-7. R10：OAuth web/PKCE 远端登录流研究
+1. ~~R0-R4、R7、R7a、R8、R9、R10~~ 已完成（2026-09-11 @3f94e0d；分支全绿终审：
+   fmt --check / clippy -D warnings / cargo test 50 passed 0 failed，atcd-dev
+   容器跑通与 CI 完全一致的序列）
+2. R10a（需真实账号登录，用户侧资源）：device 轮询 pending 语义实测
+   （atcd 以 400 为 pending vs codex 源码 403/404——必有一方不符真实服务）
+3. 金样本补齐：codex TUI 模式（交互式需人驱动）；omp 捕获（需改本机 omp
+   配置，建议独立会话执行，避免扰动运行中的 harness）
+4. R3 剩余缺口：input items 内嵌身份、tools schema 深度差异——omp 样本到位后评估
+5. push / fork PR / atg-builder runner 注册：用户决策项（ci.yml self-hosted
+   模板已留档 .scratch/atcd-ci-nix/spec.md Comments）
