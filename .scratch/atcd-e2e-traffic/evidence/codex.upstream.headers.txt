@@ -1,0 +1,16 @@
+POST /v1/responses
+x-codex-beta-features: remote_compaction_v2
+x-codex-window-id: 01a0918a-62c7-7813-8078-953b5512c277:0
+x-codex-turn-metadata: {"installation_id":"aafeb6c0-6c71-4970-897c-57863bbc8ee2","session_id":"01a0918a-62c7-7813-8078-953b5512c277","thread_id":"01a0918a-62c7-7813-8078-953b5512c277","agent_name":"/root","turn_id":"01a0918a-6343-7ea1-9d63-b0cbbe17f66d","window_id":"01a0918a-62c7-7813-8078-953b5512c277:0","window_number":0,"context_window_id":"01a0918a-62c7-7813-8078-9541f2dbf86f","request_kind":"turn","root_turn_id":"01a0918a-6343-7ea1-9d63-b0cbbe17f66d","thread_source":"user","sandbox":"seccomp","sandbox_mode":"read-only","auto_review_enabled":false,"node_repl_auto_review_required":false,"node_repl_disabled":false,"turn_started_at_unix_ms":1789148160836}
+x-client-request-id: 01a0918a-62c7-7813-8078-953b5512c277
+session-id: 01a0918a-62c7-7813-8078-953b5512c277
+thread-id: 01a0918a-62c7-7813-8078-953b5512c277
+accept: text/event-stream
+content-type: application/json
+originator: codex_cli_rs
+user-agent: codex_cli_rs/0.153.4 (NixOS 26.11.0; x86_64) WindowsTerminal
+authorization: Bearer at-x
+chatgpt-account-id: acc-r11
+x-codex-installation-id: aafeb6c0-6c71-4970-897c-57863bbc8ee2
+host: 127.0.0.1:19499
+content-length: 46256

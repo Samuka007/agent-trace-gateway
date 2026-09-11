@@ -1,0 +1,22 @@
+WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp" (codex_home: AbsolutePathBuf("/tmp/r11-codex-home"))
+Reading additional input from stdin...
+OpenAI Codex v0.153.4
+--------
+workdir: /tmp/r11-codex-cwd
+model: gpt-5.5
+provider: capture
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 01a0918a-62c7-7813-8078-953b5512c277
+--------
+user
+say ok
+ERROR: Reconnecting... 1/5
+ERROR: Reconnecting... 2/5
+ERROR: Reconnecting... 3/5
+ERROR: Reconnecting... 4/5
+ERROR: Reconnecting... 5/5
+ERROR: stream disconnected before completion: Transport error: network error: error decoding response body
+ERROR: stream disconnected before completion: Transport error: network error: error decoding response body

@@ -1,0 +1,18 @@
+{
+ "request_line": "POST /v1/responses",
+ "client": "127.0.0.1:39358",
+ "headers": {
+  "accept": "*/*",
+  "content-type": "application/json",
+  "accept-encoding": "gzip, deflate, br, zstd",
+  "x-session-affinity": "ses_f6e743a81ffexshHxFenjuISEz",
+  "x-session-id": "ses_f6e743a81ffexshHxFenjuISEz",
+  "originator": "codex_cli_rs",
+  "user-agent": "codex_cli_rs/0.153.4 (NixOS 26.11.0; x86_64) WindowsTerminal",
+  "authorization": "Bearer at-x",
+  "chatgpt-account-id": "acc-r11",
+  "x-codex-installation-id": "aafeb6c0-6c71-4970-897c-57863bbc8ee2",
+  "host": "127.0.0.1:19499",
+  "content-length": "46734"
+ }
+}

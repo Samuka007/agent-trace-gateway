@@ -1,0 +1,596 @@
+[0m
+> build · gpt-5.5
+[0m
+[91m[1mError: [0mType validation failed: Value: {"ok":true}.
+Error message: [
+  {
+    "code": "invalid_union",
+    "errors": [
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.output_text.delta"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.output_text.delta\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "delta"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.completed",
+            "response.incomplete"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid option: expected one of \"response.completed\"|\"response.incomplete\""
+        },
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "response"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.failed"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.failed\""
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "sequence_number"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "response"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.created"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.created\""
+        },
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "response"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.output_item.added"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.output_item.added\""
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "code": "invalid_type",
+          "expected": "object",
+          "path": [
+            "item"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.output_item.done"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.output_item.done\""
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "code": "invalid_type",
+          "expected": "object",
+          "path": [
+            "item"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.function_call_arguments.delta"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.function_call_arguments.delta\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "delta"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.custom_tool_call_input.delta"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.custom_tool_call_input.delta\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "delta"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.image_generation_call.partial_image"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.image_generation_call.partial_image\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "partial_image_b64"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.code_interpreter_call_code.delta"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.code_interpreter_call_code.delta\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "delta"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.code_interpreter_call_code.done"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.code_interpreter_call_code.done\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "code"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.output_text.annotation.added"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.output_text.annotation.added\""
+        },
+        {
+          "code": "invalid_type",
+          "expected": "object",
+          "path": [
+            "annotation"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.reasoning_summary_part.added"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.reasoning_summary_part.added\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "summary_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.reasoning_summary_text.delta"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.reasoning_summary_text.delta\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "summary_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "delta"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.reasoning_summary_part.done"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.reasoning_summary_part.done\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "summary_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.apply_patch_call_operation_diff.delta"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.apply_patch_call_operation_diff.delta\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "delta"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "response.apply_patch_call_operation_diff.done"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"response.apply_patch_call_operation_diff.done\""
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "item_id"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "output_index"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "diff"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "error"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"error\""
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "sequence_number"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "object",
+          "code": "invalid_type",
+          "path": [
+            "error"
+          ],
+          "message": "Invalid input: expected object, received undefined"
+        }
+      ],
+      [
+        {
+          "code": "invalid_value",
+          "values": [
+            "error"
+          ],
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected \"error\""
+        },
+        {
+          "expected": "number",
+          "code": "invalid_type",
+          "path": [
+            "sequence_number"
+          ],
+          "message": "Invalid input: expected number, received undefined"
+        },
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "message"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ],
+      [
+        {
+          "expected": "string",
+          "code": "invalid_type",
+          "path": [
+            "type"
+          ],
+          "message": "Invalid input: expected string, received undefined"
+        }
+      ]
+    ],
+    "path": [],
+    "message": "Invalid input"
+  }
+]

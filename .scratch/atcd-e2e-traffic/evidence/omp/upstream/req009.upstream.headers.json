@@ -1,0 +1,21 @@
+{
+ "request_line": "POST /v1/responses",
+ "client": "127.0.0.1:57846",
+ "headers": {
+  "accept": "text/event-stream",
+  "accept-encoding": "gzip, deflate, br, zstd",
+  "content-type": "application/json",
+  "originator": "codex_cli_rs",
+  "user-agent": "codex_cli_rs/0.153.4 (NixOS 26.11.0; x86_64) WindowsTerminal",
+  "authorization": "Bearer at-x",
+  "chatgpt-account-id": "acc-r11",
+  "x-codex-installation-id": "aafeb6c0-6c71-4970-897c-57863bbc8ee2",
+  "session-id": "01a0918c-42b1-762f-a2e8-0bd5b3fce572",
+  "thread-id": "01a0918c-42b1-762f-a2e8-0bd6b213ef98",
+  "x-codex-window-id": "01a0918c-42b1-762f-a2e8-0bd6b213ef98:0",
+  "x-client-request-id": "01a0918c-42b1-762f-a2e8-0bd6b213ef98",
+  "x-codex-turn-metadata": "{\"installation_id\":\"aafeb6c0-6c71-4970-897c-57863bbc8ee2\",\"session_id\":\"01a0918c-42b1-762f-a2e8-0bd5b3fce572\",\"thread_id\":\"01a0918c-42b1-762f-a2e8-0bd6b213ef98\",\"agent_name\":\"/root\",\"turn_id\":\"01a0918d-c9e8-77fd-a113-4b2a30830c3d\",\"window_id\":\"01a0918c-42b1-762f-a2e8-0bd6b213ef98:0\",\"window_number\":0,\"context_window_id\":\"01a0918c-42b1-762f-a2e8-0bd82759e803\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a0918c-42b1-762f-a2e8-0bd7408b3f54\",\"thread_source\":\"user\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1789148383720}",
+  "host": "127.0.0.1:19499",
+  "content-length": "75042"
+ }
+}

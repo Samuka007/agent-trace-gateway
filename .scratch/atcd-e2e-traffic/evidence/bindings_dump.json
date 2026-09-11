@@ -1,0 +1,54 @@
+{
+ "accounts": [
+  {
+   "account_id": "acc-r11",
+   "label": "acc-r11",
+   "refresh_token": "rt",
+   "access_token": "at-x",
+   "expires_at": 1789234539,
+   "installation_id": "aafeb6c0-6c71-4970-897c-57863bbc8ee2",
+   "version_pin": "0.153.4",
+   "user_agent": "codex_cli_rs/0.153.4 (NixOS 26.11.0; x86_64) WindowsTerminal",
+   "originator": "codex_cli_rs",
+   "proxy_url": null,
+   "state": "active",
+   "last_turn_at": 1789148428,
+   "created_at": 1789148140,
+   "primary_used_percent": 42.0,
+   "secondary_used_percent": 7.0,
+   "quota_updated_at": 1789148428
+  }
+ ],
+ "bindings": [
+  {
+   "session_key": "01a0918a-62c7-7813-8078-953b5512c277",
+   "account_id": "acc-r11",
+   "thread_id": "01a0918a-62c7-7813-8078-953b5512c277",
+   "session_id": "01a0918a-62c7-7813-8078-953b5512c277",
+   "root_turn_id": "",
+   "context_window_id": "",
+   "turns": 6,
+   "last_seen": 1789148218265
+  },
+  {
+   "session_key": "pck:01a0918c-4041-722d-b5c4-32b2bb546aae",
+   "account_id": "acc-r11",
+   "thread_id": "01a0918c-42b1-762f-a2e8-0bd6b213ef98",
+   "session_id": "01a0918c-42b1-762f-a2e8-0bd5b3fce572",
+   "root_turn_id": "01a0918c-42b1-762f-a2e8-0bd7408b3f54",
+   "context_window_id": "01a0918c-42b1-762f-a2e8-0bd82759e803",
+   "turns": 13,
+   "last_seen": 1789148428171
+  },
+  {
+   "session_key": "ses_f6e743a81ffexshHxFenjuISEz",
+   "account_id": "acc-r11",
+   "thread_id": "",
+   "session_id": "ses_f6e743a81ffexshHxFenjuISEz",
+   "root_turn_id": "",
+   "context_window_id": "",
+   "turns": 2,
+   "last_seen": 1789148252752
+  }
+ ]
+}

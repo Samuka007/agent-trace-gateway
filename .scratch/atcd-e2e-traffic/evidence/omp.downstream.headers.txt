@@ -1,0 +1,9 @@
+POST /v1/responses HTTP/1.1
+Accept: text/event-stream
+Authorization: Bearer dummy-key-for-shape-capture
+Content-Type: application/json
+User-Agent: omp/18.1.16
+Connection: keep-alive
+Host: 127.0.0.1:19405
+Accept-Encoding: gzip, deflate, br, zstd
+Content-Length: 73964
