@@ -15,6 +15,21 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.3] - 2026-09-11
+
+双批次小修（RustGate 复核 PASS）：harness 归因健壮性 + frame 计数语义。
+
+### 归因健壮性（生产 anthropic 线误归因排查产物）
+
+- **UA 前缀匹配大小写不敏感**：`IdentKind::ua_matches`——OMP/18.1.16 此前完全错过 omp/ 前缀（生产 candidates=['claude-code'] 单元素签名的可能成因）；三大小写钉子 + legacy fallback 负控制
+- **多字节 UA panic 修复（安全级，RustGate BLOCK）**：`u[..prefix.len()]` 字节切片在字符中间 panic——UA 客户端可控 + panic 落 logging 钩子 = 恶意 UA 杀连接（DoS 面）。改 `u.get(..prefix.len())`（边界外返回 None=不命中不 panic）；'日éx/1.0 omp'（byte 4 落 é 内）与 'ÖMP/18.1.0'（ASCII-fold miss）钉子
+- **langfuse.trace.metadata.client_ua**（新）：网关实际所见的 UA 原文（字符边界截 256）——归因争议的 ground truth，不再跨库 join 猜
+- 生产排查记录：v0.3.2 栈上三形态实测（plain/count_tokens/streaming-envelope + omp UA + CC header）全部正确归因 harness=omp；误归因残余差异=anthropic 线到达 ATG 的 UA 实际形态，client_ua 下次捕获直接落证
+
+### frame 计数语义
+
+- **frame_errors 跳过协议合法非载荷帧**：SSE 注释 keep-alive（`:` 开头/空 data 载荷）与 OpenAI chat `data: [DONE]` 终止哨兵不再误计为解析错误（G3 可观测基础必须语义干净）；真坏帧仍计数。钉子：comment_and_done_frames_never_count_as_errors
+
 ## [0.3.2] - 2026-09-10
 
 双批次（RustGate §G 双 PASS r2）：harness 两级归因 + 宽松路径匹配。
