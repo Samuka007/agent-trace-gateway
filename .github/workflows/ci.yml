@@ -12,30 +12,56 @@ concurrency:
 
 jobs:
   test:
+    # Toolchain comes from flake.nix devShell (fenix fromToolchainFile pinned to
+    # codex-rs/rust-toolchain.toml, currently rust 1.95.0) — the exact same
+    # compiler as local dev, on every push. This replaces the floating
+    # rust:1-bookworm container, which cannot link the codex dependency tree
+    # (openssl-sys needs libssl-dev; boring-sys needs its own clang/cmake/go
+    # set). The devShell already carries openssl + pkg-config + bindgenHook,
+    # so neither problem survives the switch.
     runs-on: ubuntu-latest
-    container:
-      image: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      # BoringSSL (via pingora) needs cmake, clang, go, perl, pkg-config.
-      - name: Install boringssl build deps
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends cmake clang golang perl pkg-config git
-          rm -rf /var/lib/apt/lists/*
+      # Reclaim ~115GB for /nix (default ~20GB is not enough for the codex
+      # dep tree: ~6.5GB devShell closure + 350-crate target dir + BoringSSL).
+      # witness-carnage: synchronous purge before builds (README names large
+      # Rust compilations as the case needing it). Pinned to commit SHA.
+      - uses: wimpysworld/nothing-but-nix@baf7355748bb5651f08b839669d6bb39051b2874
+        with:
+          hatchet-protocol: cleave
+          witness-carnage: true
 
-      - name: Add rustfmt/clippy components
-        run: rustup component add rustfmt clippy
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          # Raise GitHub API rate limits for flake-input fetches
+          # (github:Samuka007/codex/atcd-libs, nixpkgs tarball).
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Put derivation builds on the reclaimed big volume.
+          extra-conf: |
+            build-dir = /nix/build
+
+      # Optional acceleration only: caches ./target + cargo registry across
+      # runs keyed on Cargo.lock. Safe to drop without affecting correctness.
+      - uses: Swatinem/rust-cache@v2
 
       - name: rustfmt
-        run: cargo fmt --check
+        run: nix develop -c cargo fmt --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
 
       - name: test
-        run: cargo test
+        run: nix develop -c cargo test
+
+  # Self-hosted variant (NOT active — needs user approval to register a
+  # runner; see .scratch/atcd-ci-nix/spec.md Comments): swap the two lines
+  # below in, drop the nix-installer step, and preinstall nix on the runner
+  # image with the atcd-dev egress recipe (nix channel -> TUNA, cargo ->
+  # rsproxy-sparse, mihomo socks5h://10.0.100.240:10809 as github fallback).
+  #   runs-on: [self-hosted, atg-builder]
+  # Everything else stays identical: the same `nix develop -c ...` steps.
 
   image:
     needs: test
