@@ -25,7 +25,8 @@
 | R0.1 | 身份层重构：UA 按 codex 源码格式（originator 前缀 + os_info + 终端探测）、id 全部 v7、透传优先 | 用户纠错（"有没有检查过 UA/session/thread 生成逻辑"） | 已完成 | 1466663 |
 | R1 | OAuth 登录：device-code（codex 原生远程路径）+ 粘贴回调 URL 模式（web 形态雏形）。决策记录：先引用 codex-login → 其硬依赖 native-tls/openssl 在 nix 环境无法链接 + tungstenite 双层 fork 解析冲突 → 撤引用，wire 逐字镜像（pkce.rs / server.rs:584-606,809-843 / device_code_auth.rs） | 用户需求 | 已完成 | oauth.rs + `atcd login [--device]`；交换/解析有单测 |
 | R2 | 账号管理：配额头捕获落库（x-codex-primary/secondary-used-percent）、放置配额天花板（ATCD_QUOTA_CEILING_PERCENT，默认 85）、enable/disable、富列表 | 用户需求 | 已完成 | `atcd accounts/enable/disable`；冒烟显示 5h%=42 7d%=7 落库 |
-| R3 | 其他 responses 原生 agent（omp/opencode）支持：无 codex 身份头时铸造 v7 身份树 + 合成 turn 元数据，会话键 prompt_cache_key → body 前缀 sha256 兜底；instructions/工具表保留其自洽家族 | 用户需求（已确认 omp 支持 Responses） | 已完成 | 冒烟路径B：铸造 session/thread/turn 全 v7 + UA 人设壳 |
+| R3 | 其他 responses 原生 agent（omp/opencode）支持：无 codex 身份头时铸造 v7 身份树 + 合成 turn 元数据，会话键 prompt_cache_key → body 前缀 sha256 兜底；instructions/工具表保留其自洽家族 | 用户需求（已确认 omp 支持 Responses） | 已完成（含开放问题 R3a） | 冒烟路径B：铸造 session/thread/turn 全 v7 + UA 人设壳 |
+| R3a | 【R3 开放问题】第三方路径的家族一致性裂缝：头里铸造的 session-id ≠ body 透传的 prompt_cache_key（真实 codex 两者相等，因 cache key 默认从 session 派生），而头声称 codex 家族。修法 A：把 body cache key 重写为铸造值（完全 codex 形状，body 改一个字段）；修法 B：第三方不声称 codex（去 originator/installation 声明，通用 SDK 形态）。决策依据：上游是否做该一致性检查（黑盒）——待 ATG 观测或 A/B | 自查发现 | 待办（排在 R4 后） |
 | R4 | WebSocket V2 支持 | 用户需求 | 待办（已定位协议源码） | codex 侧协议在 codex-rs/codex-api/src/endpoint/realtime_websocket/（protocol_v2.rs / methods_v2.rs）；下一步读 wire 出设计 |
 | R1a | 依赖对齐决策记录：曾按"依赖以 codex 为准"引入 codex-login + 双层 tungstenite fork patch → codex-http-client 硬依赖 native-tls/openssl，nix shell 链接失败（rama 全系需 pin alpha.4 亦已处理）。reqwest 已切 rustls（对齐 codex TLS 栈）；tokio-tungstenite 维持 0.27（仅测试用帧解析）。若未来换有 openssl 的构建环境，可重启 codex-login 引用 | 用户指令 + 环境 blockers | 已完成（决策关闭） | Cargo.toml 注释 + 本行 |
 | R5 | （冻结）存量账号 installation 迁移断崖的错峰方案 | 用户指示"列到 future dream" | 冻结 | 接生产池时再启 |
