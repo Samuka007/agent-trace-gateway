@@ -34,9 +34,20 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    # codex 源码树（flake=false 只取源码不取它的 flake 输出）：devShell 的
+    # 工具链跟随其 codex-rs/rust-toolchain.toml。Cargo.lock 里的 git 依赖
+    # 同样钉在 atcd-libs 分支，两处 pin 升级时必须一起动。
+    codex = {
+      url = "github:Samuka007/codex/atcd-libs";
+      flake = false;
+    };
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, codex, fenix }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -198,8 +209,30 @@
         };
 
         # Dev shell with rust toolchain for local iteration.
+        # 工具链直接跟随 codex-rs 的 rust-toolchain.toml（fenix
+        # fromToolchainFile）：复用 codex 的仓库，就用 codex 自己钉的编译器。
+        # sha256 钉住 channel manifest（当前 channel-rust-1.95.0.toml）；fork
+        # 升级 toolchain 时此 hash 需同步更新——错配会大声失败，属预期行为。
+        # openssl + pkg-config：openssl-sys（非 vendored，经 codex native-tls
+        # 进入依赖树）按 rust-openssl "Automatic" 路径用 pkg-config 发现系统
+        # OpenSSL；任何 OPENSSL_* 环境变量都不需要。
+        # rustPlatform.bindgenHook：boring-sys 跑 bindgen，该 hook 从
+        # nixpkgs clang 导出 LIBCLANG_PATH / BINDGEN_EXTRA_CLANG_ARGS。
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [ rustc cargo clippy rustfmt cmake clang go perl pkg-config ];
+          packages = with pkgs; [
+            (fenix.packages.${system}.fromToolchainFile {
+              file = "${codex}/codex-rs/rust-toolchain.toml";
+              sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
+            })
+            rust-analyzer
+            cmake
+            clang
+            go
+            perl
+            pkg-config
+            openssl
+          ];
+          nativeBuildInputs = [ pkgs.rustPlatform.bindgenHook ];
         };
       }
     );
