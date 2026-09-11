@@ -15,6 +15,33 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.5] - 2026-09-11
+
+双特性（RustGate 复审三轮 PASS：idle 基础 → BLOCK 修复 → 三分类方向修正）。
+
+### ① 错误分类学三分：ERROR / CANCELLATION / idle-debug
+
+生产动机：成功请求结束后 sub2api 空闲超时 RST（Os 104，context "during HTTP idle state"）被冒泡为 fail_to_proxy + turn 的 proxy_error——零请求损伤的观测面失真；客户端主动中途断开同样不是网关失败（上游可能已 drain 计费，对账素材）。
+
+- **IdleNoise**（响应完整交付后的拆除）：debug 级噪声，无标记。两判据——(a) Pingora "during HTTP idle state" context 保险带；(b) 结构门：end_of_stream 已到 + 2xx + downstream 源错误（resp_status 只证明头到达，三门缺一不可——防截断响应洗白）
+- **ClientCancelled**（客户端中途断开，downstream 源非 idle）：turn 正常记录（部分内容照记）+ `langfuse.trace.metadata.cancelled=true`——**非 fail、非 ERROR level**（对账一一对齐）
+- **ProxyError**（上游侧中断/半 body/死连接）：原口径不变
+- 判据为结构性 session 方向（错误源 upstream/downstream），非字符串猜测；logging 与 fail_to_proxy 双点接线，respond_error code 路径不变
+
+### ② API Key 指纹（client_key_fp）
+
+- 提取：anthropic.messages → `x-api-key`；openai.* → `Authorization: Bearer`；非 Bearer 方案忽略；无凭据（内部探针）→ 字段缺省不报错
+- **公式（可复算）**：`sha256(salt || key)` 的 UTF-8 字节流，结果前 **16 个 hex 字符**
+- **salt**：环境变量 `ATG_APIKEY_SALT`（compose 可见可轮换）；未设置时默认 **`atg-apikey-fp-salt-v1`**
+- **CLI 复算**：`gateway key-fp <api-key>`——与运行时同一代码路径（同一 pub fn），输出即 trace 里的 `langfuse.trace.metadata.client_key_fp`，可直接当 Langfuse 过滤值
+- 明文边界：原始 key 在提取边界即弃——任何日志/records/health/导出面均无明文（records JSON 钉子断言）
+- 同 key 跨两协议入口同指纹；不同 key 不同指纹（E2E 钉子）
+
+### ③ 兼容性
+
+- 无破坏：新字段（cancelled/client_key_fp）均为增量 metadata；现有查询/过滤不受影响
+- 消费侧新增可用过滤键：`cancelled=true`（对账视图）、`client_key_fp`（key 复用关联）
+
 ## [0.3.4] - 2026-09-11
 
 **trace 形状改 GENERATION-only**（用户裁定，RustGate 复核 PASS）。
