@@ -467,25 +467,44 @@ pub mod gateway_app {
         )
     }
 
-    /// Parsed ATG_UPSTREAM: (scheme, host, port). "host:port" defaults to
-    /// http with the port present; scheme prefixes override; a missing port
-    /// defaults to 80/443 by scheme.
-    fn parse_upstream(upstream: &str) -> (String, String, u16) {
+    /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
+    /// defaults to http with the port present; scheme prefixes override; a
+    /// missing port defaults to 80/443 by scheme. An optional base path is
+    /// preserved (leading '/', trailing slashes trimmed) — the relay's
+    /// earlier construction only trimmed trailing slashes, and base-path
+    /// upstreams must keep resolving to the same URLs.
+    fn parse_upstream(upstream: &str) -> (String, String, u16, String) {
         let (scheme, rest) = match upstream.split_once("://") {
             Some((s, r)) => (s.to_ascii_lowercase(), r),
             None => ("http".to_string(), upstream),
         };
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
-                (h, p.parse::<u16>().unwrap_or(80))
-            }
-            _ => (rest, if scheme == "https" { 443 } else { 80 }),
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], rest[i..].trim_end_matches('/').to_string()),
+            None => (rest, String::new()),
         };
-        (
-            scheme,
-            host.trim_matches(|c| c == '[' || c == ']').to_string(),
-            port,
-        )
+        let default_port = if scheme == "https" { 443 } else { 80 };
+        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+            // Bracketed IPv6: [::1] or [::1]:8443.
+            match v6.split_once(']') {
+                Some((h, tail)) => (
+                    h,
+                    tail.strip_prefix(':')
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(default_port),
+                ),
+                None => (v6, default_port),
+            }
+        } else {
+            match authority.rsplit_once(':') {
+                Some((h, p))
+                    if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    (h, p.parse::<u16>().unwrap_or(default_port))
+                }
+                _ => (authority, default_port),
+            }
+        };
+        (scheme, host.to_string(), port, path)
     }
 
     /// BLOCK-A (RustGate §H): the relay's TLS SNI is the URL host — reqwest
@@ -498,7 +517,7 @@ pub mod gateway_app {
         upstream: &str,
         sni: Option<&str>,
     ) -> Option<(String, std::net::SocketAddr)> {
-        let (scheme, host, port) = parse_upstream(upstream);
+        let (scheme, host, port, _) = parse_upstream(upstream);
         if scheme != "https" {
             return None;
         }
@@ -506,7 +525,13 @@ pub mod gateway_app {
         if sni_host == host {
             return None; // normal DNS, no pinning needed
         }
-        let addr = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
+        // Bracketed form for IPv6 literals — to_socket_addrs requires it.
+        let hostport = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        let addr = hostport.to_socket_addrs().ok()?.next()?;
         Some((sni_host.to_string(), addr))
     }
 
@@ -1160,12 +1185,12 @@ pub mod gateway_app {
         // SNI name, the resolve entry pins it to the real address.
         let upstream_base = match sni_resolve_entry(upstream, sni.as_deref()) {
             Some((name, _addr)) => {
-                let (scheme, _, port) = parse_upstream(upstream);
-                format!("{scheme}://{name}:{port}")
+                let (scheme, _, port, path) = parse_upstream(upstream);
+                format!("{scheme}://{name}:{port}{path}")
             }
             None => {
-                let (scheme, host, port) = parse_upstream(upstream);
-                format!("{scheme}://{host}:{port}")
+                let (scheme, host, port, path) = parse_upstream(upstream);
+                format!("{scheme}://{host}:{port}{path}")
             }
         };
         let mut builder = reqwest::Client::builder()
@@ -1228,15 +1253,54 @@ pub mod gateway_app {
         fn parse_upstream_forms() {
             assert_eq!(
                 parse_upstream("1.2.3.4:8443"),
-                ("http".to_string(), "1.2.3.4".to_string(), 8443)
+                (
+                    "http".to_string(),
+                    "1.2.3.4".to_string(),
+                    8443,
+                    String::new()
+                )
             );
             assert_eq!(
                 parse_upstream("https://api.example.com"),
-                ("https".to_string(), "api.example.com".to_string(), 443)
+                (
+                    "https".to_string(),
+                    "api.example.com".to_string(),
+                    443,
+                    String::new()
+                )
             );
             assert_eq!(
                 parse_upstream("http://127.0.0.1:17000"),
-                ("http".to_string(), "127.0.0.1".to_string(), 17000)
+                (
+                    "http".to_string(),
+                    "127.0.0.1".to_string(),
+                    17000,
+                    String::new()
+                )
+            );
+            // Base path + trailing slash survive (pre-relay parity).
+            assert_eq!(
+                parse_upstream("https://gw.example.com/llm"),
+                (
+                    "https".to_string(),
+                    "gw.example.com".to_string(),
+                    443,
+                    "/llm".to_string()
+                )
+            );
+            assert_eq!(
+                parse_upstream("http://127.0.0.1:17000/"),
+                (
+                    "http".to_string(),
+                    "127.0.0.1".to_string(),
+                    17000,
+                    String::new()
+                )
+            );
+            // Bracketed IPv6 with port.
+            assert_eq!(
+                parse_upstream("http://[::1]:8443"),
+                ("http".to_string(), "::1".to_string(), 8443, String::new())
             );
         }
 
