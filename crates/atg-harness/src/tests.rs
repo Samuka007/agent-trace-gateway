@@ -91,6 +91,20 @@ fn omp_ua_beats_cc_shapes_and_legacy_identity_any_case() {
     let facts = identify("anthropic.messages", Some(&req), None, &get);
     assert_eq!(facts.identity, Some("claude-code"));
     assert_eq!(facts.dialect, "claude-code");
+    // Multibyte UA whose byte-4 falls inside a character: the matcher
+    // must not PANIC (client-controlled input in the logging hook) and
+    // must not match omp — reaching this assertion at all proves no
+    // panic; the legacy fingerprint still claims claude-code (this req
+    // carries it), which is the documented no-UA behavior.
+    for ua in ["日éx/1.0 omp", "ÖMP/18.1.0"] {
+        let facts = identify("anthropic.messages", Some(&req), Some(ua), &hdrs(&[]));
+        assert_ne!(
+            facts.identity,
+            Some("omp"),
+            "multibyte UA must not match: {ua}"
+        );
+        assert_eq!(facts.identity, Some("claude-code"), "legacy fallback: {ua}");
+    }
 }
 
 /// Design pin 1b: omp UA + CC envelope body → dialect session extracted,

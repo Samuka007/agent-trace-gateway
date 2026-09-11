@@ -43,9 +43,11 @@ impl IdentKind {
     /// UA prefixes match case-insensitively (client SDKs vary "omp/" vs
     /// "OMP/" — identity evidence must not hinge on casing).
     fn ua_matches(prefix: &str, ua: Option<&str>) -> bool {
-        ua.is_some_and(|u| {
-            u.len() >= prefix.len() && u[..prefix.len()].eq_ignore_ascii_case(prefix)
-        })
+        // get(..n) instead of [..n]: a multibyte UTF-8 UA whose byte n
+        // falls inside a character must NOT panic the logging hook
+        // (client-controlled input — a panic kills the connection).
+        ua.and_then(|u| u.get(..prefix.len()))
+            .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
     }
 }
 
