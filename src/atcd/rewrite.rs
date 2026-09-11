@@ -18,6 +18,8 @@
 //! 是同一身份的两个投影，只换头不换 body 会制造"身份分裂"签名；字符串
 //! 级替换保证其余字节逐位不动。
 
+use sha2::Digest as _;
+
 use codex_core::responses_metadata::{CodexResponsesMetadata, CodexResponsesRequestKind};
 use codex_protocol::protocol::ThreadSource;
 
@@ -100,49 +102,62 @@ pub fn mint_thread_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// 逐轮合成 turn 元数据。字段集逐字对齐真实捕获
-/// （scripts/fixtures/codex_exec_0.153.4.headers.json，codex 0.153.4）：
-/// 共 17 字段，缺字段本身就是稀疏签名。turn_id 每轮新 v7，
-/// root_turn_id 同值，时戳取真实发送时刻。
-#[allow(clippy::too_many_arguments)]
-pub fn mint_turn_metadata(
-    installation_id: &str,
-    session_id: &str,
-    thread_id: &str,
-    root_turn_id: &str,
-    context_window_id: &str,
-    agent_name: &str,
-    sandbox: &str,
-    sandbox_mode: &str,
-    now_unix_ms: i64,
-) -> http::HeaderValue {
-    let turn_id = uuid::Uuid::now_v7().to_string();
-    let v = serde_json::json!({
-        "installation_id": installation_id,
-        "session_id": session_id,
-        "thread_id": thread_id,
-        "agent_name": agent_name,
-        "turn_id": turn_id,
-        "window_id": format!("{thread_id}:0"),
-        "window_number": 0,
-        "context_window_id": context_window_id,
-        "request_kind": "turn",
-        "root_turn_id": root_turn_id,
-        "thread_source": "user",
-        "sandbox": sandbox,
-        "sandbox_mode": sandbox_mode,
-        "auto_review_enabled": false,
-        "node_repl_auto_review_required": false,
-        "node_repl_disabled": false,
-        "turn_started_at_unix_ms": now_unix_ms,
-    });
-    http::HeaderValue::from_str(&v.to_string()).expect("turn metadata header")
+/// 语义映射参数：字段的"值从哪里来、何时变、何时不变"。
+/// 字段正确性（名字/类型/序列化）由 codex 的 CodexResponsesMetadata 保证；
+/// 语义正确性（值的来源与生命周期）由这里的映射规则声明：
+/// - installation_id：账号人设，铸造后永不变
+/// - session_id/thread_id：绑定创建时铸造（v7），对话期内不变
+/// - root_turn_id：对话首轮 turn_id，此后锚定不变
+/// - context_window_id：窗口期内稳定，压缩事件后才换新
+/// - turn_id：每轮新 v7；turn_started_at_unix_ms：真实发送时刻
+/// - agent_name：会话工作目录的人设呈现（按会话键确定性选取）
+pub struct TurnIdentity<'a> {
+    pub installation_id: &'a str,
+    pub session_id: &'a str,
+    pub thread_id: &'a str,
+    pub root_turn_id: &'a str,
+    pub context_window_id: &'a str,
+    pub agent_name: &'a str,
+    pub sandbox: &'a str,
+    pub sandbox_mode: &'a str,
 }
 
-/// 第三方客户端的人设扩展字段（agent_name/sandbox 等从 persona 派生）。
 pub const DEFAULT_AGENT_NAME: &str = "/root";
 pub const DEFAULT_SANDBOX: &str = "seccomp";
 pub const DEFAULT_SANDBOX_MODE: &str = "read-only";
+
+/// 会话工作目录人设池：按会话键确定性选取，模拟不同项目目录。
+pub fn pick_agent_name(session_key: &str) -> &'static str {
+    const POOL: &[&str] = &["/root", "/home/dev/work", "/home/dev/proj", "/srv/app"];
+    let h = sha2::Sha256::digest(session_key.as_bytes());
+    let idx = (h[0] as usize) % POOL.len();
+    POOL[idx]
+}
+
+/// 用 codex 自身结构体铸造 turn 元数据（字段正确性 by construction）。
+pub fn mint_metadata(id: &TurnIdentity<'_>, now_unix_ms: i64) -> CodexResponsesMetadata {
+    let turn_id = uuid::Uuid::now_v7().to_string();
+    let mut m = CodexResponsesMetadata::new(
+        id.installation_id.to_string(),
+        id.session_id.to_string(),
+        id.thread_id.to_string(),
+        format!("{}:0", id.thread_id),
+    );
+    m.turn_id = Some(turn_id.clone());
+    m.root_turn_id = Some(id.root_turn_id.to_string());
+    m.context_window_id = uuid::Uuid::parse_str(id.context_window_id).ok();
+    m.agent_name = Some(id.agent_name.to_string());
+    m.request_kind = Some(CodexResponsesRequestKind::Turn);
+    m.thread_source = Some(ThreadSource::User);
+    m.sandbox = Some(id.sandbox.to_string());
+    m.sandbox_mode = Some(id.sandbox_mode.to_string());
+    m.auto_review_enabled = Some(false);
+    m.node_repl_auto_review_required = Some(false);
+    m.node_repl_disabled = Some(false);
+    m.window_number = Some(0);
+    m.turn_started_at_unix_ms = Some(now_unix_ms);
+    m
+}
 
 /// 第三方客户端的完整身份头：铸造的身份树 + 账号人设壳。
 /// instructions/工具表保留客户端自己的——第三方 ChatGPT 登录客户端
@@ -151,14 +166,11 @@ pub fn apply_third_party(
     headers: &mut http::HeaderMap,
     persona: &Persona,
     access_token: &str,
+    meta: &CodexResponsesMetadata,
     session_id: &str,
-    root_turn_id: &str,
-    context_window_id: &str,
-    now_unix_ms: i64,
 ) {
     // 真实捕获（codex_exec 0.153.4）中 session_id == thread_id，
     // 因此铸造时二者同值，调用方只需给一个。
-    let thread_id = session_id;
     apply(
         headers,
         &RewriteInput {
@@ -169,26 +181,12 @@ pub fn apply_third_party(
         },
     );
     headers.insert("session-id", session_id.parse().unwrap());
-    headers.insert("thread-id", thread_id.parse().unwrap());
-    headers.insert(
-        "x-codex-window-id",
-        format!("{thread_id}:0").parse().unwrap(),
-    );
-    headers.insert("x-client-request-id", thread_id.parse().unwrap());
-    headers.insert(
-        "x-codex-turn-metadata",
-        mint_turn_metadata(
-            persona.installation_id.as_str(),
-            session_id,
-            thread_id,
-            root_turn_id,
-            context_window_id,
-            DEFAULT_AGENT_NAME,
-            DEFAULT_SANDBOX,
-            DEFAULT_SANDBOX_MODE,
-            now_unix_ms,
-        ),
-    );
+    headers.insert("thread-id", meta.thread_id.parse().unwrap());
+    headers.insert("x-codex-window-id", meta.window_id.parse().unwrap());
+    headers.insert("x-client-request-id", meta.thread_id.parse().unwrap());
+    if let Some(json) = meta.turn_metadata_json() {
+        headers.insert("x-codex-turn-metadata", json.parse().unwrap());
+    }
 }
 
 /// codex body 信封的字段顺序（取自金样本 codex_exec_0.153.4）：
@@ -209,26 +207,23 @@ const CODEX_BODY_FIELD_ORDER: &[&str] = &[
     "client_metadata",
 ];
 
-/// 第三方 responses 客户端的 body 信封合成：保留其 instructions/input/tools
-/// （自洽第三方家族），但补齐 codex 信封字段使其可被后端正常处理——
-/// store:false、include、prompt_cache_key（= 铸造 session，对齐
-/// "cache key 派生自 session" 的真实不变量）、client_metadata 身份投影、
-/// 缺失时的 parallel_tool_calls=true（金样本实测值）。键序按金样本重排。
-/// 解析失败时原样返回（非 JSON body 不是我们的输入）。
+/// 第三方 responses 客户端的 body 源信息写入：prompt_cache_key（= 铸造
+/// session，对齐"cache key 派生自 session"的真实不变量）与 client_metadata
+/// 身份投影。范围严格限于 D6 认定的源信息——store/include/
+/// parallel_tool_calls 等请求参数属内容平面，原样透传不补齐。
 pub fn codex_envelope_body(
     body: &[u8],
     client_metadata: &std::collections::HashMap<String, String>,
 ) -> Option<bytes::Bytes> {
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = v.as_object_mut()?;
-    obj.insert("store".into(), serde_json::Value::Bool(false));
-    obj.entry("include").or_insert_with(|| {
-        serde_json::json!(["reasoning.encrypted_content"])
-    });
-    obj.insert("prompt_cache_key".into(), session_id.into());
-    obj.entry("parallel_tool_calls")
-        .or_insert(serde_json::Value::Bool(true));
-    let cm = client_metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Map<_, _>>();
+    if let Some(sid) = client_metadata.get("session_id") {
+        obj.insert("prompt_cache_key".into(), serde_json::Value::String(sid.clone()));
+    }
+    let mut cm = serde_json::Map::new();
+    for (k, v) in client_metadata {
+        cm.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
     obj.insert("client_metadata".into(), serde_json::Value::Object(cm));
 
     // 键序重排：codex 字段序在前，其余未知字段按原相对顺序跟在后面。
@@ -396,32 +391,22 @@ mod tests {
 
     #[test]
     fn envelope_body_synthesizes_codex_shape() {
-        let p = persona();
         let third_party_body = br#"{"model":"gpt-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"prompt_cache_key":"their-key","tools":[{"type":"function","name":"run_cmd"}]}"#;
-        let tm = mint_turn_metadata(
-            "our-install",
-            "minted-session",
-            "minted-session",
-            "root-turn-uuid",
-            "context-window-uuid",
-            DEFAULT_AGENT_NAME,
-            DEFAULT_SANDBOX,
-            DEFAULT_SANDBOX_MODE,
-            42,
-        );
-        let out = codex_envelope_body(
-            &third_party_body[..],
-            &p,
-            "minted-session",
-            &tm,
-        )
-        .unwrap();
+        // 生产路径：proxy 从 codex 的 CodexResponsesMetadata::client_metadata()
+        // 取投影 map；单测直接构造同形 map（D6：源信息 = session 投影）。
+        let cm: std::collections::HashMap<String, String> = [
+            ("session_id".to_string(), "minted-session".to_string()),
+            (
+                "x-codex-installation-id".to_string(),
+                "our-install-uuid".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let out = codex_envelope_body(&third_party_body[..], &cm).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        // 信封字段对齐金样本
-        assert_eq!(v["store"], false);
-        assert_eq!(v["include"][0], "reasoning.encrypted_content");
+        // 源信息写入；参数类字段不碰（D6）
         assert_eq!(v["prompt_cache_key"], "minted-session");
-        assert_eq!(v["parallel_tool_calls"], true);
         assert_eq!(
             v["client_metadata"]["x-codex-installation-id"],
             "our-install-uuid"
@@ -446,17 +431,13 @@ mod tests {
     }
 
     #[test]
-    fn envelope_body_passthrough_on_garbage() {
-        let p = persona();
+    fn envelope_body_none_on_garbage() {
         let raw = b"not json";
-        let out = codex_envelope_body(
-            &raw[..],
-            &p,
-            "s",
-            &http::HeaderValue::from_static("{}"),
-        )
-        .unwrap_or(bytes::Bytes::from_static(b"fallback"));
-        assert_eq!(out, bytes::Bytes::from_static(b"fallback"));
+        // 纯函数契约：非 JSON 输入返回 None；透传是 proxy 调用方的
+        // .unwrap_or(body) 职责，不在本函数。
+        let cm: std::collections::HashMap<String, String> =
+            [("session_id".to_string(), "s".to_string())].into_iter().collect();
+        assert!(codex_envelope_body(&raw[..], &cm).is_none());
     }
 
     #[test]

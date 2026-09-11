@@ -24,7 +24,7 @@ tokio-stream = "0.1"
 parking_lot = "0.12.5"
 hex = "0.4.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "socks", "rustls"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 # 与 codex 同源的身份库：UA 的 OS 段与终端段由同一批库生成，保真由构造保证
 os_info = "3.15"
@@ -34,10 +34,11 @@ codex-terminal-detection = { git = "https://github.com/openai/codex", package = 
 codex-core = { git = "https://github.com/Samuka007/codex", branch = "atcd-libs", package = "codex-core" }
 codex-protocol = { git = "https://github.com/Samuka007/codex", branch = "atcd-libs", package = "codex-protocol" }
 # OAuth（device + 粘贴回调）：wire 镜像 codex-rs/login 源码（见 oauth.rs
-# 模块注释）。曾尝试直接引用 codex-login：其硬依赖 native-tls/openssl 在
-# nix 构建环境无法链接，且 tokio-tungstenite 走 codex 私有 fork 引发解析
-# 冲突，故撤引用、保留 wire 镜像。
+# 模块注释）。
 urlencoding = "2"
+# rama 全系对齐 codex 锁定的 alpha.4：0.3.0 正式版与 alpha.4 宏产物不兼容
+rama-macros = "=0.3.0-alpha.4"
+rama-error = "=0.3.0-alpha.4"
 url = "2"
 rand = "0.9"
 
@@ -47,3 +48,9 @@ path = "src/lib.rs"
 
 [profile.dev]
 debug = 0
+
+# codex 工作区对其 tungstenite 双层 fork 的 patch 不会随 git 依赖传播，
+# 引用 codex-core/codex-login 时必须在本工作区重申（依赖对齐 codex）。
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
