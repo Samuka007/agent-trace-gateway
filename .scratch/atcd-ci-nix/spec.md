@@ -113,6 +113,15 @@ worktree 重放，共 5 处、全部机械）：**
 
 ### 3. 评估结论
 
+**二轮实跑修复（run 34625046867，2026-09-11）**：真源 ci.yml 已由 PM lane 迭代
+（nothing-but-nix 大盘 + `CARGO_TARGET_DIR=/nix/build/target` +
+`build-dir = /nix/build` + rust-cache 跟踪该目录）。磁盘满（root 卷 2GB safe
+haven）消失后暴露下一层：`/nix/build` root 属主，runner 用户的 cargo 写入
+EACCES（os error 13）。修复 = nothing-but-nix 步加文档化输入
+`nix-permission-edict: true`（action 挂载后 `chown -R runner /nix`；本 job 里
+/nix/build 唯一写者就是 runner 用户 cargo，无沙箱 derivation 构建落盘，所有权
+安全）。actionlint+shellcheck 复验通过。
+
 **推荐路线：GitHub-hosted（ubuntu-latest）+ nix-installer-action + `nix develop -c`**（本次落盘形态）
 
 理由：

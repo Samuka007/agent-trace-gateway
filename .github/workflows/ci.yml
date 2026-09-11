@@ -38,6 +38,13 @@ jobs:
         with:
           hatchet-protocol: cleave
           witness-carnage: true
+          # chown -R "$(id -u)":"$(id -g)" /nix at mount time: /nix defaults to
+          # root-owned, but cargo runs as the runner user with
+          # CARGO_TARGET_DIR=/nix/build/target below -> "Permission denied
+          # (os error 13) at path /nix/build/..." without this. The only
+          # /nix/build writer in this job is the runner-user cargo (no
+          # sandboxed derivation builds land there), so user ownership is safe.
+          nix-permission-edict: true
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v23
