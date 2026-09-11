@@ -32,6 +32,9 @@
 | R1a | 依赖对齐决策记录：曾按"依赖以 codex 为准"引入 codex-login + 双层 tungstenite fork patch → codex-http-client 硬依赖 native-tls/openssl，nix shell 链接失败（rama 全系需 pin alpha.4 亦已处理）。reqwest 已切 rustls（对齐 codex TLS 栈）；tokio-tungstenite 维持 0.27（仅测试用帧解析）。若未来换有 openssl 的构建环境，可重启 codex-login 引用 | 用户指令 + 环境 blockers | 已完成（决策关闭） | Cargo.toml 注释 + 本行 |
 | R5 | （冻结）存量账号 installation 迁移断崖的错峰方案 | 用户指示"列到 future dream" | 冻结 | 接生产池时再启 |
 | R6 | （冻结）vendor 栈跟随 codex 升级的维护节奏 | 用户指示"列到 future dream" | 冻结 | 同上 |
+| R8 | CI 迁移 nix 工具链并充分利用 runner：现 ci.yml 用 ubuntu-latest + rust:1-bookworm 浮动工具链，且缺 libssl-dev（codex 依赖树 native-tls 必挂）；目标 = 与 dev 同源（flake/fenix 1.95.0），评估 self-hosted runner 可用性 | 用户指令（"ci.yml 使用 nix 工具链…让 subagent 去看看怎么充分利用 runner"） | 进行中 | .scratch/atcd-ci-nix/ |
+| R9 | fork 补丁自动化：维护 Samuka007/codex@atcd-libs 相对 openai/codex 的 patch list，自动 apply 到 latest upstream 并验证（构建测试），产出可重复执行的同步工具 | 用户指令（"fork然后维护一个patch list自动给latest upstream patch到fork去"） | 进行中 | .scratch/atcd-fork-patchlist/ |
+| R10 | OAuth web/PKCE 远端登录流研究：codex 自身跨设备登录（VPS 发起、另一设备浏览器授权）的真实流程与 atcd web 形态差距评估（R1 已有粘贴回调雏形） | 用户指令（"研究一下…他是走的什么流程"） | 待办 | 研究类票，排队 |
 
 ## 已证伪/已废弃的认知（防回潮）
 
@@ -48,15 +51,18 @@
 ## 构建与验证状态（随提交更新）
 
 - 分支：feat/atcd-minimal-proxy（worktree .worktrees/atcd）
-- 最新提交：1466663（身份层重构）
-- 未提交工作区：R1 oauth.rs（未挂载）、R2/R3 的 store/placement/proxy 改动
-- 构建：✅（0.27 + 无 codex-login 后恢复）；测试：上次全绿后又有改动，需重跑
-- 构建环境：`nix develop -c bash -c 'export LIBCLANG_PATH=/nix/store/63vszz1y8lw6xqjipsw6bh56105nw894-clang-21.1.8-lib/lib; cargo build/test'`
+- 最新提交：ea7284d（本批三连：09a4867 D6+依赖对齐 / 6a9de89 devShell 自洽 / ea7284d 台账+跟踪框架）
+- 工作区：干净
+- 构建：✅ 容器内退出码 0（产物 76MB）；测试：✅ 45 passed / 0 failed（atcd-dev 容器 2026-09-11）
+- 构建环境：atcd-dev 容器（root@10.0.100.244:/opt/atcd，`nix develop -c`，零环境变量）；
+  工作站同（devShell 已自洽）；完整台账 docs/atcd-build-infra.md
 
 ## 待办顺序（下次继续从此处开始）
 
-1. ~~R1/R2/R3 收尾~~ 已完成
-2. ~~R7 首次金样本捕获~~ 已完成（codex_exec 0.153.4 custom provider 模式）
-3. R4：读 protocol_v2.rs + methods_v2.rs 出 wire 设计 → 实现透传桥（上游 socks 绑定列为已知缺口）
-4. 金样本扩容：codex TUI 模式（originator/UA 后缀差异）、opencode 1.18.29（nix 可用）、多轮对话样本
-5. R3 剩余缺口：input items 内嵌身份（若第三方在 input 中引用 id）、tools schema 深度差异的实际兼容性——待真实 omp/opencode 流量捕获后评估
+1. ~~R0-R3、R7~~ 已完成
+2. R4：WS V2 wire 设计 → 透传桥实现（进行中，.scratch/atcd-r4-ws-v2/）
+3. R8：CI nix 化 + runner 利用评估（进行中，.scratch/atcd-ci-nix/）
+4. R9：fork patch list 自动同步工具（进行中，.scratch/atcd-fork-patchlist/）
+5. 金样本扩容：codex TUI 模式、opencode（scripts/capture_opencode.sh 已有）、多轮对话样本
+6. R3 剩余缺口：input items 内嵌身份、tools schema 深度差异——待真实 omp/opencode 流量捕获后评估
+7. R10：OAuth web/PKCE 远端登录流研究
