@@ -153,9 +153,12 @@ async fn idle_teardown_classification() {
     wait_port(UPSTREAM_PORT).await;
     wait_port(GW_PORT).await;
 
-    // (1) Complete response delivered, then the client hard-RSTs the idle
-    // connection: the turn must export CLEAN (no proxy_error marker) —
-    // nothing about the request or response was damaged.
+    // (1) Complete response delivered, then the client closes the idle
+    // connection (plain close/FIN — a true linger-0 RST needs
+    // std::net::TcpStream::set_linger, unstable; the RST-context class is
+    // pinned at the classifier level with the exact production string).
+    // The turn must export CLEAN (no proxy_error marker) — nothing about
+    // the request or response was damaged.
     let resp =
         tokio::task::spawn_blocking(move || raw_request(r#"{"model":"m","input":"idle-clean"}"#))
             .await
@@ -194,30 +197,51 @@ async fn idle_teardown_classification() {
 fn classifier_three_classes() {
     use agent_trace_gateway::gateway_app::__classify_session_teardown;
     // ① idle RST after a delivered response — either discriminator:
-    //    (a) Pingora's "during HTTP idle state" cause context.
+    //    (a) fail-safe belt: the "during HTTP idle state" context (the
+    //        string itself encodes post-response; overlapping with (b)).
     assert!(__classify_session_teardown(
         "OS error 104: Connection reset by peer, context: during HTTP idle state",
         true,
-        200
+        200,
+        true
     ));
     assert!(__classify_session_teardown(
         "OS error 104: Connection reset by peer, context: during HTTP idle state",
         false,
-        0
+        0,
+        false
     ));
-    //    (b) delivered 2xx + downstream read/close error (no context string).
-    assert!(__classify_session_teardown("OS error 104", true, 200));
+    //    (b) structural gate: 2xx + end_of_stream reached + downstream
+    //        read/close error (no context string).
+    assert!(__classify_session_teardown("OS error 104", true, 200, true));
     // ② mid-response damage — never classified:
     //    upstream-sourced read error (downstream_read_or_close=false).
     assert!(!__classify_session_teardown(
         "OS error 104: reset",
         false,
-        200
+        200,
+        true
+    ));
+    //    BLOCK pin: mid-body downstream disconnect — 2xx HEADERS arrived
+    //    but end_of_stream never did: a downstream read/close error here
+    //    must NOT classify as idle (a truncated response would launder
+    //    into a clean turn).
+    assert!(!__classify_session_teardown(
+        "OS error 104",
+        true,
+        200,
+        false
     ));
     //    downstream WRITE error mid-relay is not a read/close candidate
     //    (the caller only passes true for Read/ConnectionClosed).
     // ③ no response delivered (dead-connection race) — the conservative
-    //    (b) branch requires 2xx; keeps the existing failure classification.
-    assert!(!__classify_session_teardown("OS error 104", true, 0));
-    assert!(!__classify_session_teardown("OS error 104", true, 502));
+    //    (b) branch requires 2xx AND completion; keeps the existing
+    //    failure classification.
+    assert!(!__classify_session_teardown("OS error 104", true, 0, true));
+    assert!(!__classify_session_teardown(
+        "OS error 104",
+        true,
+        502,
+        true
+    ));
 }

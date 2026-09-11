@@ -25,24 +25,32 @@ pub mod gateway_app {
     ///
     /// Two discriminants, deliberately narrow to avoid masking real
     /// failures:
-    /// (a) the cause chain carries Pingora's "during HTTP idle state"
-    ///     context — the post-response keep-alive window by definition;
-    /// (b) the response was already fully delivered (2xx upstream response
-    ///     relayed) AND the error is a downstream read/close error. A
-    ///     downstream READ at that point can only be the next-request
-    ///     probe on an idle connection — the request and response of the
-    ///     turn are both complete. Mid-response failures are
-    ///     Upstream-sourced errors or downstream WriteErrors and never
-    ///     enter this branch.
+    /// (a) FAIL-SATE BELT: the cause chain carries Pingora's "during HTTP
+    ///     idle state" context — that window is post-response by
+    ///     definition, so it cannot fire on a truncated response. It
+    ///     overlaps (b) on the production signature and exists so the
+    ///     belt still holds if the structural gate ever regresses; the
+    ///     fail-safe direction of the overlap is toward classification
+    ///     only because the context string itself encodes "response
+    ///     already complete".
+    /// (b) STRUCTURAL GATE: the response ran to end_of_stream (headers
+    ///     alone prove nothing — resp_status is set when HEADERS arrive,
+    ///     a mid-body disconnect also sees 2xx) AND it was a 2xx AND the
+    ///     error is a downstream read/close error. A downstream READ at
+    ///     that point can only be the next-request probe on an idle
+    ///     connection. Mid-response failures are upstream-sourced errors,
+    ///     downstream WriteErrors, or read errors arriving before
+    ///     end_of_stream — none enter this branch.
     fn is_idle_teardown_after_response(
         err_text: &str,
         downstream_read_or_close: bool,
         resp_status: u16,
+        response_complete: bool,
     ) -> bool {
         if err_text.contains("during HTTP idle state") {
             return true;
         }
-        downstream_read_or_close && (200..300).contains(&resp_status)
+        downstream_read_or_close && response_complete && (200..300).contains(&resp_status)
     }
 
     /// Discriminator-level entry for tests (fabricating pingora Errors is
@@ -52,8 +60,14 @@ pub mod gateway_app {
         err_text: &str,
         downstream_read_or_close: bool,
         resp_status: u16,
+        response_complete: bool,
     ) -> bool {
-        is_idle_teardown_after_response(err_text, downstream_read_or_close, resp_status)
+        is_idle_teardown_after_response(
+            err_text,
+            downstream_read_or_close,
+            resp_status,
+            response_complete,
+        )
     }
 
     pub struct Gateway {
@@ -148,6 +162,12 @@ pub mod gateway_app {
         /// Upstream response status (0 = no upstream response arrived —
         /// proxy-level failure); captured at upstream_response_filter.
         pub resp_status: u16,
+        /// The response body stream ran to its end (end_of_stream reached
+        /// in response_body_filter) — the "fully delivered" gate for the
+        /// idle-teardown classifier. resp_status alone only proves the
+        /// HEADERS arrived; a mid-body disconnect must not classify as
+        /// idle (BLOCK: truncated responses would launder into clean turns).
+        pub response_complete: bool,
     }
 
     #[async_trait]
@@ -166,6 +186,7 @@ pub mod gateway_app {
                 end_ns: 0,
                 first_output_ns: None,
                 resp_status: 0,
+                response_complete: false,
             }
         }
 
@@ -302,9 +323,12 @@ pub mod gateway_app {
             &self,
             session: &mut Session,
             body: &mut Option<Bytes>,
-            _end: bool,
+            end: bool,
             ctx: &mut Self::CTX,
         ) -> Result<Option<std::time::Duration>> {
+            if end {
+                ctx.response_complete = true;
+            }
             if session.was_upgraded() {
                 if let Some(b) = body {
                     for payload in ctx.ws_server_parser.push(b) {
@@ -370,6 +394,7 @@ pub mod gateway_app {
                     &err_text,
                     downstream_read_or_close,
                     ctx.resp_status,
+                    ctx.response_complete,
                 ) {
                     eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
                     None
@@ -603,7 +628,12 @@ pub mod gateway_app {
             // delivered response is debug-grade noise, not a proxy failure.
             let downstream_read_or_close = *e.esource() == pingora::ErrorSource::Downstream
                 && matches!(e.etype(), pingora::ReadError | pingora::ConnectionClosed);
-            if is_idle_teardown_after_response(&err, downstream_read_or_close, ctx.resp_status) {
+            if is_idle_teardown_after_response(
+                &err,
+                downstream_read_or_close,
+                ctx.resp_status,
+                ctx.response_complete,
+            ) {
                 eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
             } else {
                 eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
