@@ -304,6 +304,16 @@ pub mod gateway_app {
             // the matched session-carrying dialect rides its own field.
             let harness = hfacts.harness_label();
             let dialect = hfacts.dialect.to_string();
+            // Attribution-evidence audit: record the UA this gateway
+            // actually saw (production misattribution triage) — capped at
+            // 256 bytes on a char boundary (unbounded header attribute).
+            let client_ua = ua
+                .as_deref()
+                .map(|u| match u.char_indices().nth(256) {
+                    Some((i, _)) => u[..i].to_string(),
+                    None => u.to_string(),
+                })
+                .unwrap_or_default();
             // Request-side facts: ONE descriptor lookup + ONE pass over
             // the parsed body (F6 single entry; the old scattered
             // detect_by_name calls and the messages re-parse are gone).
@@ -401,6 +411,7 @@ pub mod gateway_app {
                     user_id,
                     harness,
                     dialect: dialect.clone(),
+                    client_ua: client_ua.clone(),
                     harness_candidates,
                     harness_anomaly: hfacts.protocol_anomaly,
                     harness_enrich,
@@ -416,6 +427,7 @@ pub mod gateway_app {
                     record.breakpoint = breakpoint;
                     record.harness = harness;
                     record.dialect = dialect;
+                    record.client_ua = client_ua;
                     record.harness_candidates = harness_candidates;
                     record.harness_anomaly = hfacts.protocol_anomaly;
                     record.harness_enrich = harness_enrich;

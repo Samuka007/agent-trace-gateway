@@ -49,6 +49,64 @@ fn omp_ua_with_cc_dialect_header_attributed_as_omp() {
     );
 }
 
+/// Production-bug arbitration pin (anthropic line): the omp UA — ANY
+/// casing — is identity evidence and must beat every claude-code SHAPE
+/// (CC header, envelope) AND the legacy identity fingerprint at its lower
+/// strength. The production misattribution showed candidates=['claude-code']
+/// alone, i.e. the UA evidence never matched — casing variance is one
+/// concrete way that happens.
+#[test]
+fn omp_ua_beats_cc_shapes_and_legacy_identity_any_case() {
+    let req = body(&format!(
+        r#"{{"metadata":{{"user_id":"{}"}}}}"#,
+        legacy_user_id()
+    ));
+    let get = hdrs(&[(crate::CC_SESSION_HEADER, "cc-s")]);
+    for ua in ["omp/18.1.16", "OMP/18.1.16", "Omp/18.2.0"] {
+        let facts = identify("anthropic.messages", Some(&req), Some(ua), &get);
+        assert_eq!(facts.identity, Some("omp"), "UA evidence must win: {ua}");
+        assert_eq!(
+            facts.dialect, "claude-code",
+            "CC shapes still signal the dialect"
+        );
+        // The legacy fingerprint DID match — but as a lower-strength
+        // identity, it stays out of the top-strength candidate set.
+        assert_eq!(
+            facts.candidates,
+            vec!["omp"],
+            "single top-strength identity"
+        );
+        assert_eq!(session_from_body(&facts, &req).as_deref(), Some(UUID));
+        // Sub-path (count_tokens) session carriage is protocol-level and
+        // identical across the line — dialect consistency.
+        let d = atg_protocol::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        assert_eq!(
+            d.session_from_headers(&get).as_deref(),
+            Some("cc-s"),
+            "sub-path sessions carry the same dialect carriage"
+        );
+    }
+    // Negative control: without any omp UA the legacy fingerprint DOES
+    // claim the identity (claude-code, s=3) — the documented design.
+    let facts = identify("anthropic.messages", Some(&req), None, &get);
+    assert_eq!(facts.identity, Some("claude-code"));
+    assert_eq!(facts.dialect, "claude-code");
+    // Multibyte UA whose byte-4 falls inside a character: the matcher
+    // must not PANIC (client-controlled input in the logging hook) and
+    // must not match omp — reaching this assertion at all proves no
+    // panic; the legacy fingerprint still claims claude-code (this req
+    // carries it), which is the documented no-UA behavior.
+    for ua in ["日éx/1.0 omp", "ÖMP/18.1.0"] {
+        let facts = identify("anthropic.messages", Some(&req), Some(ua), &hdrs(&[]));
+        assert_ne!(
+            facts.identity,
+            Some("omp"),
+            "multibyte UA must not match: {ua}"
+        );
+        assert_eq!(facts.identity, Some("claude-code"), "legacy fallback: {ua}");
+    }
+}
+
 /// Design pin 1b: omp UA + CC envelope body → dialect session extracted,
 /// identity stays omp (the misattribution case from production, inverted).
 #[test]

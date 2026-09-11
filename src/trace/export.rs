@@ -214,6 +214,10 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             if !r.dialect.is_empty() {
                 trace_extra.push(kv("langfuse.trace.metadata.dialect", &r.dialect));
             }
+            // Attribution-evidence audit: the UA the gateway actually saw.
+            if !r.client_ua.is_empty() {
+                trace_extra.push(kv("langfuse.trace.metadata.client_ua", &r.client_ua));
+            }
             if r.harness_anomaly {
                 trace_extra.push(kv(
                     "langfuse.trace.metadata.harness_protocol_anomaly",

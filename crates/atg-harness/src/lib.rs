@@ -39,6 +39,18 @@ pub enum IdentKind {
     Body(fn(&Value) -> bool),
 }
 
+impl IdentKind {
+    /// UA prefixes match case-insensitively (client SDKs vary "omp/" vs
+    /// "OMP/" — identity evidence must not hinge on casing).
+    fn ua_matches(prefix: &str, ua: Option<&str>) -> bool {
+        // get(..n) instead of [..n]: a multibyte UTF-8 UA whose byte n
+        // falls inside a character must NOT panic the logging hook
+        // (client-controlled input — a panic kills the connection).
+        ua.and_then(|u| u.get(..prefix.len()))
+            .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
+    }
+}
+
 /// Evidence semantics: IDENTITY items attribute the sender and outrank
 /// every SHAPE item regardless of strength; SHAPE items only signal a
 /// dialect (how sessions are carried), never an identity on their own.
@@ -150,7 +162,7 @@ pub fn identify(
         let mut best: Option<u8> = None;
         for id in h.identity {
             let matched = match id.kind {
-                IdentKind::UaPrefix(p) => ua.is_some_and(|u| u.starts_with(p)),
+                IdentKind::UaPrefix(p) => IdentKind::ua_matches(p, ua),
                 IdentKind::HeaderPresent(name) => {
                     header_get(name).is_some_and(|v| !v.trim().is_empty())
                 }
