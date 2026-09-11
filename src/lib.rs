@@ -10,6 +10,7 @@ pub mod gateway_app {
     use pingora::prelude::*;
     use pingora::proxy::{http_proxy, FailToProxy, ProxyHttp, Session};
     use pingora::upstreams::peer::HttpPeer;
+    use std::net::ToSocketAddrs;
     use std::time::Duration;
 
     use crate::trace::store::TraceStore;
@@ -79,6 +80,10 @@ pub mod gateway_app {
 
     pub struct Gateway {
         pub upstream: String,
+        /// Precomputed relay URL base (scheme://url-host:port). On https
+        /// with ATG_SNI the URL host IS the SNI name (the client's
+        /// resolve() entry pins it to the real address — BLOCK-A).
+        pub upstream_base: String,
         /// Upstream HTTP client for the owned relay (v0.3.6): pingora's
         /// response pump structurally aborts the upstream the moment the
         /// downstream dies, which makes a client-disconnect policy
@@ -160,6 +165,13 @@ pub mod gateway_app {
             d: &'static atg_protocol::ProtocolDescriptor,
         ) {
             // --- request side ---
+            // NIT ② trade-off (RustGate §H): the request body is fully
+            // buffered before the upstream call. Streaming the upload would
+            // couple the upstream request start to downstream read pacing
+            // and complicate death handling mid-send; at LLM request sizes
+            // (JSON prompts, bounded by the capture cap at record time) the
+            // buffer cost is negligible. Revisit only if large uploads
+            // become a traced workload.
             loop {
                 match session.downstream_session.read_request_body().await {
                     Ok(Some(b)) => ctx.req_buf.extend_from_slice(&b),
@@ -182,25 +194,16 @@ pub mod gateway_app {
                 .path_and_query()
                 .map(|pq| pq.as_str().to_string())
                 .unwrap_or_else(|| req_head.uri.path().to_string());
-            let base =
-                if self.upstream.starts_with("http://") || self.upstream.starts_with("https://") {
-                    self.upstream.trim_end_matches('/').to_string()
-                } else {
-                    format!("http://{}", self.upstream.trim_end_matches('/'))
-                };
-            let url = format!("{base}{path_and_query}");
-            // Host parity with upstream_request_filter: ATG_SNI overrides.
-            let default_host = self
-                .upstream
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .trim_end_matches('/')
-                .to_string();
-            let host = std::env::var("ATG_SNI")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(default_host);
-            let mut out = self.http.request(method, &url).header("host", host);
+            // The URL base carries the SNI name on https (BLOCK-A: the
+            // client's resolve() entry pins it to the real address); on
+            // http it is the upstream host and this Host header carries the
+            // ATG_SNI override — pump parity.
+            let url = format!("{}{}", self.upstream_base, path_and_query);
+            let host = std::env::var("ATG_SNI").ok().filter(|s| !s.is_empty());
+            let mut out = self.http.request(method, &url);
+            if let Some(sni_host) = host {
+                out = out.header("host", sni_host);
+            }
             for (name, value) in req_head.headers.iter() {
                 if is_hop_by_hop(name) || name == http::header::CONTENT_LENGTH {
                     continue;
@@ -236,6 +239,11 @@ pub mod gateway_app {
                 }
             };
             let has_content_length = resp.headers().contains_key(http::header::CONTENT_LENGTH);
+            // NIT ① (RustGate §H): HTTP trailers are not relayed —
+            // reqwest's bytes_stream exposes data frames only, no trailer
+            // API. LLM API responses carry no trailers (the pump already
+            // skips them for h1 downstream); recorded here as a known
+            // limitation, not an oversight.
             for (name, value) in resp.headers().iter() {
                 if is_hop_by_hop(name) {
                     continue;
@@ -315,11 +323,15 @@ pub mod gateway_app {
                                     drain_deadline = Some(self.begin_drain(ctx, d));
                                     continue;
                                 }
-                                // Pipelined bytes on a keep-alive
-                                // connection: the client is alive. They
-                                // are not part of this turn (same
-                                // discard semantics as the pump's idle
-                                // probe).
+                                // NIT ④ (RustGate §H, pingora source): the
+                                // probe NEVER returns Ok in this mode —
+                                // idle() maps every outcome to a session
+                                // teardown error: clean FIN = ConnectionClosed,
+                                // RST/read error = ReadError ("during HTTP
+                                // idle state"), bytes arriving after the body
+                                // ended = ConnectError. The pump errors the
+                                // session on all three (its downstream arm);
+                                // this arm is a defensive keep-alive only.
                                 Ok(_) => continue,
                             }
                         }
@@ -453,6 +465,49 @@ pub mod gateway_app {
                 | "proxy-authorization"
                 | "proxy-authenticate"
         )
+    }
+
+    /// Parsed ATG_UPSTREAM: (scheme, host, port). "host:port" defaults to
+    /// http with the port present; scheme prefixes override; a missing port
+    /// defaults to 80/443 by scheme.
+    fn parse_upstream(upstream: &str) -> (String, String, u16) {
+        let (scheme, rest) = match upstream.split_once("://") {
+            Some((s, r)) => (s.to_ascii_lowercase(), r),
+            None => ("http".to_string(), upstream),
+        };
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
+                (h, p.parse::<u16>().unwrap_or(80))
+            }
+            _ => (rest, if scheme == "https" { 443 } else { 80 }),
+        };
+        (
+            scheme,
+            host.trim_matches(|c| c == '[' || c == ']').to_string(),
+            port,
+        )
+    }
+
+    /// BLOCK-A (RustGate §H): the relay's TLS SNI is the URL host — reqwest
+    /// has no SNI override. With ATG_SNI set on an https upstream, the
+    /// relay's URLs carry the SNI NAME and this entry pins that name to the
+    /// real upstream address (connect to the IP, SNI = the override) —
+    /// exactly what upstream_peer's HttpPeer did for the pump. Returns the
+    /// (name, sockaddr) for ClientBuilder::resolve.
+    fn sni_resolve_entry(
+        upstream: &str,
+        sni: Option<&str>,
+    ) -> Option<(String, std::net::SocketAddr)> {
+        let (scheme, host, port) = parse_upstream(upstream);
+        if scheme != "https" {
+            return None;
+        }
+        let sni_host = sni?;
+        if sni_host == host {
+            return None; // normal DNS, no pinning needed
+        }
+        let addr = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
+        Some((sni_host.to_string(), addr))
     }
 
     pub struct Ctx {
@@ -621,14 +676,16 @@ pub mod gateway_app {
                     .await?;
                 return Ok(true);
             }
-            // Owned relay (v0.3.6): every non-WebSocket LLM API request is
-            // forwarded by the gateway's own relay instead of pingora's
-            // pump — the pump couples downstream liveness to upstream
-            // consumption (first failed downstream read/write aborts the
-            // session and drops the upstream connection), which makes the
-            // client-disconnect policy (drain_on_cancel) unenforceable in
-            // the ProxyHttp hooks. WebSocket upgrades and unknown paths
-            // keep the pingora pump unchanged.
+            // Owned relay (v0.3.6, BLOCK-C gated): ONLY drain_on_cancel=true
+            // routes LLM API requests through the gateway's own relay — the
+            // pump couples downstream liveness to upstream consumption
+            // (first failed downstream read/write aborts the session and
+            // drops the upstream connection), which makes the disconnect
+            // policy unenforceable in the ProxyHttp hooks. The default
+            // (false) keeps the pingora pump for every request — zero
+            // regression; its abort-on-disconnect IS the drain-off policy.
+            // WebSocket upgrades and unknown paths keep the pump in both
+            // modes.
             let path = session.req_header().uri.path();
             let is_ws_upgrade = session
                 .req_header()
@@ -636,7 +693,7 @@ pub mod gateway_app {
                 .get(http::header::UPGRADE)
                 .is_some()
                 || session.req_header().method == http::Method::CONNECT;
-            if !is_ws_upgrade {
+            if self.drain_on_cancel && !is_ws_upgrade {
                 if let Some(matched) = atg_protocol::ProtocolDescriptor::detect_path(path) {
                     self.relay(session, ctx, matched.descriptor).await;
                     return Ok(true);
@@ -1098,7 +1155,29 @@ pub mod gateway_app {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(60);
-        let http = match reqwest::Client::builder().build() {
+        let sni = std::env::var("ATG_SNI").ok().filter(|s| !s.is_empty());
+        // BLOCK-A (RustGate §H): https bare-IP upstreams — URLs carry the
+        // SNI name, the resolve entry pins it to the real address.
+        let upstream_base = match sni_resolve_entry(upstream, sni.as_deref()) {
+            Some((name, _addr)) => {
+                let (scheme, _, port) = parse_upstream(upstream);
+                format!("{scheme}://{name}:{port}")
+            }
+            None => {
+                let (scheme, host, port) = parse_upstream(upstream);
+                format!("{scheme}://{host}:{port}")
+            }
+        };
+        let mut builder = reqwest::Client::builder()
+            // BLOCK-B (RustGate §H): ambient HTTPS_PROXY/HTTP_PROXY env vars
+            // would otherwise silently hijack the LLM data path — same
+            // reasoning as the exporter's client (export.rs, explicit
+            // no_proxy precedent).
+            .no_proxy();
+        if let Some((name, addr)) = sni_resolve_entry(upstream, sni.as_deref()) {
+            builder = builder.resolve(&name, addr);
+        }
+        let http = match builder.build() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("agent-trace-gateway: upstream HTTP client init failed: {e}");
@@ -1109,6 +1188,7 @@ pub mod gateway_app {
         server.bootstrap();
         let gateway = Gateway {
             upstream: upstream.to_string(),
+            upstream_base,
             http,
             drain_on_cancel,
             drain_timeout: Duration::from_secs(drain_timeout),
@@ -1135,5 +1215,51 @@ pub mod gateway_app {
         svc.add_tcp(listen);
         server.add_service(svc);
         server.run_forever();
+    }
+
+    #[cfg(test)]
+    mod upstream_config_tests {
+        use super::*;
+
+        /// BLOCK-A config pins (RustGate §H): ATG_UPSTREAM parsing and the
+        /// ATG_SNI resolve entry — the relay connects to the pinned
+        /// address while presenting the SNI name.
+        #[test]
+        fn parse_upstream_forms() {
+            assert_eq!(
+                parse_upstream("1.2.3.4:8443"),
+                ("http".to_string(), "1.2.3.4".to_string(), 8443)
+            );
+            assert_eq!(
+                parse_upstream("https://api.example.com"),
+                ("https".to_string(), "api.example.com".to_string(), 443)
+            );
+            assert_eq!(
+                parse_upstream("http://127.0.0.1:17000"),
+                ("http".to_string(), "127.0.0.1".to_string(), 17000)
+            );
+        }
+
+        #[test]
+        fn sni_resolve_entry_pins_bare_ip_https() {
+            let entry = sni_resolve_entry("https://1.2.3.4:8443", Some("api.example.com"))
+                .expect("bare-IP https + ATG_SNI must pin");
+            assert_eq!(entry.0, "api.example.com");
+            assert_eq!(
+                entry.1.to_string(),
+                "1.2.3.4:8443",
+                "the SNI name connects to the real upstream address"
+            );
+        }
+
+        #[test]
+        fn sni_resolve_entry_skips_non_pin_cases() {
+            // SNI name == upstream host: normal DNS applies.
+            assert!(sni_resolve_entry("api.example.com:443", Some("api.example.com")).is_none());
+            // No ATG_SNI: nothing to override.
+            assert!(sni_resolve_entry("1.2.3.4:443", None).is_none());
+            // Plain http: no TLS SNI involved.
+            assert!(sni_resolve_entry("http://1.2.3.4:8443", Some("api.example.com")).is_none());
+        }
     }
 }

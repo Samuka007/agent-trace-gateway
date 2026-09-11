@@ -25,6 +25,7 @@ const UPSTREAM_PORT: u16 = 39071;
 const GW_DRAIN_ON: u16 = 39070;
 const GW_DRAIN_TIMEOUT: u16 = 39072;
 const GW_DRAIN_OFF: u16 = 39074;
+const GW_DRAIN_BULK: u16 = 39076;
 
 fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>> {
     Client::builder(TokioExecutor::new()).build_http()
@@ -86,7 +87,23 @@ fn mini_upstream(saw_upstream_close: Arc<AtomicBool>) {
             }
             let text = String::from_utf8_lossy(&buf).to_string();
             let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
-            if text.contains("drain-stall") {
+            if text.contains("drain-bulk") {
+                // NIT ③ throughput smoke: ~6MB of SSE written in fast
+                // bursts (no pacing) — the relay must stream it through
+                // without pathological slowdown.
+                let _ = s.write_all(head.as_bytes());
+                let mut body = String::with_capacity(8 << 20);
+                for _ in 0..60_000 {
+                    body.push_str(&delta(&"x".repeat(80)));
+                }
+                body.push_str(&completed(1, 2));
+                for chunk in body.as_bytes().chunks(64 * 1024) {
+                    if s.write_all(chunk).is_err() {
+                        break;
+                    }
+                }
+                let _ = s.flush();
+            } else if text.contains("drain-stall") {
                 // Two deltas, then hold the connection forever with no
                 // more data — the drain window must expire.
                 let _ = s.write_all(head.as_bytes());
@@ -146,6 +163,29 @@ fn read_partial_then_drop(port: u16, input: &str) -> usize {
         }
     }
     drop(s); // client hang-up mid-stream
+    got
+}
+
+/// Read the COMPLETE response stream from a fresh connection (live
+/// client, no drop) — the throughput-smoke shape. Returns bytes read.
+fn read_all(port: u16, input: &str) -> usize {
+    let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    let body = format!(r#"{{"model":"m","stream":true,"input":"{input}"}}"#);
+    let req = format!(
+        "POST /responses HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    s.write_all(req.as_bytes()).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).ok();
+    let mut got = 0usize;
+    let mut tmp = [0u8; 65536];
+    loop {
+        match s.read(&mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got += n,
+        }
+    }
     got
 }
 
@@ -248,7 +288,10 @@ async fn drain_switch_scenarios() {
         "drain timeout is a cancellation, not a failure: {rec:?}"
     );
 
-    // ---- (3) drain OFF (default): upstream aborted on client drop ----
+    // ---- (3) drain OFF (default): upstream aborted on client drop. With
+    // the BLOCK-C gate this scenario rides the pingora pump (zero
+    // regression) — the assertions are behavior-level, so they pin the
+    // observable policy either way. ----
     std::env::remove_var("ATG_DRAIN_ON_CANCEL");
     std::env::remove_var("ATG_DRAIN_TIMEOUT_SECS");
     spawn_gateway(GW_DRAIN_OFF);
@@ -279,5 +322,33 @@ async fn drain_switch_scenarios() {
             false
         }),
         "drain off must abort the upstream connection (fixture saw the gateway close it)"
+    );
+
+    // ---- (5) relay throughput smoke (NIT ③): ~6MB SSE through the live
+    // relay path with a fully-reading client — no pathological slowdown,
+    // complete content at volume. ----
+    std::env::set_var("ATG_DRAIN_ON_CANCEL", "1");
+    spawn_gateway(GW_DRAIN_BULK);
+    wait_port(GW_DRAIN_BULK).await;
+    let started = std::time::Instant::now();
+    let got = tokio::task::spawn_blocking(|| read_all(GW_DRAIN_BULK, "drain-bulk"))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    // 60k events x ~100B + framing + completed — comfortably under 6MB.
+    assert!(
+        got > 5_000_000,
+        "the whole stream must be relayed (got {got} bytes in {elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_secs(25),
+        "relay throughput is pathological: 6MB took {elapsed:?}"
+    );
+    let rec = poll_record(GW_DRAIN_BULK, "drain-bulk").await;
+    assert_eq!(
+        rec["final_output"].as_str().map(str::len),
+        Some(4_800_000),
+        "complete capture at volume: 60k x 80-char deltas: {:?}",
+        rec["final_output"].as_str().map(str::len)
     );
 }
