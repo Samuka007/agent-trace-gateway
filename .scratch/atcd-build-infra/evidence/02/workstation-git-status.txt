@@ -1,0 +1,10 @@
+ M Cargo.lock
+ M Cargo.toml
+ M flake.lock
+ M flake.nix
+ M src/atcd/rewrite.rs
+?? .scratch/
+?? AGENTS.md
+?? docs/agents/
+?? docs/atcd-build-infra.md
+06430bd467378c3642a5321385323d2c7991a323

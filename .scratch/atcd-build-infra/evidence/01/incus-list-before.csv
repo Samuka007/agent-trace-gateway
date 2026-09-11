@@ -1,0 +1,51 @@
+OSC-Discourse,RUNNING,"172.17.0.1 (docker0)
+10.0.100.22 (enp5s0)",,VIRTUAL-MACHINE,0
+OSC-Dokploy,RUNNING,"172.18.0.1 (docker_gwbridge)
+172.17.0.1 (docker0)
+10.0.100.20 (enp5s0)",,VIRTUAL-MACHINE,0
+T-dev,STOPPED,,,CONTAINER,0
+VitusDragonos,STOPPED,,,VIRTUAL-MACHINE,0
+bigdata-aio,STOPPED,,,CONTAINER,0
+chigang,RUNNING,"172.18.0.1 (br-804d2420cb1b)
+172.17.0.1 (docker0)
+10.0.100.230 (enp5s0)",,VIRTUAL-MACHINE,0
+contextid-github-runner,RUNNING,"172.17.0.1 (docker0)
+10.0.100.98 (enp5s0)",,VIRTUAL-MACHINE,0
+dragonos,RUNNING,"172.17.0.1 (docker0)
+10.0.100.66 (enp5s0)",,VIRTUAL-MACHINE,1
+gamephanes-builder,RUNNING,10.0.100.213 (eth0),,CONTAINER,0
+gamephanes-core-dev,RUNNING,10.0.100.13 (eth0),,CONTAINER,0
+gamephanes-studio-dev,RUNNING,10.0.100.57 (eth0),,CONTAINER,0
+hadoop,STOPPED,,,CONTAINER,0
+harbor-runner-260901,RUNNING,"172.17.0.1 (docker0)
+10.0.100.167 (enp5s0)",,VIRTUAL-MACHINE,0
+harbor-runner-260902,RUNNING,"172.17.0.1 (docker0)
+10.0.100.168 (enp5s0)",,VIRTUAL-MACHINE,0
+lrx-machine-0,RUNNING,"172.17.0.1 (docker0)
+10.0.100.208 (enp5s0)",,VIRTUAL-MACHINE,0
+nixos-builder,RUNNING,"10.89.0.1 (podman1)
+10.0.100.71 (eth0)",,CONTAINER,0
+op-test,RUNNING,10.0.100.45 (eth0),,CONTAINER,0
+samuka-graduation,RUNNING,"172.17.0.1 (docker0)
+10.0.100.121 (eth0)",,CONTAINER,0
+sub2api-incus-1,RUNNING,"172.17.0.1 (docker0)
+10.0.100.241 (eth0)",,CONTAINER,0
+sub2api-incus-2,RUNNING,"172.17.0.1 (docker0)
+10.0.100.242 (eth0)",,CONTAINER,0
+sub2api-incus-3,RUNNING,"172.17.0.1 (docker0)
+10.0.100.243 (eth0)",,CONTAINER,0
+sub2api-mihomo,RUNNING,10.0.100.240 (eth0),,CONTAINER,0
+test-1,RUNNING,10.0.100.88 (eth0),,CONTAINER,0
+test-lxc-0,RUNNING,10.0.100.50 (eth0),,CONTAINER,0
+v2ray-test,RUNNING,"172.17.0.1 (docker0)
+10.0.100.157 (eth0)",,CONTAINER,0
+vitus-chicken,RUNNING,"172.18.0.1 (br-f1bf544f4cac)
+172.17.0.1 (docker0)
+100.115.10.25 (tailscale0)
+10.0.100.63 (enp5s0)",fd7a:115c:a1e0::af33:a1a (tailscale0),VIRTUAL-MACHINE,0
+xbohodx-incus,RUNNING,"172.19.0.1 (br-771315e5102e)
+172.18.0.1 (br-49dde25b5840)
+172.17.0.1 (docker0)
+100.64.0.85 (tailscale0)
+10.0.100.84 (enp5s0)",fd7a:115c:a1e0::56 (tailscale0),VIRTUAL-MACHINE,0
+xray-core,RUNNING,10.0.100.191 (eth0),,CONTAINER,0

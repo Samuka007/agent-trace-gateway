@@ -1,0 +1,27 @@
+eth0:
+  ipv4.address: 10.0.100.244
+  network: incus_bridge_0
+  type: nic
+root:
+  path: /
+  pool: default
+  size: 100GiB
+  type: disk
+===
+{
+  "swap_usage": 0,
+  "swap_usage_peak": 0,
+  "total": 21474836480,
+  "usage": 221646848,
+  "usage_peak": 0
+}
+{
+  "allocated_time": 16000000000,
+  "usage": 137189458000
+}
+{
+  "root": {
+    "total": 107374182400,
+    "usage": 1899265120
+  }
+}

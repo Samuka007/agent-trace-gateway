@@ -1,0 +1,9 @@
+ M Cargo.lock
+ M Cargo.toml
+ M flake.lock
+ M flake.nix
+ M src/atcd/rewrite.rs
+?? .scratch/
+?? AGENTS.md
+?? docs/agents/
+?? docs/atcd-build-infra.md

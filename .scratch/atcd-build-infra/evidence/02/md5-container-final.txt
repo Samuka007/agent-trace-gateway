@@ -1,0 +1,7 @@
+21ddb868acabd34d88084f03c632df7b  Cargo.toml
+48ad17b3f507f313ae6baf405f3003a8  Cargo.lock
+4dcabf75460252de6bd4557fe4ebce7d  flake.nix
+a2c46d27f32c32850a41db49af7f759d  flake.lock
+1579f30c4a57e8a9d47cb141dd6c32b2  src/atcd/rewrite.rs
+22bebe5ca793499a53384f5d33448f74  AGENTS.md
+1720b5bad294f3b54626ddb2d6969ac0  docs/atcd-build-infra.md

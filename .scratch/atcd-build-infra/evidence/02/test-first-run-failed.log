@@ -1,0 +1,92 @@
+   Compiling agent-trace-gateway v0.1.0 (/opt/atcd)
+error[E0425]: cannot find function `mint_turn_metadata` in this scope
+   --> src/atcd/rewrite.rs:396:18
+    |
+138 | pub fn mint_metadata(id: &TurnIdentity<'_>, now_unix_ms: i64) -> CodexResponsesMetadata {
+    | --------------------------------------------------------------------------------------- similarly named function `mint_metadata` defined here
+...
+396 |         let tm = mint_turn_metadata(
+    |                  ^^^^^^^^^^^^^^^^^^
+    |
+help: a function with a similar name exists
+    |
+396 -         let tm = mint_turn_metadata(
+396 +         let tm = mint_metadata(
+    |
+
+error[E0061]: this function takes 2 arguments but 4 arguments were supplied
+   --> src/atcd/rewrite.rs:407:19
+    |
+407 |         let out = codex_envelope_body(
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+410 |             "minted-session",
+    |             ---------------- unexpected argument #3 of type `&'static str`
+411 |             &tm,
+    |             --- unexpected argument #4
+    |
+note: expected `&HashMap<String, String>`, found `&Persona`
+   --> src/atcd/rewrite.rs:409:13
+    |
+409 |             &p,
+    |             ^^
+    = note: expected reference `&HashMap<std::string::String, std::string::String>`
+               found reference `&persona::Persona`
+note: function defined here
+   --> src/atcd/rewrite.rs:214:8
+    |
+214 | pub fn codex_envelope_body(
+    |        ^^^^^^^^^^^^^^^^^^^
+215 |     body: &[u8],
+216 |     client_metadata: &std::collections::HashMap<String, String>,
+    |     -----------------------------------------------------------
+help: remove the extra arguments
+    |
+409 -             &p,
+410 -             "minted-session",
+411 -             &tm,
+409 +             /* &HashMap<std::string::String, std::string::String> */,
+    |
+
+error[E0061]: this function takes 2 arguments but 4 arguments were supplied
+   --> src/atcd/rewrite.rs:444:19
+    |
+444 |         let out = codex_envelope_body(
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+447 |             "s",
+    |             --- unexpected argument #3 of type `&'static str`
+448 |             &http::HeaderValue::from_static("{}"),
+    |             ------------------------------------- unexpected argument #4 of type `&HeaderValue`
+    |
+note: expected `&HashMap<String, String>`, found `&Persona`
+   --> src/atcd/rewrite.rs:446:13
+    |
+446 |             &p,
+    |             ^^
+    = note: expected reference `&HashMap<std::string::String, std::string::String>`
+               found reference `&persona::Persona`
+note: function defined here
+   --> src/atcd/rewrite.rs:214:8
+    |
+214 | pub fn codex_envelope_body(
+    |        ^^^^^^^^^^^^^^^^^^^
+215 |     body: &[u8],
+216 |     client_metadata: &std::collections::HashMap<String, String>,
+    |     -----------------------------------------------------------
+help: remove the extra arguments
+    |
+446 -             &p,
+447 -             "s",
+448 -             &http::HeaderValue::from_static("{}"),
+446 +             /* &HashMap<std::string::String, std::string::String> */,
+    |
+
+Some errors have detailed explanations: E0061, E0425.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `agent-trace-gateway` (lib test) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+
+real	1m26.010s
+user	1m59.675s
+sys	1m0.081s

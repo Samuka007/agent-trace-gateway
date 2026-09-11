@@ -1,0 +1,177 @@
+   Compiling agent-trace-gateway v0.1.0 (/opt/atcd)
+    Finished `test` profile [unoptimized] target(s) in 47.35s
+     Running unittests src/lib.rs (target/debug/deps/agent_trace_gateway-c47af2eeb87fba52)
+
+running 27 tests
+test atcd::oauth::tests::authorize_url_contains_all_codex_params ... ok
+test atcd::persona::tests::assembly_preserves_terminal_and_os_rendering ... ok
+test atcd::oauth::tests::callback_parse_validates_state_and_extracts_code ... ok
+test atcd::oauth::tests::pkce_challenge_is_sha256_of_verifier ... ok
+test atcd::persona::tests::user_agent_matches_codex_format_string ... ok
+test atcd::refresh::tests::body_matches_codex_wire_shape ... ok
+test atcd::refresh::tests::jwt_exp_parses_unverified_claim ... ok
+test atcd::rewrite::tests::apply_replaces_only_account_level_identity ... ok
+test atcd::rewrite::tests::envelope_body_none_on_garbage ... ok
+test atcd::rewrite::tests::no_header_name_collisions ... ok
+test atcd::rewrite::tests::strip_removes_credentials_and_hop_by_hop_keeps_client_artifacts ... ok
+test atcd::rewrite::tests::surgical_replace_noop_when_same_or_absent ... ok
+test atcd::rewrite::tests::envelope_body_synthesizes_codex_shape ... ok
+test atcd::rewrite::tests::inbound_turn_metadata_flows_through_with_installation_swapped ... ok
+test trace::export::tests::split_basic_auth_does_not_touch_at_sign_in_path ... ok
+test atcd::rewrite::tests::turn_metadata_only_installation_replaced ... ok
+test trace::export::tests::split_basic_auth_extracts_clean_url_and_header ... ok
+test trace::export::tests::split_basic_auth_ignores_urls_without_userinfo ... ok
+test trace::export::tests::split_basic_auth_percent_decodes_credentials ... ok
+test atcd::scheduler::tests::first_turn_waits_zero ... ok
+test atcd::rewrite::tests::surgical_replace_swaps_all_installation_projections ... ok
+test atcd::scheduler::tests::gate_bounds_concurrency ... ok
+test atcd::scheduler::tests::second_turn_within_gap_waits ... ok
+test atcd::persona::tests::local_snapshot_produces_nonempty_fields ... ok
+test atcd::persona::tests::installation_is_unique_per_mint ... ok
+test atcd::store::tests::account_and_binding_roundtrip ... ok
+test atcd::placement::tests::skips_cooling_and_capped_picks_lru ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+     Running unittests src/bin/atcd.rs (target/debug/deps/atcd-873ac43f2afa7156)
+     Running unittests src/bin/gateway.rs (target/debug/deps/gateway-fdced6160bba3eb8)
+     Running tests/bounded_state.rs (target/debug/deps/bounded_state-1e63ba1f7f16586c)
+test bounded_stitch_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/capture_size_caps.rs (target/debug/deps/capture_size_caps-170140ca0ff3d8c8)
+
+running 1 test
+test capture_size_caps ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests/content_fidelity.rs (target/debug/deps/content_fidelity-24ba81572669cee1)
+
+running 1 test
+test content_fidelity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/detect_protocol.rs (target/debug/deps/detect_protocol-9c8b392d25933b4e)
+
+running 2 tests
+test detects_all_real_path_variants ... ok
+test extracts_user_input_from_codex_input_array ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/explicit_session.rs (target/debug/deps/explicit_session-5cfd8080c52a0ad3)
+
+running 1 test
+test explicit_session_stitch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/export_fail_open.rs (target/debug/deps/export_fail_open-840ba3abb19cf5eb)
+
+running 1 test
+test export_fail_open ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s
+
+     Running tests/otlp_export.rs (target/debug/deps/otlp_export-f3cf1775d51a38ac)
+
+running 1 test
+test otlp_export ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/prefix_stitch.rs (target/debug/deps/prefix_stitch-126cbb93cee54bc8)
+
+running 1 test
+test prefix_stitch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/replay_calibration.rs (target/debug/deps/replay_calibration-1e5e47cc91db9212)
+
+running 1 test
+test replay_calibration ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+
+running 1 test
+     Running tests/restart_stitch.rs (target/debug/deps/restart_stitch-fa1e3c2918de6eb7)
+test restart_stitch_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/sse_reassembly.rs (target/debug/deps/sse_reassembly-60bb9dfeb90f629d)
+
+running 1 test
+test sse_reassembly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/streaming.rs (target/debug/deps/streaming-215bcac28ed0efbf)
+
+running 1 test
+test streaming_passthrough ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/transparent_forward.rs (target/debug/deps/transparent_forward-a60ffa6cc75d6f65)
+
+running 1 test
+test transparent_forward ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/unpack_nonstreaming.rs (target/debug/deps/unpack_nonstreaming-ca5d129a748d7c2d)
+
+running 1 test
+test unpack_nonstreaming ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/upstream_error.rs (target/debug/deps/upstream_error-41d2892c34b741fa)
+
+running 1 test
+test upstream_error_passthrough ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/ws_passthrough.rs (target/debug/deps/ws_passthrough-17614e4c74f4594e)
+
+running 1 test
+test ws_passthrough ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/ws_turn_reassembly.rs (target/debug/deps/ws_turn_reassembly-114d54189d6ec8ed)
+
+running 1 test
+test ws_turn_reassembly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+   Doc-tests agent_trace_gateway
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+real	1m47.650s
+user	2m19.143s
+sys	0m59.422s

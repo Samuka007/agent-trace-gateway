@@ -1,0 +1,22 @@
+== memory.max ==
+21474836480
+== memory.peak ==
+19348099072
+== memory.events ==
+low 0
+high 0
+max 0
+oom 0
+oom_kill 0
+oom_group_kill 0
+== nproc ==
+16
+== free -b ==
+               total        used        free      shared  buff/cache   available
+Mem:     21474836480    52499456 17591549952     1167360  3831929856 21422337024
+Swap:              0           0           0
+
+# test phase (fix re-verify, 2026-09-11T17:08+08:00)
+before: Mem total=20480 used=50 free=16795 available=20428 (MiB)
+after:  Mem total=20480 used=51 free=16817 available=20428 (MiB)
+cargo test elapsed=41s, exit=0; peak not sampled (build-phase peak 19.35GiB/96.5% already recorded above)

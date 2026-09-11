@@ -1,0 +1,44 @@
+architecture: x86_64
+config:
+  boot.autostart: "true"
+  image.architecture: amd64
+  image.description: Nixos 26.05 amd64 (20260911_01:03)
+  image.os: Nixos
+  image.release: "26.05"
+  image.requirements.secureboot: "false"
+  image.serial: "20260911_01:03"
+  image.type: squashfs
+  image.variant: default
+  limits.cpu: "16"
+  limits.memory: 20GiB
+  limits.memory.enforce: hard
+  limits.memory.swap: "false"
+  limits.processes: "8192"
+  security.nesting: "true"
+  volatile.base_image: 742a9eb71576fb93e7847ee43fd9105b625eb38bf21933e0a53c907e0fc6eccc
+  volatile.cloud-init.instance-id: a2660e53-d523-4ae6-90a8-713a4f5fd742
+  volatile.eth0.host_name: veth1150045b
+  volatile.eth0.hwaddr: 10:66:6a:05:24:cf
+  volatile.eth0.name: eth0
+  volatile.idmap.base: "0"
+  volatile.idmap.current: '[{"Isuid":true,"Isgid":false,"Hostid":1000000,"Nsid":0,"Maprange":1000000000},{"Isuid":false,"Isgid":true,"Hostid":1000000,"Nsid":0,"Maprange":1000000000}]'
+  volatile.idmap.next: '[{"Isuid":true,"Isgid":false,"Hostid":1000000,"Nsid":0,"Maprange":1000000000},{"Isuid":false,"Isgid":true,"Hostid":1000000,"Nsid":0,"Maprange":1000000000}]'
+  volatile.last_state.idmap: '[]'
+  volatile.last_state.power: RUNNING
+  volatile.uuid: 88b698f7-d024-4ade-9704-a3636346bcad
+  volatile.uuid.generation: 88b698f7-d024-4ade-9704-a3636346bcad
+devices:
+  eth0:
+    ipv4.address: 10.0.100.244
+    network: incus_bridge_0
+    type: nic
+  root:
+    path: /
+    pool: default
+    size: 100GiB
+    type: disk
+ephemeral: false
+profiles:
+- default
+stateful: false
+description: ""

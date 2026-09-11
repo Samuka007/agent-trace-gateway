@@ -1,0 +1,129 @@
+SHELL=/nix/store/9ipfvwnqp1q8ijnmi5sxvlx9r8w34lw3-bash-5.3p15/bin/bash
+allowSubstitutes=
+__ETC_PROFILE_DONE=1
+XDG_CONFIG_DIRS=/etc/xdg:/root/.nix-profile/etc/xdg:/nix/profile/etc/xdg:/root/.local/state/nix/profile/etc/xdg:/etc/profiles/per-user/root/etc/xdg:/nix/var/nix/profiles/default/etc/xdg:/run/current-system/sw/etc/xdg
+NIX_BUILD_CORES=16
+NIX_GCROOT=/nix/store/8rcz69rpfrwnd8r9913si5si93caxfv9-nix-shell-env
+no_proxy=127.0.0.1,localhost,10.0.100.0/24,cache.nixos.org,channels.nixos.org,static.rust-lang.org,index.crates.io,static.crates.io,mirrors.tuna.tsinghua.edu.cn,rsproxy.cn
+configureFlags=
+mesonFlags=
+PKG_CONFIG_PATH=/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/lib/pkgconfig:/nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/lib/pkgconfig
+shell=/nix/store/9ipfvwnqp1q8ijnmi5sxvlx9r8w34lw3-bash-5.3p15/bin/bash
+depsHostHost=
+SYSTEMD_XKB_DIRECTORY=/etc/X11/xkb
+STRINGS=strings
+CMAKE_INCLUDE_PATH=/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include:/nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include:/nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include
+depsTargetTarget=
+stdenv=/nix/store/dvj9bnk0vdbzzhn76wsnzk1dv6c6jbx1-stdenv-linux
+builder=/nix/store/9ipfvwnqp1q8ijnmi5sxvlx9r8w34lw3-bash-5.3p15/bin/bash
+shellHook=
+NO_AT_BRIDGE=1
+EDITOR=nano
+phases=buildPhase
+PWD=/root/atcd-devshell
+NIX_PROFILES=/run/current-system/sw /nix/var/nix/profiles/default /etc/profiles/per-user/root /root/.local/state/nix/profile /nix/profile /root/.nix-profile
+SOURCE_DATE_EPOCH=315532800
+LOGNAME=root
+XDG_SESSION_TYPE=tty
+NIX_ENFORCE_NO_NATIVE=1
+NIX_PATH=/root/.nix-defexpr/channels:nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos:nixos-config=/etc/nixos/configuration.nix:/nix/var/nix/profiles/per-user/root/channels
+NIXPKGS_CONFIG=/etc/nix/nixpkgs-config.nix
+CXX=g++
+TEMPDIR=/tmp/nix-shell.SIankK
+system=x86_64-linux
+ftp_proxy=socks5h://10.0.100.240:10809
+HOST_PATH=/nix/store/ync7h8cyhw4nzw2laba4wra6b8mcn9by-compiler-rt-libc-21.1.8/bin:/nix/store/3qgy8q2j64v2m9jy3a5jmssacbblhd4r-coreutils-9.11/bin:/nix/store/i4kjidyvl8ciwbcwm75g75sriq3knav0-findutils-4.11.0/bin:/nix/store/xw09m9cnc9ayb2j53y2rj8jhm1h7kkxa-diffutils-3.12/bin:/nix/store/4nylac9gazdpsid79qyk0jpqm312b2jx-gnused-4.10/bin:/nix/store/yhr4ps9rdmb55pgqaq246vlh7xfac1dx-gnugrep-3.12/bin:/nix/store/bpy2ps3f0f3gvgvqjwgqriw1j1n840wd-gawk-5.4.1/bin:/nix/store/w2mbg6mcq7k3j088sbwfziy8vsdhyk7v-gnutar-1.35/bin:/nix/store/sd9qcv5s2gxvd6hpp5hk5cixq2bd4jd1-gzip-1.14/bin:/nix/store/622jkvg8hgffly7dca6iif9drvimingx-bzip2-1.0.8-bin/bin:/nix/store/hd36xbvbc0vrn9f9idrfwxznri0ax427-gnumake-4.4.1/bin:/nix/store/9ipfvwnqp1q8ijnmi5sxvlx9r8w34lw3-bash-5.3p15/bin:/nix/store/1rcr9yyj9qlgm3dyin1j37xl7q84h15i-patch-2.8/bin:/nix/store/0fb3jrf20z28598alm6g7rrsw6dz2cqj-xz-5.8.3-bin/bin:/nix/store/xcab8m6wdrd30l10bw3hkz32yiibynzv-file-5.48/bin
+LIBCLANG_PATH=/nix/store/yc2a9854a2y2c8kci88piblc847iq1l4-clang-21.1.8-lib/lib
+IN_NIX_SHELL=impure
+doInstallCheck=
+HOME=/root
+NIX_BINTOOLS=/nix/store/rm982p6i9ry7rwq5jn638kdpv0a2331f-binutils-wrapper-2.46
+SSH_ASKPASS=
+LANG=en_US.UTF-8
+depsTargetTargetPropagated=
+cmakeFlags=
+outputs=out
+NIX_STORE=/nix/store
+TMPDIR=/tmp/nix-shell.SIankK
+https_proxy=socks5h://10.0.100.240:10809
+PERL5LIB=/nix/store/kfqbfq23lafkrbhxxblzf65baqz5p1ia-perl-5.42.3/lib/perl5/site_perl
+LD=ld
+buildPhase={ echo "------------------------------------------------------------";
+  echo " WARNING: the existence of this path is not guaranteed.";
+  echo " It is an internal implementation detail for pkgs.mkShell.";
+  echo "------------------------------------------------------------";
+  echo;
+  # Record all build inputs as runtime dependencies
+  export;
+} >> "$out"
+
+SSH_CONNECTION=10.0.100.1 35408 10.0.100.244 22
+READELF=readelf
+GTK_A11Y=none
+NIX_USER_PROFILE_DIR=/nix/var/nix/profiles/per-user/root
+INFOPATH=/root/.nix-profile/info:/root/.nix-profile/share/info:/nix/profile/info:/nix/profile/share/info:/root/.local/state/nix/profile/info:/root/.local/state/nix/profile/share/info:/etc/profiles/per-user/root/info:/etc/profiles/per-user/root/share/info:/nix/var/nix/profiles/default/info:/nix/var/nix/profiles/default/share/info:/run/current-system/sw/info:/run/current-system/sw/share/info
+doCheck=
+depsBuildBuild=
+XDG_SESSION_CLASS=user
+TERM=dumb
+GTK_PATH=/root/.nix-profile/lib/gtk-2.0:/root/.nix-profile/lib/gtk-3.0:/root/.nix-profile/lib/gtk-4.0:/nix/profile/lib/gtk-2.0:/nix/profile/lib/gtk-3.0:/nix/profile/lib/gtk-4.0:/root/.local/state/nix/profile/lib/gtk-2.0:/root/.local/state/nix/profile/lib/gtk-3.0:/root/.local/state/nix/profile/lib/gtk-4.0:/etc/profiles/per-user/root/lib/gtk-2.0:/etc/profiles/per-user/root/lib/gtk-3.0:/etc/profiles/per-user/root/lib/gtk-4.0:/nix/var/nix/profiles/default/lib/gtk-2.0:/nix/var/nix/profiles/default/lib/gtk-3.0:/nix/var/nix/profiles/default/lib/gtk-4.0:/run/current-system/sw/lib/gtk-2.0:/run/current-system/sw/lib/gtk-3.0:/run/current-system/sw/lib/gtk-4.0
+SIZE=size
+propagatedNativeBuildInputs=
+strictDeps=
+USER=root
+TZDIR=/etc/zoneinfo
+AR=ar
+AS=as
+TEMP=/tmp/nix-shell.SIankK
+NIX_BINTOOLS_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu=1
+SHLVL=0
+NIX_BUILD_TOP=/tmp/nix-shell.SIankK
+NM=nm
+PAGER=less
+NIX_CFLAGS_COMPILE= -frandom-seed=8rcz69rpfr -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include
+QTWEBKIT_PLUGIN_PATH=/root/.nix-profile/lib/mozilla/plugins/:/nix/profile/lib/mozilla/plugins/:/root/.local/state/nix/profile/lib/mozilla/plugins/:/etc/profiles/per-user/root/lib/mozilla/plugins/:/nix/var/nix/profiles/default/lib/mozilla/plugins/:/run/current-system/sw/lib/mozilla/plugins/
+patches=
+NIXPKGS_CMAKE_PREFIX_PATH=/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0:/nix/store/4q11fsqhl7jn3a73paih88rrhiazb784-rust-analyzer-2026-08-03:/nix/store/908kvhj55s5z7laavf4pddxrxl62rrgl-cmake-4.3.4:/nix/store/w021fbcg4z6vxihnp6gb6vijyifl051f-clang-wrapper-21.1.8:/nix/store/vs80ag6hsr58wv5fn3nlq8qi32x9hwfi-binutils-wrapper-2.46:/nix/store/i77g9dmcd399rmxk8688qfr4g2wzgk37-go-1.26.7:/nix/store/kfqbfq23lafkrbhxxblzf65baqz5p1ia-perl-5.42.3:/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2:/nix/store/7fx93fz9c809w8yjxb0934zw6xcjis58-pkg-config-wrapper-0.29.2:/nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev:/nix/store/63b5kdhvzs4sq7xgg8bikkvdv3kf7c7p-openssl-3.6.3-bin:/nix/store/hg41dqig0qxm7shyi0a0xkw29a14i3js-openssl-3.6.3:/nix/store/g4dayjlkziardmjyxpmjpv9pmlbzaadi-rust-bindgen-hook:/nix/store/fpig164lz7fcipbndn61sfd2y2yq363n-patchelf-0.15.2:/nix/store/7n9ldpw06qbqlnf0iaig26agpn2aazfl-update-autotools-gnu-config-scripts-hook:/nix/store/w88q44gqd1qg5wmkk7v0h97rpiqvam0l-gcc-wrapper-15.3.0:/nix/store/rm982p6i9ry7rwq5jn638kdpv0a2331f-binutils-wrapper-2.46:/nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev:/nix/store/ync7h8cyhw4nzw2laba4wra6b8mcn9by-compiler-rt-libc-21.1.8
+__NIXOS_SET_ENVIRONMENT_DONE=1
+buildInputs=
+XDG_SESSION_ID=c19
+preferLocalBuild=1
+http_proxy=socks5h://10.0.100.240:10809
+LOCALE_ARCHIVE=/run/current-system/sw/lib/locale/locale-archive
+LESSKEYIN_SYSTEM=/nix/store/c96n916bfikk92bg8y06mk8qixa23jfk-lessconfig
+TERMINFO_DIRS=/root/.nix-profile/share/terminfo:/nix/profile/share/terminfo:/root/.local/state/nix/profile/share/terminfo:/etc/profiles/per-user/root/share/terminfo:/nix/var/nix/profiles/default/share/terminfo:/run/current-system/sw/share/terminfo
+NIX_REMOTE=daemon
+XDG_RUNTIME_DIR=/run/user/0
+NIX_PKG_CONFIG_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu=1
+SSH_CLIENT=10.0.100.1 35408 22
+depsBuildTarget=
+OBJCOPY=objcopy
+out=/root/atcd-devshell/outputs/out
+BINDGEN_EXTRA_CLANG_ARGS=-B/nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0/lib/gcc/x86_64-unknown-linux-gnu/15.3.0 --gcc-toolchain=/nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0 -B/nix/store/yc2a9854a2y2c8kci88piblc847iq1l4-clang-21.1.8-lib/lib -nostdlibinc -resource-dir=/nix/store/w021fbcg4z6vxihnp6gb6vijyifl051f-clang-wrapper-21.1.8/resource-root -idirafter /nix/store/qwi863qp79xkdm2yw3xzjh73dpg9qh67-glibc-2.42-84-dev/include -fmacro-prefix-map=/nix/store/qwi863qp79xkdm2yw3xzjh73dpg9qh67-glibc-2.42-84-dev/include=/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-glibc-2.42-84-dev/include  -cxx-isystem /nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0/include/c++/15.3.0 -fmacro-prefix-map=/nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0/include/c++/15.3.0=/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-gcc-15.3.0/include/c++/15.3.0 -cxx-isystem /nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0/include/c++/15.3.0/x86_64-unknown-linux-gnu -fmacro-prefix-map=/nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0/include/c++/15.3.0/x86_64-unknown-linux-gnu=/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-gcc-15.3.0/include/c++/15.3.0/x86_64-unknown-linux-gnu   -frandom-seed=8rcz69rpfr -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include -isystem /nix/store/g5l3mkk656ccm58gzz0a9kryy2grih01-compiler-rt-libc-21.1.8-dev/include
+STRIP=strip
+XDG_DATA_DIRS=/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/share:/nix/store/908kvhj55s5z7laavf4pddxrxl62rrgl-cmake-4.3.4/share:/nix/store/i77g9dmcd399rmxk8688qfr4g2wzgk37-go-1.26.7/share:/nix/store/7fx93fz9c809w8yjxb0934zw6xcjis58-pkg-config-wrapper-0.29.2/share:/nix/store/fpig164lz7fcipbndn61sfd2y2yq363n-patchelf-0.15.2/share:/root/.nix-profile/share:/nix/profile/share:/root/.local/state/nix/profile/share:/etc/profiles/per-user/root/share:/nix/var/nix/profiles/default/share:/run/current-system/sw/share
+LIBEXEC_PATH=/root/.nix-profile/libexec:/nix/profile/libexec:/root/.local/state/nix/profile/libexec:/etc/profiles/per-user/root/libexec:/nix/var/nix/profiles/default/libexec:/run/current-system/sw/libexec
+all_proxy=socks5h://10.0.100.240:10809
+TMP=/tmp/nix-shell.SIankK
+OBJDUMP=objdump
+PATH=/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/bin:/nix/store/4q11fsqhl7jn3a73paih88rrhiazb784-rust-analyzer-2026-08-03/bin:/nix/store/908kvhj55s5z7laavf4pddxrxl62rrgl-cmake-4.3.4/bin:/nix/store/w021fbcg4z6vxihnp6gb6vijyifl051f-clang-wrapper-21.1.8/bin:/nix/store/603yaax3l2jmc0hfv6g3hgjr1qk5jfxk-clang-21.1.8/bin:/nix/store/axmdd5wlxg1c9dbblvj09pjhkawqxmqx-glibc-2.42-84-bin/bin:/nix/store/3qgy8q2j64v2m9jy3a5jmssacbblhd4r-coreutils-9.11/bin:/nix/store/vs80ag6hsr58wv5fn3nlq8qi32x9hwfi-binutils-wrapper-2.46/bin:/nix/store/5pa1282x1sasbwhmnah6bny1g9pc2lj1-binutils-2.46/bin:/nix/store/i77g9dmcd399rmxk8688qfr4g2wzgk37-go-1.26.7/bin:/nix/store/kfqbfq23lafkrbhxxblzf65baqz5p1ia-perl-5.42.3/bin:/nix/store/7fx93fz9c809w8yjxb0934zw6xcjis58-pkg-config-wrapper-0.29.2/bin:/nix/store/63b5kdhvzs4sq7xgg8bikkvdv3kf7c7p-openssl-3.6.3-bin/bin:/nix/store/fpig164lz7fcipbndn61sfd2y2yq363n-patchelf-0.15.2/bin:/nix/store/w88q44gqd1qg5wmkk7v0h97rpiqvam0l-gcc-wrapper-15.3.0/bin:/nix/store/4yxdxw3kppr2pbic95p4mri520rkdag2-gcc-15.3.0/bin:/nix/store/rm982p6i9ry7rwq5jn638kdpv0a2331f-binutils-wrapper-2.46/bin:/nix/store/ync7h8cyhw4nzw2laba4wra6b8mcn9by-compiler-rt-libc-21.1.8/bin:/nix/store/3qgy8q2j64v2m9jy3a5jmssacbblhd4r-coreutils-9.11/bin:/nix/store/i4kjidyvl8ciwbcwm75g75sriq3knav0-findutils-4.11.0/bin:/nix/store/xw09m9cnc9ayb2j53y2rj8jhm1h7kkxa-diffutils-3.12/bin:/nix/store/4nylac9gazdpsid79qyk0jpqm312b2jx-gnused-4.10/bin:/nix/store/yhr4ps9rdmb55pgqaq246vlh7xfac1dx-gnugrep-3.12/bin:/nix/store/bpy2ps3f0f3gvgvqjwgqriw1j1n840wd-gawk-5.4.1/bin:/nix/store/w2mbg6mcq7k3j088sbwfziy8vsdhyk7v-gnutar-1.35/bin:/nix/store/sd9qcv5s2gxvd6hpp5hk5cixq2bd4jd1-gzip-1.14/bin:/nix/store/622jkvg8hgffly7dca6iif9drvimingx-bzip2-1.0.8-bin/bin:/nix/store/hd36xbvbc0vrn9f9idrfwxznri0ax427-gnumake-4.4.1/bin:/nix/store/9ipfvwnqp1q8ijnmi5sxvlx9r8w34lw3-bash-5.3p15/bin:/nix/store/1rcr9yyj9qlgm3dyin1j37xl7q84h15i-patch-2.8/bin:/nix/store/0fb3jrf20z28598alm6g7rrsw6dz2cqj-xz-5.8.3-bin/bin:/nix/store/xcab8m6wdrd30l10bw3hkz32yiibynzv-file-5.48/bin:/run/wrappers/bin:/root/.nix-profile/bin:/nix/profile/bin:/root/.local/state/nix/profile/bin:/etc/profiles/per-user/root/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin
+propagatedBuildInputs=
+dontAddDisableDepTrack=1
+CC=gcc
+NIX_CC=/nix/store/w88q44gqd1qg5wmkk7v0h97rpiqvam0l-gcc-wrapper-15.3.0
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus
+depsBuildTargetPropagated=
+depsBuildBuildPropagated=
+NIX_CC_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu=1
+rsync_proxy=socks5h://10.0.100.240:10809
+CONFIG_SHELL=/nix/store/9ipfvwnqp1q8ijnmi5sxvlx9r8w34lw3-bash-5.3p15/bin/bash
+__structuredAttrs=
+RANLIB=ranlib
+NIX_HARDENING_ENABLE=bindnow format fortify fortify3 libcxxhardeningfast pic relro stackclashprotection stackprotector strictflexarrays1 strictoverflow zerocallusedregs
+OLDPWD=
+NIX_LDFLAGS=-rpath /root/atcd-devshell/outputs/out/lib  -L/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/lib -L/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/lib -L/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/lib -L/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/lib -L/nix/store/hg41dqig0qxm7shyi0a0xkw29a14i3js-openssl-3.6.3/lib -L/nix/store/hg41dqig0qxm7shyi0a0xkw29a14i3js-openssl-3.6.3/lib -L/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/lib -L/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/lib -L/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/lib -L/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/lib -L/nix/store/hg41dqig0qxm7shyi0a0xkw29a14i3js-openssl-3.6.3/lib -L/nix/store/hg41dqig0qxm7shyi0a0xkw29a14i3js-openssl-3.6.3/lib
+nativeBuildInputs=/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0 /nix/store/4q11fsqhl7jn3a73paih88rrhiazb784-rust-analyzer-2026-08-03 /nix/store/908kvhj55s5z7laavf4pddxrxl62rrgl-cmake-4.3.4 /nix/store/w021fbcg4z6vxihnp6gb6vijyifl051f-clang-wrapper-21.1.8 /nix/store/i77g9dmcd399rmxk8688qfr4g2wzgk37-go-1.26.7 /nix/store/kfqbfq23lafkrbhxxblzf65baqz5p1ia-perl-5.42.3 /nix/store/7fx93fz9c809w8yjxb0934zw6xcjis58-pkg-config-wrapper-0.29.2 /nix/store/3zlj0508348qn8y0f45y7f7954amigpp-openssl-3.6.3-dev /nix/store/g4dayjlkziardmjyxpmjpv9pmlbzaadi-rust-bindgen-hook
+name=nix-shell-env
+CMAKE_LIBRARY_PATH=/nix/store/h6i1wwpp8lf8waz2qwbps2i82bhgm3mb-rust-1.95.0/lib:/nix/store/pfww4nv3wkgpyk1jvqqpz6ymxgj7cbbh-libxcrypt-4.5.2/lib:/nix/store/hg41dqig0qxm7shyi0a0xkw29a14i3js-openssl-3.6.3/lib
+PKG_CONFIG=pkg-config
+depsHostHostPropagated=

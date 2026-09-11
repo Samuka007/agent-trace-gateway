@@ -1,0 +1,11 @@
+-rwxr-xr-x 2 root root 76486208 Sep 11 16:57 target/debug/atcd
+unknown subcommand: --version (serve|import|accounts|enable|disable|login)
+version-exit=2
+unknown subcommand: --help (serve|import|accounts|enable|disable|login)
+help-exit=2
+unknown subcommand: --bogus-flag (serve|import|accounts|enable|disable|login)
+bogus-exit=2
+atcd serving 127.0.0.1:8400 → https://chatgpt.com/backend-api/codex (0 account(s))
+serve-help-exit=124
+account                                state    binds    5h%   7d% token_exp  installation      
+accounts-exit=0
