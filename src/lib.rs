@@ -13,6 +13,49 @@ pub mod gateway_app {
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
 
+    /// Session-teardown classification (idle-RST vs real failure).
+    ///
+    /// Production evidence: a SUCCESSFUL request (response fully relayed,
+    /// final_output complete) is followed by the peer closing the idle
+    /// keep-alive connection — sub2api's idle timeout RSTs, Pingora bubbles
+    /// Os 104 ConnectionReset with cause context "during HTTP idle state"
+    /// into fail_to_proxy + the turn's proxy_error marker. Zero request
+    /// damage; pure observability distortion (log noise + failure-rate
+    /// false positives).
+    ///
+    /// Two discriminants, deliberately narrow to avoid masking real
+    /// failures:
+    /// (a) the cause chain carries Pingora's "during HTTP idle state"
+    ///     context — the post-response keep-alive window by definition;
+    /// (b) the response was already fully delivered (2xx upstream response
+    ///     relayed) AND the error is a downstream read/close error. A
+    ///     downstream READ at that point can only be the next-request
+    ///     probe on an idle connection — the request and response of the
+    ///     turn are both complete. Mid-response failures are
+    ///     Upstream-sourced errors or downstream WriteErrors and never
+    ///     enter this branch.
+    fn is_idle_teardown_after_response(
+        err_text: &str,
+        downstream_read_or_close: bool,
+        resp_status: u16,
+    ) -> bool {
+        if err_text.contains("during HTTP idle state") {
+            return true;
+        }
+        downstream_read_or_close && (200..300).contains(&resp_status)
+    }
+
+    /// Discriminator-level entry for tests (fabricating pingora Errors is
+    /// impractical; the classifier's inputs are exactly these).
+    #[doc(hidden)]
+    pub fn __classify_session_teardown(
+        err_text: &str,
+        downstream_read_or_close: bool,
+        resp_status: u16,
+    ) -> bool {
+        is_idle_teardown_after_response(err_text, downstream_read_or_close, resp_status)
+    }
+
     pub struct Gateway {
         pub upstream: String,
         pub store: TraceStore,
@@ -277,8 +320,23 @@ pub mod gateway_app {
             // frames (error_marker) only cover in-stream failures; a 4xx/5xx
             // JSON body or a proxy error previously exported as a
             // successful turn. Protocol-level markers win when both exist.
+            // Idle-teardown carve-out: a session error classified as
+            // post-response idle noise (see is_idle_teardown_after_response)
+            // marks nothing — the turn completed and must export clean.
             let http_error = if let Some(e) = e {
-                Some(format!("proxy_error: {e:?}"))
+                let err_text = format!("{e:?}");
+                let downstream_read_or_close = *e.esource() == pingora::ErrorSource::Downstream
+                    && matches!(e.etype(), pingora::ReadError | pingora::ConnectionClosed);
+                if is_idle_teardown_after_response(
+                    &err_text,
+                    downstream_read_or_close,
+                    ctx.resp_status,
+                ) {
+                    eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
+                    None
+                } else {
+                    Some(format!("proxy_error: {err_text}"))
+                }
             } else if ctx.resp_status >= 400 {
                 Some(format!("http_status: {}", ctx.resp_status))
             } else {
@@ -493,11 +551,19 @@ pub mod gateway_app {
             &self,
             session: &mut Session,
             e: &Error,
-            _ctx: &mut Self::CTX,
+            ctx: &mut Self::CTX,
         ) -> FailToProxy {
             let path = session.req_header().uri.path().to_string();
             let err = format!("{e:?}");
-            eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
+            // Same carve-out as the logging hook: idle teardown after a
+            // delivered response is debug-grade noise, not a proxy failure.
+            let downstream_read_or_close = *e.esource() == pingora::ErrorSource::Downstream
+                && matches!(e.etype(), pingora::ReadError | pingora::ConnectionClosed);
+            if is_idle_teardown_after_response(&err, downstream_read_or_close, ctx.resp_status) {
+                eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
+            } else {
+                eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
+            }
             let code = match e.etype() {
                 pingora::HTTPStatus(code) => *code,
                 _ => match e.esource() {
