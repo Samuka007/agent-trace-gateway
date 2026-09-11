@@ -120,6 +120,24 @@ pub mod gateway_app {
             self.exporter.submit(&record);
         }
 
+        /// Enter the drain window (v0.3.6): seed the incremental SSE
+        /// accumulator with everything captured while the client was alive
+        /// — drain final_output/usage must include the delivered prefix,
+        /// not just post-death bytes — and return the drain deadline.
+        /// Idempotent: the accumulator is seeded once.
+        fn begin_drain(
+            &self,
+            ctx: &mut Ctx,
+            d: &'static atg_protocol::ProtocolDescriptor,
+        ) -> tokio::time::Instant {
+            if ctx.drain_acc.is_none() && unpack::looks_like_sse(&ctx.resp_content_type) {
+                let mut acc = crate::engine::SseAccum::default();
+                crate::engine::drain_feed(&mut acc, d, &mut ctx.drain_tail, &ctx.resp_buf);
+                ctx.drain_acc = Some(acc);
+            }
+            tokio::time::Instant::now() + self.drain_timeout
+        }
+
         /// Owned request relay (v0.3.6): forwards one LLM API request to
         /// the upstream and streams the response back, owning both
         /// directions so the client-disconnect policy is enforceable.
@@ -138,7 +156,7 @@ pub mod gateway_app {
         async fn relay(
             &self,
             session: &mut Session,
-            ctx: &mut Self::CTX,
+            ctx: &mut Ctx,
             d: &'static atg_protocol::ProtocolDescriptor,
         ) {
             // --- request side ---
@@ -164,13 +182,12 @@ pub mod gateway_app {
                 .path_and_query()
                 .map(|pq| pq.as_str().to_string())
                 .unwrap_or_else(|| req_head.uri.path().to_string());
-            let base = if self.upstream.starts_with("http://")
-                || self.upstream.starts_with("https://")
-            {
-                self.upstream.trim_end_matches('/').to_string()
-            } else {
-                format!("http://{}", self.upstream.trim_end_matches('/'))
-            };
+            let base =
+                if self.upstream.starts_with("http://") || self.upstream.starts_with("https://") {
+                    self.upstream.trim_end_matches('/').to_string()
+                } else {
+                    format!("http://{}", self.upstream.trim_end_matches('/'))
+                };
             let url = format!("{base}{path_and_query}");
             // Host parity with upstream_request_filter: ATG_SNI overrides.
             let default_host = self
@@ -190,11 +207,8 @@ pub mod gateway_app {
                 }
                 out = out.header(name, value);
             }
-            let sent = out
-                .body(Bytes::copy_from_slice(&ctx.req_buf))
-                .send()
-                .await;
-            let mut resp = match sent {
+            let sent = out.body(Bytes::copy_from_slice(&ctx.req_buf)).send().await;
+            let resp = match sent {
                 Ok(r) => r,
                 Err(e) => {
                     // fail_to_connect parity: the upstream was never
@@ -238,7 +252,10 @@ pub mod gateway_app {
                 let _ = head.insert_header("transfer-encoding", "chunked");
             }
             let head_end = no_body_status;
-            if let Err(e) = session.write_response_header(Box::new(head), head_end).await {
+            if let Err(e) = session
+                .write_response_header(Box::new(head), head_end)
+                .await
+            {
                 // Client died before the headers landed; the drain
                 // decision applies from here on.
                 let path = session.req_header().uri.path();
@@ -256,11 +273,21 @@ pub mod gateway_app {
             let mut upstream_failed = false;
             let mut end_seen = no_body_status;
             while !end_seen {
-                // Drain window: once the client is dead, the upstream read
-                // is bounded by the deadline — a stream that will not
-                // finish inside it is abandoned.
-                let next = if let Some(deadline) = drain_deadline {
-                    match tokio::time::timeout_at(deadline, stream.next()).await {
+                // The pump watches BOTH sides: upstream chunks and (while
+                // the client is believed alive) the downstream read half —
+                // `idle()` errors the moment the client disconnects, even
+                // when the upstream is silent and no write would notice.
+                // This is the same liveness watch pingora's pump runs.
+                let next = if ctx.client_dead {
+                    // Draining: the upstream read is bounded by the drain
+                    // deadline — a stream that will not finish inside the
+                    // window is abandoned.
+                    match tokio::time::timeout_at(
+                        drain_deadline.unwrap_or_else(tokio::time::Instant::now),
+                        stream.next(),
+                    )
+                    .await
+                    {
                         Ok(v) => v,
                         Err(_elapsed) => {
                             ctx.drain_timed_out = true;
@@ -268,7 +295,35 @@ pub mod gateway_app {
                         }
                     }
                 } else {
-                    stream.next().await
+                    tokio::select! {
+                        chunk = stream.next() => chunk,
+                        probe = session.downstream_session.read_body_or_idle(true) => {
+                            match probe {
+                                // EOF/RST from the client mid-response:
+                                // the disconnect fact, caught even when
+                                // the upstream is silent (no write is
+                                // pending to notice it).
+                                Err(_) => {
+                                    let path = session.req_header().uri.path();
+                                    eprintln!(
+                                        "ATG: client cancelled mid-turn (path={path}) — downstream gone"
+                                    );
+                                    ctx.client_dead = true;
+                                    if !self.drain_on_cancel {
+                                        break; // abort: dropping `resp` closes the upstream
+                                    }
+                                    drain_deadline = Some(self.begin_drain(ctx, d));
+                                    continue;
+                                }
+                                // Pipelined bytes on a keep-alive
+                                // connection: the client is alive. They
+                                // are not part of this turn (same
+                                // discard semantics as the pump's idle
+                                // probe).
+                                Ok(_) => continue,
+                            }
+                        }
+                    }
                 };
                 let Some(chunk) = next else {
                     end_seen = true;
@@ -299,7 +354,7 @@ pub mod gateway_app {
                         if !self.drain_on_cancel {
                             break; // abort: dropping `resp` closes the upstream
                         }
-                        drain_deadline = Some(tokio::time::Instant::now() + self.drain_timeout);
+                        drain_deadline = Some(self.begin_drain(ctx, d));
                     }
                 } else if self.drain_on_cancel {
                     // Draining: forward nothing, capture bounded, parse
@@ -518,11 +573,7 @@ pub mod gateway_app {
         }
 
         // Control endpoint: dump collected turn records as JSON.
-        async fn request_filter(
-            &self,
-            session: &mut Session,
-            ctx: &mut Self::CTX,
-        ) -> Result<bool> {
+        async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
             if session.req_header().uri.path() == "/__atg/records" {
                 let records = self.store.snapshot();
                 let body = serde_json::to_vec(&records).unwrap_or_default();
@@ -579,7 +630,11 @@ pub mod gateway_app {
             // the ProxyHttp hooks. WebSocket upgrades and unknown paths
             // keep the pingora pump unchanged.
             let path = session.req_header().uri.path();
-            let is_ws_upgrade = session.req_header().headers.get(http::header::UPGRADE).is_some()
+            let is_ws_upgrade = session
+                .req_header()
+                .headers
+                .get(http::header::UPGRADE)
+                .is_some()
                 || session.req_header().method == http::Method::CONNECT;
             if !is_ws_upgrade {
                 if let Some(matched) = atg_protocol::ProtocolDescriptor::detect_path(path) {

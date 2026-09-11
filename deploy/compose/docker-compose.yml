@@ -11,6 +11,7 @@ services:
       ATG_LISTEN: "0.0.0.0:6180"
       ATG_UPSTREAM: "${ATG_UPSTREAM:?set upstream host:port}"
       # 可选：ATG_OTLP_ENDPOINT / ATG_CAPTURE_MAX_BYTES / ATG_STITCH_CAPACITY / ATG_STITCH_TTL_MS
+      # 可选：ATG_DRAIN_ON_CANCEL（客户端断开后续读上游流；上游断开也计费时开）/ ATG_DRAIN_TIMEOUT_SECS（默认 60）
       ATG_OTLP_ENDPOINT: "${ATG_OTLP_ENDPOINT:-}"
     ports:
       - "6180:6180"

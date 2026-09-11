@@ -317,7 +317,9 @@ fn last_frame_boundary(body: &[u8]) -> Option<usize> {
         if body.len() < pat.len() {
             None
         } else {
-            body.windows(pat.len()).rposition(|w| w == pat).map(|p| p + pat.len())
+            body.windows(pat.len())
+                .rposition(|w| w == pat)
+                .map(|p| p + pat.len())
         }
     };
     match (end_of(b"\n\r\n"), end_of(b"\n\n")) {
@@ -491,7 +493,7 @@ mod tests {
         );
         let whole = stream_response(d, body.as_bytes());
         assert_eq!(whole.text, "hey");
-        let u = whole.usage.expect("usage");
+        let u = whole.usage.as_ref().expect("usage");
         assert_eq!(u.input_tokens, Some(9));
         assert_eq!(u.output_tokens, Some(4));
 

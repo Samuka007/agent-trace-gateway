@@ -130,6 +130,8 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 | `ATG_CAPTURE_MAX_BYTES` | 16 MiB | 单条轨迹内容捕获上限 |
 | `ATG_STITCH_CAPACITY` | 100_000 | 前缀拼接 LRU 容量 |
 | `ATG_STITCH_TTL_MS` | 24h | 前缀指纹 TTL |
+| `ATG_DRAIN_ON_CANCEL` | 关 | 客户端断开时继续消费上游流到自然结束（sub2api 类"断开也计费"的上游；trace 拿完整 final_output + usage）。默认关闭 = 断开即中止上游，不白烧 token。两种模式 turn 均记 `cancelled=true`（非 fail 口径） |
+| `ATG_DRAIN_TIMEOUT_SECS` | 60 | drain 窗口：上游流超时未结束则放弃（`drain_timed_out` 标记），按已捕获部分记录 |
 
 ## 设计边界（刻意不做）
 
