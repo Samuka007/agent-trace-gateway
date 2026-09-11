@@ -15,6 +15,25 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.4] - 2026-09-11
+
+**trace 形状改 GENERATION-only**（用户裁定，RustGate 复核 PASS）。
+
+### 动机
+
+转发网关 1 请求↔1 调用——"一请求多 LLM 调用"在设计边界内不存在；AGENT 容器承载的分类信息已在 metadata.harness（更准确），容器节点是零信息冗余；ATG 哲学=不为假想需求留结构。trace 根直接是 type=GENERATION 的 generation（Langfuse OpenAI/LangChain 单调用集成的根 generation 惯例；observation 名保留命名空间化的 agent.turn.generation，trace.name 仍 agent.turn）。
+
+### 变更
+
+- 单一 span/turn：原 agent 容器 span 与 generation 子 span 合并为根 generation（无 parentSpanId）
+- 字段迁移核对零丢失：observation.input/output（mapping 表允许任意 observation）、AMB-7 ERROR status、turn 时长、usage/model/completion_start_time 上根；trace metadata（harness/dialect/client_ua/entry_protocol/client_model/...）与 session/user/tags 不变
+- OBSERVATION_TYPE_AGENT 常量与容器发射路径 clean cutover 删除
+- 测试全量重写（单 span 断言 + no-container + P0-N1 单 span 重述）；语义审计文档加形状修订注记
+
+### 兼容性（重要）
+
+**消费侧按 `type=AGENT` 过滤的查询会失效**——分类过滤应改用 `langfuse.trace.metadata.harness`（identity 层，v0.3.2 起语义更准）。生产 Langfuse 尚未接入，正是改形状的窗口。
+
 ## [0.3.3] - 2026-09-11
 
 双批次小修（RustGate 复核 PASS）：harness 归因健壮性 + frame 计数语义。
