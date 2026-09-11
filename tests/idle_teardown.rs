@@ -52,7 +52,22 @@ fn mini_upstream() {
                 }
             }
             let text = String::from_utf8_lossy(&buf).to_string();
-            if text.contains("half-rst") {
+            if text.contains("stream-cancel") {
+                // SSE stream that never completes: the client reads a few
+                // events then drops the connection (client cancellation).
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                let _ = s.write_all(head.as_bytes());
+                for ev in [
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"par\"}\n\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"tial\"}\n\n",
+                ] {
+                    let _ = s.write_all(ev.as_bytes());
+                    let _ = s.flush();
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                // Hold the stream open; the client drops first.
+                std::thread::sleep(Duration::from_secs(10));
+            } else if text.contains("half-rst") {
                 // Headers + half the declared body, then RST (linger 0).
                 let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n";
                 let _ = s.write_all(head.as_bytes());
@@ -144,6 +159,29 @@ async fn poll_record(user_input: &str) -> serde_json::Value {
     panic!("record {user_input} never appeared");
 }
 
+/// Read raw bytes from a fresh connection for ~600ms, then drop the
+/// socket — the client-cancellation shape (partial response consumed).
+fn read_partial_then_drop(body: &str) -> usize {
+    let mut s = TcpStream::connect(format!("127.0.0.1:{GW_PORT}")).expect("connect");
+    let req = format!(
+        "POST /responses HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    s.write_all(req.as_bytes()).unwrap();
+    s.set_read_timeout(Some(Duration::from_millis(300))).ok();
+    let mut got = 0usize;
+    let mut tmp = [0u8; 8192];
+    loop {
+        match s.read(&mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got += n,
+        }
+    }
+    drop(s); // client hang-up mid-stream
+    got
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_teardown_classification() {
     std::thread::spawn(mini_upstream);
@@ -188,60 +226,81 @@ async fn idle_teardown_classification() {
         rec.get("error").map(|e| !e.is_null()).unwrap_or(false),
         "mid-response RST must still mark the turn errored: {rec:?}"
     );
+
+    // (2b) Client cancels mid-stream (three-way taxonomy): the turn
+    // records NORMALLY — partial content preserved, cancelled=true, NO
+    // error marker (reconciliation material, not a failure).
+    let got = tokio::task::spawn_blocking(move || {
+        read_partial_then_drop(r#"{"model":"m","stream":true,"input":"stream-cancel"}"#)
+    })
+    .await
+    .unwrap();
+    assert!(got > 0, "some stream bytes were consumed before the drop");
+    let rec = poll_record("stream-cancel").await;
+    assert_eq!(
+        rec["cancelled"], true,
+        "client mid-turn disconnect marks cancellation: {rec:?}"
+    );
+    assert!(
+        rec.get("error").map(|e| e.is_null()).unwrap_or(true),
+        "cancellation is not an error: {rec:?}"
+    );
+    assert!(
+        !rec["final_output"].as_str().unwrap_or("").is_empty(),
+        "partial content is preserved: {rec:?}"
+    );
 }
 
-/// Classifier unit pins — the three ruling classes at the discriminator
+/// Classifier unit pins — the THREE ruling classes at the discriminator
 /// level (fabricating pingora Errors is impractical; the classifier's
 /// inputs are exactly these discriminants).
 #[test]
 fn classifier_three_classes() {
-    use agent_trace_gateway::gateway_app::__classify_session_teardown;
-    // ① idle RST after a delivered response — either discriminator:
+    use agent_trace_gateway::gateway_app::__classify_session_error;
+    use agent_trace_gateway::gateway_app::SessionErrorClass as C;
+    // ① idle teardown after a delivered response — either discriminator:
     //    (a) fail-safe belt: the "during HTTP idle state" context (the
     //        string itself encodes post-response; overlapping with (b)).
-    assert!(__classify_session_teardown(
-        "OS error 104: Connection reset by peer, context: during HTTP idle state",
-        true,
-        200,
-        true
-    ));
-    assert!(__classify_session_teardown(
-        "OS error 104: Connection reset by peer, context: during HTTP idle state",
-        false,
-        0,
-        false
-    ));
-    //    (b) structural gate: 2xx + end_of_stream reached + downstream
-    //        read/close error (no context string).
-    assert!(__classify_session_teardown("OS error 104", true, 200, true));
-    // ② mid-response damage — never classified:
-    //    upstream-sourced read error (downstream_read_or_close=false).
-    assert!(!__classify_session_teardown(
-        "OS error 104: reset",
-        false,
-        200,
-        true
-    ));
-    //    BLOCK pin: mid-body downstream disconnect — 2xx HEADERS arrived
-    //    but end_of_stream never did: a downstream read/close error here
-    //    must NOT classify as idle (a truncated response would launder
-    //    into a clean turn).
-    assert!(!__classify_session_teardown(
-        "OS error 104",
-        true,
-        200,
-        false
-    ));
-    //    downstream WRITE error mid-relay is not a read/close candidate
-    //    (the caller only passes true for Read/ConnectionClosed).
-    // ③ no response delivered (dead-connection race) — the conservative
-    //    (b) branch requires 2xx AND completion; keeps the existing
-    //    failure classification.
-    assert!(!__classify_session_teardown("OS error 104", true, 0, true));
-    assert!(!__classify_session_teardown(
-        "OS error 104",
-        true,
-        502,
-        true
-    ));
+    assert_eq!(
+        C::IdleNoise,
+        __classify_session_error(
+            "OS error 104: Connection reset by peer, context: during HTTP idle state",
+            true,
+            200,
+            true
+        )
+    );
+    assert_eq!(
+        C::IdleNoise,
+        __classify_session_error(
+            "OS error 104: Connection reset by peer, context: during HTTP idle state",
+            false,
+            0,
+            false
+        )
+    );
+    //    (b) structural gate: 2xx + end_of_stream reached + downstream.
+    assert_eq!(
+        C::IdleNoise,
+        __classify_session_error("OS error 104", true, 200, true)
+    );
+    // ② client cancelled mid-turn: downstream-sourced but NOT idle
+    //    (no completion, or non-2xx) — cancellation, never an error.
+    assert_eq!(
+        C::ClientCancelled,
+        __classify_session_error("OS error 104", true, 200, false)
+    );
+    assert_eq!(
+        C::ClientCancelled,
+        __classify_session_error("write closed", true, 0, false)
+    );
+    // ③ upstream damage / dead connections — the existing failure class.
+    assert_eq!(
+        C::ProxyError,
+        __classify_session_error("OS error 104: reset", false, 200, true)
+    );
+    assert_eq!(
+        C::ProxyError,
+        __classify_session_error("OS error 104", false, 0, false)
+    );
 }

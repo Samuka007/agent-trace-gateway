@@ -217,6 +217,12 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             if !r.client_ua.is_empty() {
                 trace_extra.push(kv("langfuse.trace.metadata.client_ua", &r.client_ua));
             }
+            // Client cancelled mid-turn (three-way error taxonomy): the
+            // turn records normally with partial content; the marker is
+            // reconciliation material (upstream may have drained/billed).
+            if r.cancelled {
+                trace_extra.push(kv("langfuse.trace.metadata.cancelled", "true"));
+            }
             // Salted API-credential fingerprint: key-reuse correlation
             // without the key (16-hex salted sha256, plaintext never
             // leaves the gateway).

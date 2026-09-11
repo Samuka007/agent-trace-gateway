@@ -13,61 +13,66 @@ pub mod gateway_app {
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
 
-    /// Session-teardown classification (idle-RST vs real failure).
+    /// Session-error classification — THREE outcomes by direction
+    /// (user ruling, v0.3.5):
     ///
-    /// Production evidence: a SUCCESSFUL request (response fully relayed,
-    /// final_output complete) is followed by the peer closing the idle
-    /// keep-alive connection — sub2api's idle timeout RSTs, Pingora bubbles
-    /// Os 104 ConnectionReset with cause context "during HTTP idle state"
-    /// into fail_to_proxy + the turn's proxy_error marker. Zero request
-    /// damage; pure observability distortion (log noise + failure-rate
-    /// false positives).
-    ///
-    /// Two discriminants, deliberately narrow to avoid masking real
-    /// failures:
-    /// (a) FAIL-SATE BELT: the cause chain carries Pingora's "during HTTP
-    ///     idle state" context — that window is post-response by
-    ///     definition, so it cannot fire on a truncated response. It
-    ///     overlaps (b) on the production signature and exists so the
-    ///     belt still holds if the structural gate ever regresses; the
-    ///     fail-safe direction of the overlap is toward classification
-    ///     only because the context string itself encodes "response
-    ///     already complete".
-    /// (b) STRUCTURAL GATE: the response ran to end_of_stream (headers
-    ///     alone prove nothing — resp_status is set when HEADERS arrive,
-    ///     a mid-body disconnect also sees 2xx) AND it was a 2xx AND the
-    ///     error is a downstream read/close error. A downstream READ at
-    ///     that point can only be the next-request probe on an idle
-    ///     connection. Mid-response failures are upstream-sourced errors,
-    ///     downstream WriteErrors, or read errors arriving before
-    ///     end_of_stream — none enter this branch.
-    fn is_idle_teardown_after_response(
+    /// 1. IdleNoise — teardown AFTER the response was fully delivered:
+    ///    debug-grade noise, no marker at all (production evidence:
+    ///    sub2api idle-timeout RST post-response, cause context
+    ///    "during HTTP idle state"). Two discriminants:
+    ///    (a) FAIL-SAFE BELT: the cause chain carries Pingora's
+    ///    "during HTTP idle state" context — that window is
+    ///    post-response by definition, so it cannot fire on a
+    ///    truncated response; overlaps (b) on the production
+    ///    signature and holds if the structural gate regresses.
+    ///    (b) STRUCTURAL GATE: response ran to end_of_stream (headers
+    ///    alone prove nothing) AND 2xx AND a downstream-sourced
+    ///    error — downstream activity then can only be the idle
+    ///    next-request probe.
+    /// 2. ClientCancelled — a downstream-sourced session error that is
+    ///    NOT idle teardown: the CLIENT hung up mid-turn (write side
+    ///    failing to deliver, or read side closed before end_of_stream).
+    ///    The turn records normally with its partial content plus a
+    ///    cancelled=true metadata marker — no error marker, no ERROR
+    ///    level (reconciliation material: the upstream may already have
+    ///    drained/billed the request; production precedent).
+    /// 3. ProxyError — everything else (upstream-sourced interruption,
+    ///    half bodies, 5xx, dead connections): the existing failure
+    ///    classification, unchanged.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum SessionErrorClass {
+        IdleNoise,
+        ClientCancelled,
+        ProxyError,
+    }
+
+    fn classify_session_error(
         err_text: &str,
-        downstream_read_or_close: bool,
+        downstream_sourced: bool,
         resp_status: u16,
         response_complete: bool,
-    ) -> bool {
-        if err_text.contains("during HTTP idle state") {
-            return true;
+    ) -> SessionErrorClass {
+        if err_text.contains("during HTTP idle state")
+            || (downstream_sourced && response_complete && (200..300).contains(&resp_status))
+        {
+            return SessionErrorClass::IdleNoise;
         }
-        downstream_read_or_close && response_complete && (200..300).contains(&resp_status)
+        if downstream_sourced {
+            return SessionErrorClass::ClientCancelled;
+        }
+        SessionErrorClass::ProxyError
     }
 
     /// Discriminator-level entry for tests (fabricating pingora Errors is
     /// impractical; the classifier's inputs are exactly these).
     #[doc(hidden)]
-    pub fn __classify_session_teardown(
+    pub fn __classify_session_error(
         err_text: &str,
-        downstream_read_or_close: bool,
+        downstream_sourced: bool,
         resp_status: u16,
         response_complete: bool,
-    ) -> bool {
-        is_idle_teardown_after_response(
-            err_text,
-            downstream_read_or_close,
-            resp_status,
-            response_complete,
-        )
+    ) -> SessionErrorClass {
+        classify_session_error(err_text, downstream_sourced, resp_status, response_complete)
     }
 
     pub struct Gateway {
@@ -383,23 +388,33 @@ pub mod gateway_app {
             // frames (error_marker) only cover in-stream failures; a 4xx/5xx
             // JSON body or a proxy error previously exported as a
             // successful turn. Protocol-level markers win when both exist.
-            // Idle-teardown carve-out: a session error classified as
-            // post-response idle noise (see is_idle_teardown_after_response)
-            // marks nothing — the turn completed and must export clean.
+            // Three-way session-error classification (see
+            // classify_session_error): idle noise marks nothing; a client
+            // cancellation marks cancelled=true (no error — partial
+            // content records normally, reconciliation material);
+            // everything else keeps the proxy_error marker.
+            let mut client_cancelled = false;
             let http_error = if let Some(e) = e {
                 let err_text = format!("{e:?}");
-                let downstream_read_or_close = *e.esource() == pingora::ErrorSource::Downstream
-                    && matches!(e.etype(), pingora::ReadError | pingora::ConnectionClosed);
-                if is_idle_teardown_after_response(
+                let downstream_sourced = *e.esource() == pingora::ErrorSource::Downstream;
+                match classify_session_error(
                     &err_text,
-                    downstream_read_or_close,
+                    downstream_sourced,
                     ctx.resp_status,
                     ctx.response_complete,
                 ) {
-                    eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
-                    None
-                } else {
-                    Some(format!("proxy_error: {err_text}"))
+                    SessionErrorClass::IdleNoise => {
+                        eprintln!(
+                            "ATG: idle teardown after response (path={path}) — not a failure"
+                        );
+                        None
+                    }
+                    SessionErrorClass::ClientCancelled => {
+                        eprintln!("ATG: client cancelled mid-turn (path={path})");
+                        client_cancelled = true;
+                        None
+                    }
+                    SessionErrorClass::ProxyError => Some(format!("proxy_error: {err_text}")),
                 }
             } else if ctx.resp_status >= 400 {
                 Some(format!("http_status: {}", ctx.resp_status))
@@ -544,6 +559,7 @@ pub mod gateway_app {
                     session_synthetic,
                     completion_start_ns: ctx.first_output_ns,
                     error: error.or(http_error),
+                    cancelled: client_cancelled,
                 });
                 return;
             }
@@ -561,6 +577,7 @@ pub mod gateway_app {
                     record.session_synthetic = session_synthetic;
                     record.completion_start_ns = Some(ctx.start_ns);
                     record.error = record.error.take().or(http_error);
+                    record.cancelled = client_cancelled;
                     record.raw_request = raw_request;
                     record.raw_response = raw_response;
                     ctx.end_ns = now_ns();
@@ -624,19 +641,25 @@ pub mod gateway_app {
         ) -> FailToProxy {
             let path = session.req_header().uri.path().to_string();
             let err = format!("{e:?}");
-            // Same carve-out as the logging hook: idle teardown after a
-            // delivered response is debug-grade noise, not a proxy failure.
-            let downstream_read_or_close = *e.esource() == pingora::ErrorSource::Downstream
-                && matches!(e.etype(), pingora::ReadError | pingora::ConnectionClosed);
-            if is_idle_teardown_after_response(
+            // Same classification as the logging hook: idle teardown is
+            // debug-grade noise and a client cancellation is not a gateway
+            // failure — neither reaches the fail_to_proxy log line.
+            let downstream_sourced = *e.esource() == pingora::ErrorSource::Downstream;
+            match classify_session_error(
                 &err,
-                downstream_read_or_close,
+                downstream_sourced,
                 ctx.resp_status,
                 ctx.response_complete,
             ) {
-                eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
-            } else {
-                eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
+                SessionErrorClass::IdleNoise => {
+                    eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
+                }
+                SessionErrorClass::ClientCancelled => {
+                    eprintln!("ATG: client cancelled mid-turn (path={path})");
+                }
+                SessionErrorClass::ProxyError => {
+                    eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
+                }
             }
             let code = match e.etype() {
                 pingora::HTTPStatus(code) => *code,
