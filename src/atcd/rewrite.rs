@@ -182,6 +182,70 @@ pub fn apply_third_party(
     );
 }
 
+/// codex body 信封的字段顺序（取自金样本 codex_exec_0.153.4）：
+/// model, instructions, input, tools, tool_choice, parallel_tool_calls,
+/// store, stream, include, prompt_cache_key, text, client_metadata。
+const CODEX_BODY_FIELD_ORDER: &[&str] = &[
+    "model",
+    "instructions",
+    "input",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "store",
+    "stream",
+    "include",
+    "prompt_cache_key",
+    "text",
+    "client_metadata",
+];
+
+/// 第三方 responses 客户端的 body 信封合成：保留其 instructions/input/tools
+/// （自洽第三方家族），但补齐 codex 信封字段使其可被后端正常处理——
+/// store:false、include、prompt_cache_key（= 铸造 session，对齐
+/// "cache key 派生自 session" 的真实不变量）、client_metadata 身份投影、
+/// 缺失时的 parallel_tool_calls=true（金样本实测值）。键序按金样本重排。
+/// 解析失败时原样返回（非 JSON body 不是我们的输入）。
+pub fn codex_envelope_body(
+    body: &[u8],
+    persona: &Persona,
+    session_id: &str,
+    turn_metadata: &http::HeaderValue,
+) -> Option<bytes::Bytes> {
+    let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = v.as_object_mut()?;
+    obj.insert("store".into(), serde_json::Value::Bool(false));
+    obj.entry("include").or_insert_with(|| {
+        serde_json::json!(["reasoning.encrypted_content"])
+    });
+    obj.insert("prompt_cache_key".into(), session_id.into());
+    obj.entry("parallel_tool_calls")
+        .or_insert(serde_json::Value::Bool(true));
+    obj.insert(
+        "client_metadata".into(),
+        serde_json::json!({
+            "session_id": session_id,
+            "thread_id": session_id,
+            "x-codex-installation-id": persona.installation_id,
+            "x-codex-window-id": format!("{session_id}:0"),
+            "x-codex-turn-metadata": turn_metadata.to_str().ok()?,
+        }),
+    );
+
+    // 键序重排：codex 字段序在前，其余未知字段按原相对顺序跟在后面。
+    let mut ordered = serde_json::Map::new();
+    for key in CODEX_BODY_FIELD_ORDER {
+        if let Some(val) = obj.remove(*key) {
+            ordered.insert((*key).to_string(), val);
+        }
+    }
+    for (k, val) in obj.iter() {
+        ordered.insert(k.clone(), val.clone());
+    }
+    let out = serde_json::to_vec(&serde_json::Value::Object(ordered)).ok()?;
+    Some(bytes::Bytes::from(out))
+}
+
 /// body 外科替换：把下游 installation id 的全部出现换成账号人设的。
 /// 其余字节逐位不动。两者相同时原样返回。
 pub fn surgical_installation_replace(
@@ -329,6 +393,69 @@ mod tests {
         assert_eq!(out, body);
         let out = surgical_installation_replace(body.clone(), None, p.installation_id.as_str());
         assert_eq!(out, body);
+    }
+
+    #[test]
+    fn envelope_body_synthesizes_codex_shape() {
+        let p = persona();
+        let third_party_body = br#"{"model":"gpt-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"prompt_cache_key":"their-key","tools":[{"type":"function","name":"run_cmd"}]}"#;
+        let tm = mint_turn_metadata(
+            "our-install",
+            "minted-session",
+            "minted-session",
+            DEFAULT_AGENT_NAME,
+            DEFAULT_SANDBOX,
+            DEFAULT_SANDBOX_MODE,
+            42,
+        );
+        let out = codex_envelope_body(
+            &third_party_body[..],
+            &p,
+            "minted-session",
+            &tm,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // 信封字段对齐金样本
+        assert_eq!(v["store"], false);
+        assert_eq!(v["include"][0], "reasoning.encrypted_content");
+        assert_eq!(v["prompt_cache_key"], "minted-session");
+        assert_eq!(v["parallel_tool_calls"], true);
+        assert_eq!(
+            v["client_metadata"]["x-codex-installation-id"],
+            "our-install-uuid"
+        );
+        assert_eq!(v["client_metadata"]["session_id"], "minted-session");
+        // 其余保留
+        assert_eq!(v["model"], "gpt-5.5");
+        assert_eq!(v["tools"][0]["name"], "run_cmd");
+        // 键序对齐金样本
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let expect: Vec<&str> = CODEX_BODY_FIELD_ORDER
+            .iter()
+            .copied()
+            .filter(|k| v.get(k).is_some())
+            .collect();
+        let known: Vec<&str> = keys
+            .iter()
+            .filter(|k| CODEX_BODY_FIELD_ORDER.contains(k))
+            .copied()
+            .collect();
+        assert_eq!(known, expect);
+    }
+
+    #[test]
+    fn envelope_body_passthrough_on_garbage() {
+        let p = persona();
+        let raw = b"not json";
+        let out = codex_envelope_body(
+            &raw[..],
+            &p,
+            "s",
+            &http::HeaderValue::from_static("{}"),
+        )
+        .unwrap_or(bytes::Bytes::from_static(b"fallback"));
+        assert_eq!(out, bytes::Bytes::from_static(b"fallback"));
     }
 
     #[test]

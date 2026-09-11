@@ -242,12 +242,28 @@ impl ProxyApp {
             );
         }
 
-        // body 外科替换：仅 installation 投影，其余字节不动（仅 codex 下游有）
-        let body = rewrite::surgical_installation_replace(
-            body,
-            downstream_installation.as_deref(),
-            persona.installation_id.as_str(),
-        );
+        // body 处理：codex 下游做 installation 外科替换（其余字节不动）；
+        // 第三方客户端做信封合成（store/include/prompt_cache_key/client_metadata
+        // 对齐 codex 形状，instructions/input/tools 保留其自洽内容）。
+        let body = if codex_native {
+            rewrite::surgical_installation_replace(
+                body,
+                downstream_installation.as_deref(),
+                persona.installation_id.as_str(),
+            )
+        } else {
+            let tm = headers.get("x-codex-turn-metadata").cloned();
+            match tm {
+                Some(tm) => rewrite::codex_envelope_body(
+                    &body,
+                    &persona,
+                    &bound_session,
+                    &tm,
+                )
+                .unwrap_or(body),
+                None => body,
+            }
+        };
 
         let url = format!("{}{}", self.upstream.trim_end_matches('/'), parts.uri.path());
         let client = self.client_for(persona.proxy_url.as_deref()).await;

@@ -25,8 +25,8 @@
 | R0.1 | 身份层重构：UA 按 codex 源码格式（originator 前缀 + os_info + 终端探测）、id 全部 v7、透传优先 | 用户纠错（"有没有检查过 UA/session/thread 生成逻辑"） | 已完成 | 1466663 |
 | R1 | OAuth 登录：device-code（codex 原生远程路径）+ 粘贴回调 URL 模式（web 形态雏形）。决策记录：先引用 codex-login → 其硬依赖 native-tls/openssl 在 nix 环境无法链接 + tungstenite 双层 fork 解析冲突 → 撤引用，wire 逐字镜像（pkce.rs / server.rs:584-606,809-843 / device_code_auth.rs） | 用户需求 | 已完成 | oauth.rs + `atcd login [--device]`；交换/解析有单测 |
 | R2 | 账号管理：配额头捕获落库（x-codex-primary/secondary-used-percent）、放置配额天花板（ATCD_QUOTA_CEILING_PERCENT，默认 85）、enable/disable、富列表 | 用户需求 | 已完成 | `atcd accounts/enable/disable`；冒烟显示 5h%=42 7d%=7 落库 |
-| R3 | 其他 responses 原生 agent（omp/opencode）支持：无 codex 身份头时铸造 v7 身份树 + 合成 turn 元数据，会话键 prompt_cache_key → body 前缀 sha256 兜底；instructions/工具表保留其自洽家族 | 用户需求（已确认 omp 支持 Responses） | 已完成（含开放问题 R3a） | 冒烟路径B：铸造 session/thread/turn 全 v7 + UA 人设壳 |
-| R3a | 【R3 开放问题】第三方路径的家族一致性裂缝：头里铸造的 session-id ≠ body 透传的 prompt_cache_key（真实 codex 两者相等，因 cache key 默认从 session 派生），而头声称 codex 家族。修法 A：把 body cache key 重写为铸造值（完全 codex 形状，body 改一个字段）；修法 B：第三方不声称 codex（去 originator/installation 声明，通用 SDK 形态）。决策依据：上游是否做该一致性检查（黑盒）——待 ATG 观测或 A/B | 自查发现 | 待办（排在 R4 后） |
+| R3 | 其他 responses 原生 agent（omp/opencode）支持：无 codex 身份头时铸造 v7 身份树 + 合成 turn 元数据（17 字段全集），body 信封合成（store/include/prompt_cache_key=铸造 session/client_metadata/键序对齐金样本），会话键 prompt_cache_key → body 前缀 sha256 兜底；instructions/工具表保留其自洽家族 | 用户需求（已确认 omp 支持 Responses） | 已完成（R3a 修法 A 已实现：cache key=铸造 session） | 冒烟路径B：body 信封全字段落位 |
+| R3a | 【R3 开放问题→已决策】cache key 与 session-id 一致性：采用修法 A（prompt_cache_key 重写为铸造 session_id，对齐"cache key 派生自 session"的真实不变量），信封合成实现 | 自查发现 | 已完成 | rewrite.rs codex_envelope_body + 单测；冒烟路径B |
 | R4 | WebSocket V2 支持 | 用户需求 | 待办（已定位协议源码） | codex 侧协议在 codex-rs/codex-api/src/endpoint/realtime_websocket/（protocol_v2.rs / methods_v2.rs）；下一步读 wire 出设计 |
 | R7 | 真实下游流量捕获（金样本）：codex 0.153.4 custom provider (wire_api=responses) 模式实测，nix 提供二进制 | 用户审计提问（"你真的捕获过下游流量吗"） | 已完成（首个样本） | scripts/fixtures/codex_exec_0.153.4.{headers.json,body.json}；发现：①身份头全套存在（session-id/thread-id/window/turn/β-features），codex_native 判定成立 ②session_id==thread_id（exec 模式）③turn 元数据 17 字段（agent_name/context_window_id/request_kind/sandbox 等远超早期假设）④originator 随表面变化（exec=codex_exec），UA 带 "(codex_exec; 0.153.4)" 后缀 ⑤os_info 渲染第三次验证（NixOS 26.11.0）⑥流断自动重连 5 次 ⑦已据此升级 mint_turn_metadata 全字段集 + session==thread 对齐 |
 | R1a | 依赖对齐决策记录：曾按"依赖以 codex 为准"引入 codex-login + 双层 tungstenite fork patch → codex-http-client 硬依赖 native-tls/openssl，nix shell 链接失败（rama 全系需 pin alpha.4 亦已处理）。reqwest 已切 rustls（对齐 codex TLS 栈）；tokio-tungstenite 维持 0.27（仅测试用帧解析）。若未来换有 openssl 的构建环境，可重启 codex-login 引用 | 用户指令 + 环境 blockers | 已完成（决策关闭） | Cargo.toml 注释 + 本行 |
@@ -41,6 +41,9 @@
 | "UA 前缀是 codex-tui" | 错。前缀是 originator（codex_cli_rs）；codex-tui 只是兼容列表旧值 | login/src/auth/default_client.rs:164-175 |
 | session/thread/turn 用 uuid v4 | 错。SessionId/ThreadId/turn_id 均为 Uuid::now_v7 | protocol/src/session_id.rs、thread_id.rs；core/src/turn_metadata.rs:96 |
 | sub2api 式"收敛成 1 设备 1 会话高强度"更像人 | 错。社区与源码证据：多设备正常，单设备单会话持续高强度不正常 | linux.do 2854867；turn_metadata 字段语义 |
+| "codex 固定 parallel_tool_calls:false" | 错。金样本实测 parallel_tool_calls:true | codex_exec_0.153.4.body.json |
+| "codex 工具是 shell/apply_patch/update_plan" | 过时。0.153.4 实测：exec_command/write_stdin/apply_patch/view_image/get_goal/create_goal/update_goal 等 10 个 | 金样本 body |
+| "reasoning 含 summary:'auto'" | 不完整。0.153.4 实测仅 {effort:"medium"} | 金样本 body |
 
 ## 构建与验证状态（随提交更新）
 
@@ -56,3 +59,4 @@
 2. ~~R7 首次金样本捕获~~ 已完成（codex_exec 0.153.4 custom provider 模式）
 3. R4：读 protocol_v2.rs + methods_v2.rs 出 wire 设计 → 实现透传桥（上游 socks 绑定列为已知缺口）
 4. 金样本扩容：codex TUI 模式（originator/UA 后缀差异）、opencode 1.18.29（nix 可用）、多轮对话样本
+5. R3 剩余缺口：input items 内嵌身份（若第三方在 input 中引用 id）、tools schema 深度差异的实际兼容性——待真实 omp/opencode 流量捕获后评估
