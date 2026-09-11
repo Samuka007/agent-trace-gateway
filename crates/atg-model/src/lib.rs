@@ -167,6 +167,12 @@ pub struct TurnRecord {
     /// harness=omp). Empty when no dialect shapes matched.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dialect: String,
+    /// The request User-Agent verbatim (attribution evidence audit: when a
+    /// turn's harness looks wrong, the UA actually seen at the gateway
+    /// settles it — usage_logs shows the UA at sub2api, which can differ
+    /// from what reached ATG).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_ua: String,
     /// Same-strength identification conflicts (CC header + codex body etc.)
     /// — recorded as metadata, never force-disambiguated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
