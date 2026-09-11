@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+### 客户端断开处理策略开关（drain switch，v0.3.6 特性）
+
+per-upstream 配置：客户端中途断开时对上游连接的处理策略。
+
+- **`ATG_DRAIN_ON_CANCEL`（默认关）**：
+  - **开**（sub2api 类上游——断开也可能照常计费）：继续消费上游流到自然结束——trace 记完整 final_output + 完整 usage；turn 记 `cancelled=true`。
+  - **关（默认）**：断开即中止上游请求，不白烧 token；已交付部分照记；turn 记 `cancelled=true`。
+- **`ATG_DRAIN_TIMEOUT_SECS`（默认 60）**：drain 窗口。上游流超时未结束则放弃，按已捕获部分记录并打 `drain_timed_out` 标记，防任务悬挂。
+- **分类衔接（v0.3.5）**：`cancelled` 位两种模式都打（客户端断开事实）；cancelled turn 非 fail 口径、非 OTLP ERROR level（导出面钉子断言）。
+- **内存策略（丢弃转发但不无界缓冲）**：drain 期间停止向下游转发；原始字节捕获到捕获上限为止（溢出如实标记）；SSE 语义内容走增量解析（chunk 边界安全，逐字节切分与整包解析等价钉子），final_output/usage 不受捕获上限截断。
+- **机制说明（RustGate 复审后定稿）**：Pingora 响应泵把下游存活与上游消费结构性耦合（下游第一次读写失败即 try_join! 取消上游、丢弃连接），ProxyHttp 钩子内无法实现断开后 drain。**开关关闭（默认）= 全部请求保持 Pingora 泵，零回归**；**开关开启**才把 LLM API 请求（非 WebSocket 升级）交由网关自有 relay 转发（request_filter 短路）：reqwest 上游客户端（`.no_proxy()`——环境代理不劫持数据路径；`ATG_SNI` 在 https 上游时以 resolve 把 SNI 名钉到真实地址，裸 IP https 握手保持可用）+ pingora 下游 session 写出（h1/h2 分帧保持、hop-by-hop 头剥离、缺 framing 头时按泵规则补 chunked）。WS 升级与未知路径在两种模式下都保持 Pingora 泵不变。上游侧断连/半 body 仍归 ProxyError；响应完整交付后的拆除仍归 IdleNoise。
+- **已知限制**：①HTTP trailers 不经 relay 转发（reqwest bytes_stream 无 trailer API；LLM API 响应无 trailers，h1 泵本就不转发）；②请求上传在连上游前全量缓冲（LLM 请求量级成本可忽略）；③断开后存活探针复用泵原语 read_body_or_idle(true)——其全部结局（FIN/RST/body 后数据到达）在泵语义里都是会话拆除，relay 同口径记 cancelled。relay 吞吐 smoke 已补（6MB SSE live 转发 + 全量捕获钉子）。
+
 ### 计划中（台账，未排期）
 
 - **bench 进 CI**：v0.3.0 已做（ci.yml release 模式真执行，门 264KB ≤700µs）

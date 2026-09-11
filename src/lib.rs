@@ -5,10 +5,13 @@ pub mod trace;
 pub mod gateway_app {
     use async_trait::async_trait;
     use bytes::Bytes;
+    use futures_util::StreamExt;
     use pingora::http::ResponseHeader;
     use pingora::prelude::*;
     use pingora::proxy::{http_proxy, FailToProxy, ProxyHttp, Session};
     use pingora::upstreams::peer::HttpPeer;
+    use std::net::ToSocketAddrs;
+    use std::time::Duration;
 
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
@@ -77,6 +80,26 @@ pub mod gateway_app {
 
     pub struct Gateway {
         pub upstream: String,
+        /// Precomputed relay URL base (scheme://url-host:port). On https
+        /// with ATG_SNI the URL host IS the SNI name (the client's
+        /// resolve() entry pins it to the real address — BLOCK-A).
+        pub upstream_base: String,
+        /// Upstream HTTP client for the owned relay (v0.3.6): pingora's
+        /// response pump structurally aborts the upstream the moment the
+        /// downstream dies, which makes a client-disconnect policy
+        /// (drain switch) unenforceable inside the ProxyHttp hooks — so
+        /// LLM API requests are relayed by the gateway itself instead.
+        pub http: reqwest::Client,
+        /// ATG_DRAIN_ON_CANCEL (default false): after the client
+        /// disconnects mid-response, keep consuming the upstream stream to
+        /// its natural end (sub2api-class upstreams bill the completion
+        /// regardless — the trace gets the full content + usage). false =
+        /// abort the upstream immediately (no wasted tokens).
+        pub drain_on_cancel: bool,
+        /// ATG_DRAIN_TIMEOUT_SECS (default 60): the drain window; an
+        /// upstream stream that has not finished within it is abandoned
+        /// (drain_timed_out marker, partial content recorded).
+        pub drain_timeout: Duration,
         pub store: TraceStore,
         pub stitcher: crate::trace::prefix::PrefixStitcher,
         pub cap: crate::trace::capture::CaptureCap,
@@ -100,6 +123,281 @@ pub mod gateway_app {
         fn push_record(&self, record: atg_model::TurnRecord) {
             self.store.push(record.clone());
             self.exporter.submit(&record);
+        }
+
+        /// Enter the drain window (v0.3.6): seed the incremental SSE
+        /// accumulator with everything captured while the client was alive
+        /// — drain final_output/usage must include the delivered prefix,
+        /// not just post-death bytes — and return the drain deadline.
+        /// Idempotent: the accumulator is seeded once.
+        fn begin_drain(
+            &self,
+            ctx: &mut Ctx,
+            d: &'static atg_protocol::ProtocolDescriptor,
+        ) -> tokio::time::Instant {
+            if ctx.drain_acc.is_none() && unpack::looks_like_sse(&ctx.resp_content_type) {
+                let mut acc = crate::engine::SseAccum::default();
+                crate::engine::drain_feed(&mut acc, d, &mut ctx.drain_tail, &ctx.resp_buf);
+                ctx.drain_acc = Some(acc);
+            }
+            tokio::time::Instant::now() + self.drain_timeout
+        }
+
+        /// Owned request relay (v0.3.6): forwards one LLM API request to
+        /// the upstream and streams the response back, owning both
+        /// directions so the client-disconnect policy is enforceable.
+        ///
+        /// Downstream liveness: a failed downstream write marks the client
+        /// dead. With drain_on_cancel the upstream stream keeps being
+        /// consumed to its natural end (within `drain_timeout`); otherwise
+        /// the relay returns immediately and the upstream response object
+        /// is dropped, closing the connection. Forwarding stops at client
+        /// death in both modes (丢弃转发); drain capture is bounded — raw
+        /// bytes stop at the capture cap while the incremental SSE
+        /// accumulator keeps final_output/usage complete (不无界缓冲).
+        ///
+        /// The turn record itself is finalized by logging() from ctx, the
+        /// same pipeline as the pingora-pumped paths.
+        async fn relay(
+            &self,
+            session: &mut Session,
+            ctx: &mut Ctx,
+            d: &'static atg_protocol::ProtocolDescriptor,
+        ) {
+            // --- request side ---
+            // NIT ② trade-off (RustGate §H): the request body is fully
+            // buffered before the upstream call. Streaming the upload would
+            // couple the upstream request start to downstream read pacing
+            // and complicate death handling mid-send; at LLM request sizes
+            // (JSON prompts, bounded by the capture cap at record time) the
+            // buffer cost is negligible. Revisit only if large uploads
+            // become a traced workload.
+            loop {
+                match session.downstream_session.read_request_body().await {
+                    Ok(Some(b)) => ctx.req_buf.extend_from_slice(&b),
+                    Ok(None) => break,
+                    Err(e) => {
+                        // Client vanished mid-upload: v0.3.5 parity — the
+                        // request never became a turn, so no record (the
+                        // relay never ran; logging() records nothing).
+                        let path = session.req_header().uri.path();
+                        eprintln!("ATG: client aborted during request upload (path={path}): {e}");
+                        ctx.client_dead = true;
+                        return;
+                    }
+                }
+            }
+            let req_head = session.req_header();
+            let method = req_head.method.clone();
+            let path_and_query = req_head
+                .uri
+                .path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_else(|| req_head.uri.path().to_string());
+            // The URL base carries the SNI name on https (BLOCK-A: the
+            // client's resolve() entry pins it to the real address); on
+            // http it is the upstream host and this Host header carries the
+            // ATG_SNI override — pump parity.
+            let url = format!("{}{}", self.upstream_base, path_and_query);
+            let host = std::env::var("ATG_SNI").ok().filter(|s| !s.is_empty());
+            let mut out = self.http.request(method, &url);
+            if let Some(sni_host) = host {
+                out = out.header("host", sni_host);
+            }
+            for (name, value) in req_head.headers.iter() {
+                if is_hop_by_hop(name) || name == http::header::CONTENT_LENGTH {
+                    continue;
+                }
+                out = out.header(name, value);
+            }
+            let sent = out.body(Bytes::copy_from_slice(&ctx.req_buf)).send().await;
+            let resp = match sent {
+                Ok(r) => r,
+                Err(e) => {
+                    // fail_to_connect parity: the upstream was never
+                    // reached — 502 to the client, errored minimal record.
+                    let path = session.req_header().uri.path();
+                    eprintln!("GATEWAY relay connect failed: path={path} error={e}");
+                    ctx.relay_error = Some(format!("proxy_error: connect: {e}"));
+                    session.respond_error(502).await.ok();
+                    ctx.relay_done = true;
+                    return;
+                }
+            };
+
+            // --- response head ---
+            ctx.resp_status = resp.status().as_u16();
+            if let Some(v) = resp.headers().get(http::header::CONTENT_TYPE) {
+                ctx.resp_content_type = v.to_str().unwrap_or("").to_string();
+            }
+            let mut head = match ResponseHeader::build(ctx.resp_status, None) {
+                Ok(h) => h,
+                Err(e) => {
+                    ctx.relay_error = Some(format!("proxy_error: response head: {e}"));
+                    ctx.relay_done = true;
+                    return;
+                }
+            };
+            let has_content_length = resp.headers().contains_key(http::header::CONTENT_LENGTH);
+            // NIT ① (RustGate §H): HTTP trailers are not relayed —
+            // reqwest's bytes_stream exposes data frames only, no trailer
+            // API. LLM API responses carry no trailers (the pump already
+            // skips them for h1 downstream); recorded here as a known
+            // limitation, not an oversight.
+            for (name, value) in resp.headers().iter() {
+                if is_hop_by_hop(name) {
+                    continue;
+                }
+                let _ = head.insert_header(name, value);
+            }
+            let no_body_status = matches!(ctx.resp_status, 204 | 304)
+                || session.req_header().method == http::Method::HEAD;
+            // Framing parity with pingora's h1 pump: a body response with
+            // neither framing header would hang the downstream writer —
+            // declare chunked (h2 downstream frames by DATA messages; no
+            // TE there).
+            if !has_content_length && !no_body_status && !session.downstream_session.is_http2() {
+                let _ = head.insert_header("transfer-encoding", "chunked");
+            }
+            let head_end = no_body_status;
+            if let Err(e) = session
+                .write_response_header(Box::new(head), head_end)
+                .await
+            {
+                // Client died before the headers landed; the drain
+                // decision applies from here on.
+                let path = session.req_header().uri.path();
+                eprintln!("ATG: client cancelled mid-turn (path={path}) — head write failed: {e}");
+                ctx.client_dead = true;
+                if !self.drain_on_cancel {
+                    ctx.relay_done = true;
+                    return;
+                }
+            }
+
+            // --- response body pump ---
+            let mut stream = resp.bytes_stream();
+            let mut drain_deadline: Option<tokio::time::Instant> = None;
+            let mut upstream_failed = false;
+            let mut end_seen = no_body_status;
+            while !end_seen {
+                // The pump watches BOTH sides: upstream chunks and (while
+                // the client is believed alive) the downstream read half —
+                // `idle()` errors the moment the client disconnects, even
+                // when the upstream is silent and no write would notice.
+                // This is the same liveness watch pingora's pump runs.
+                let next = if ctx.client_dead {
+                    // Draining: the upstream read is bounded by the drain
+                    // deadline — a stream that will not finish inside the
+                    // window is abandoned.
+                    match tokio::time::timeout_at(
+                        drain_deadline.unwrap_or_else(tokio::time::Instant::now),
+                        stream.next(),
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(_elapsed) => {
+                            ctx.drain_timed_out = true;
+                            break;
+                        }
+                    }
+                } else {
+                    tokio::select! {
+                        chunk = stream.next() => chunk,
+                        probe = session.downstream_session.read_body_or_idle(true) => {
+                            match probe {
+                                // EOF/RST from the client mid-response:
+                                // the disconnect fact, caught even when
+                                // the upstream is silent (no write is
+                                // pending to notice it).
+                                Err(_) => {
+                                    let path = session.req_header().uri.path();
+                                    eprintln!(
+                                        "ATG: client cancelled mid-turn (path={path}) — downstream gone"
+                                    );
+                                    ctx.client_dead = true;
+                                    if !self.drain_on_cancel {
+                                        break; // abort: dropping `resp` closes the upstream
+                                    }
+                                    drain_deadline = Some(self.begin_drain(ctx, d));
+                                    continue;
+                                }
+                                // NIT ④ (RustGate §H, pingora source): the
+                                // probe NEVER returns Ok in this mode —
+                                // idle() maps every outcome to a session
+                                // teardown error: clean FIN = ConnectionClosed,
+                                // RST/read error = ReadError ("during HTTP
+                                // idle state"), bytes arriving after the body
+                                // ended = ConnectError. The pump errors the
+                                // session on all three (its downstream arm);
+                                // this arm is a defensive keep-alive only.
+                                Ok(_) => continue,
+                            }
+                        }
+                    }
+                };
+                let Some(chunk) = next else {
+                    end_seen = true;
+                    break;
+                };
+                let bytes = match chunk {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // Upstream interrupted mid-stream: ProxyError class
+                        // (v0.3.5 taxonomy) — the turn is errored, the
+                        // downstream connection is left truncated.
+                        ctx.relay_error = Some(format!("proxy_error: upstream read: {e}"));
+                        upstream_failed = true;
+                        break;
+                    }
+                };
+                if ctx.first_output_ns.is_none() && !bytes.is_empty() {
+                    ctx.first_output_ns = Some(now_ns());
+                }
+                if !ctx.client_dead {
+                    ctx.resp_buf.extend_from_slice(&bytes);
+                    if let Err(e) = session.write_response_body(Some(bytes), false).await {
+                        let path = session.req_header().uri.path();
+                        eprintln!(
+                            "ATG: client cancelled mid-turn (path={path}) — downstream write failed: {e}"
+                        );
+                        ctx.client_dead = true;
+                        if !self.drain_on_cancel {
+                            break; // abort: dropping `resp` closes the upstream
+                        }
+                        drain_deadline = Some(self.begin_drain(ctx, d));
+                    }
+                } else if self.drain_on_cancel {
+                    // Draining: forward nothing, capture bounded, parse
+                    // incrementally so final_output/usage survive the cap.
+                    let cap = self.cap.max_bytes();
+                    let room = cap.saturating_sub(ctx.resp_buf.len());
+                    let take = room.min(bytes.len());
+                    ctx.resp_buf.extend_from_slice(&bytes[..take]);
+                    ctx.drain_overflow += (bytes.len() - take) as u64;
+                    if ctx.drain_acc.is_none() && unpack::looks_like_sse(&ctx.resp_content_type) {
+                        ctx.drain_acc = Some(crate::engine::SseAccum::default());
+                    }
+                    if let Some(acc) = ctx.drain_acc.as_mut() {
+                        crate::engine::drain_feed(acc, d, &mut ctx.drain_tail, &bytes);
+                    }
+                } else {
+                    // Drain disabled with a dead client is unreachable
+                    // (the live branch breaks on client death) — defensive.
+                    break;
+                }
+            }
+            if end_seen && !upstream_failed {
+                ctx.response_complete = true;
+            }
+            // Response end. The terminating write failing after full
+            // delivery is post-response teardown (v0.3.5 IdleNoise class):
+            // not a cancellation — the turn stays clean.
+            if !ctx.client_dead && !upstream_failed {
+                let _ = session.write_response_body(None, true).await;
+            }
+            ctx.relay_done = true;
         }
     }
 
@@ -149,6 +447,94 @@ pub mod gateway_app {
             .unwrap_or(0)
     }
 
+    /// Hop-by-hop headers (RFC 9110 §7.6.1) never forwarded in either
+    /// direction by the owned relay; framing headers are re-derived per
+    /// hop. Content-length is handled separately (request side: the client
+    /// re-frames; response side: forwarded verbatim when present).
+    fn is_hop_by_hop(name: &http::HeaderName) -> bool {
+        matches!(
+            name.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "transfer-encoding"
+                | "te"
+                | "trailer"
+                | "upgrade"
+                | "host"
+                | "proxy-authorization"
+                | "proxy-authenticate"
+        )
+    }
+
+    /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
+    /// defaults to http with the port present; scheme prefixes override; a
+    /// missing port defaults to 80/443 by scheme. An optional base path is
+    /// preserved (leading '/', trailing slashes trimmed) — the relay's
+    /// earlier construction only trimmed trailing slashes, and base-path
+    /// upstreams must keep resolving to the same URLs.
+    fn parse_upstream(upstream: &str) -> (String, String, u16, String) {
+        let (scheme, rest) = match upstream.split_once("://") {
+            Some((s, r)) => (s.to_ascii_lowercase(), r),
+            None => ("http".to_string(), upstream),
+        };
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], rest[i..].trim_end_matches('/').to_string()),
+            None => (rest, String::new()),
+        };
+        let default_port = if scheme == "https" { 443 } else { 80 };
+        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+            // Bracketed IPv6: [::1] or [::1]:8443.
+            match v6.split_once(']') {
+                Some((h, tail)) => (
+                    h,
+                    tail.strip_prefix(':')
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(default_port),
+                ),
+                None => (v6, default_port),
+            }
+        } else {
+            match authority.rsplit_once(':') {
+                Some((h, p))
+                    if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    (h, p.parse::<u16>().unwrap_or(default_port))
+                }
+                _ => (authority, default_port),
+            }
+        };
+        (scheme, host.to_string(), port, path)
+    }
+
+    /// BLOCK-A (RustGate §H): the relay's TLS SNI is the URL host — reqwest
+    /// has no SNI override. With ATG_SNI set on an https upstream, the
+    /// relay's URLs carry the SNI NAME and this entry pins that name to the
+    /// real upstream address (connect to the IP, SNI = the override) —
+    /// exactly what upstream_peer's HttpPeer did for the pump. Returns the
+    /// (name, sockaddr) for ClientBuilder::resolve.
+    fn sni_resolve_entry(
+        upstream: &str,
+        sni: Option<&str>,
+    ) -> Option<(String, std::net::SocketAddr)> {
+        let (scheme, host, port, _) = parse_upstream(upstream);
+        if scheme != "https" {
+            return None;
+        }
+        let sni_host = sni?;
+        if sni_host == host {
+            return None; // normal DNS, no pinning needed
+        }
+        // Bracketed form for IPv6 literals — to_socket_addrs requires it.
+        let hostport = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        let addr = hostport.to_socket_addrs().ok()?.next()?;
+        Some((sni_host.to_string(), addr))
+    }
+
     pub struct Ctx {
         pub req_buf: Vec<u8>,
         pub resp_buf: Vec<u8>,
@@ -173,6 +559,29 @@ pub mod gateway_app {
         /// HEADERS arrived; a mid-body disconnect must not classify as
         /// idle (BLOCK: truncated responses would launder into clean turns).
         pub response_complete: bool,
+        /// Owned-relay state (v0.3.6). The client disconnected mid-turn —
+        /// detected by the relay on a failed downstream write (or aborted
+        /// request upload). The turn records cancelled=true, never an error.
+        pub client_dead: bool,
+        /// The relay ran to completion (one way or another) — lets logging
+        /// distinguish a drained turn from an aborted upload.
+        pub relay_done: bool,
+        /// Drain window elapsed before the upstream stream finished.
+        pub drain_timed_out: bool,
+        /// Incremental SSE parse state during drain: the accumulator holds
+        /// the COMPLETE semantic content (text/usage/tools) even when the
+        /// raw capture hits its cap; `drain_tail` retains the raw bytes of
+        /// the frame currently being received. Bounded memory, unclipped
+        /// final_output/usage (spec: 丢弃转发但不无界缓冲).
+        pub drain_acc: Option<crate::engine::SseAccum>,
+        pub drain_tail: Vec<u8>,
+        /// Raw drain bytes dropped beyond the capture cap (for the honest
+        /// truncation marker at record time).
+        pub drain_overflow: u64,
+        /// Proxy/upstream failure observed by the relay (marker text for
+        /// the record's error field; relayed requests carry no pingora
+        /// session error for logging() to classify).
+        pub relay_error: Option<String>,
     }
 
     #[async_trait]
@@ -192,6 +601,13 @@ pub mod gateway_app {
                 first_output_ns: None,
                 resp_status: 0,
                 response_complete: false,
+                client_dead: false,
+                relay_done: false,
+                drain_timed_out: false,
+                drain_acc: None,
+                drain_tail: Vec::new(),
+                drain_overflow: 0,
+                relay_error: None,
             }
         }
 
@@ -237,11 +653,7 @@ pub mod gateway_app {
         }
 
         // Control endpoint: dump collected turn records as JSON.
-        async fn request_filter(
-            &self,
-            session: &mut Session,
-            _ctx: &mut Self::CTX,
-        ) -> Result<bool> {
+        async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
             if session.req_header().uri.path() == "/__atg/records" {
                 let records = self.store.snapshot();
                 let body = serde_json::to_vec(&records).unwrap_or_default();
@@ -288,6 +700,29 @@ pub mod gateway_app {
                     .write_response_body(Some(Bytes::from(body)), true)
                     .await?;
                 return Ok(true);
+            }
+            // Owned relay (v0.3.6, BLOCK-C gated): ONLY drain_on_cancel=true
+            // routes LLM API requests through the gateway's own relay — the
+            // pump couples downstream liveness to upstream consumption
+            // (first failed downstream read/write aborts the session and
+            // drops the upstream connection), which makes the disconnect
+            // policy unenforceable in the ProxyHttp hooks. The default
+            // (false) keeps the pingora pump for every request — zero
+            // regression; its abort-on-disconnect IS the drain-off policy.
+            // WebSocket upgrades and unknown paths keep the pump in both
+            // modes.
+            let path = session.req_header().uri.path();
+            let is_ws_upgrade = session
+                .req_header()
+                .headers
+                .get(http::header::UPGRADE)
+                .is_some()
+                || session.req_header().method == http::Method::CONNECT;
+            if self.drain_on_cancel && !is_ws_upgrade {
+                if let Some(matched) = atg_protocol::ProtocolDescriptor::detect_path(path) {
+                    self.relay(session, ctx, matched.descriptor).await;
+                    return Ok(true);
+                }
             }
             Ok(false)
         }
@@ -392,8 +827,11 @@ pub mod gateway_app {
             // classify_session_error): idle noise marks nothing; a client
             // cancellation marks cancelled=true (no error — partial
             // content records normally, reconciliation material);
-            // everything else keeps the proxy_error marker.
-            let mut client_cancelled = false;
+            // everything else keeps the proxy_error marker. The owned
+            // relay sets client_dead directly (a failed downstream write)
+            // and carries its own proxy_error markers in relay_error —
+            // relayed requests surface here with no pingora session error.
+            let mut client_cancelled = ctx.client_dead;
             let http_error = if let Some(e) = e {
                 let err_text = format!("{e:?}");
                 let downstream_sourced = *e.esource() == pingora::ErrorSource::Downstream;
@@ -416,6 +854,11 @@ pub mod gateway_app {
                     }
                     SessionErrorClass::ProxyError => Some(format!("proxy_error: {err_text}")),
                 }
+            } else if let Some(marker) = ctx.relay_error.clone() {
+                // Relay-owned proxy/upstream failure outranks a bare
+                // status marker (parity: the pump's HttpTask::Failed path
+                // also reports proxy_error, not the status).
+                Some(marker)
             } else if ctx.resp_status >= 400 {
                 Some(format!("http_status: {}", ctx.resp_status))
             } else {
@@ -508,10 +951,35 @@ pub mod gateway_app {
             }
             let raw_request = self.cap.bound(&ctx.req_buf);
             let raw_response = self.cap.bound(&ctx.resp_buf);
+            // Drain truncation marker (v0.3.6): raw drain capture stops at
+            // the cap while the stream itself ran on — the marker reports
+            // the TRUE original size (captured head + dropped overflow).
+            let raw_response = if ctx.drain_overflow > 0 {
+                format!(
+                    "{raw_response}[truncated:original_bytes={},captured_bytes={}]",
+                    ctx.resp_buf.len() + ctx.drain_overflow as usize,
+                    ctx.resp_buf.len()
+                )
+            } else {
+                raw_response
+            };
             if unpack::looks_like_sse(&ctx.resp_content_type) {
-                // One traversal of resp_buf fills text/usage/tool_calls/error.
+                // One traversal fills text/usage/tool_calls/error. A
+                // drained turn (v0.3.6) replays its incrementally-fed
+                // accumulator instead — complete final_output/usage even
+                // when the raw capture hit the cap.
                 let (final_output, usage, tool_calls, error, frame_errors) =
-                    unpack::reassemble_sse(protocol, &ctx.resp_buf);
+                    match ctx.drain_acc.take() {
+                        Some(acc) => {
+                            let out = crate::engine::drain_finish(
+                                acc,
+                                matched.descriptor,
+                                &mut ctx.drain_tail,
+                            );
+                            (out.text, out.usage, out.tools, out.error, out.frame_errors)
+                        }
+                        None => unpack::reassemble_sse(protocol, &ctx.resp_buf),
+                    };
                 if frame_errors > 0 {
                     let total = self.failed_frames.fetch_add(
                         u64::from(frame_errors),
@@ -560,6 +1028,7 @@ pub mod gateway_app {
                     completion_start_ns: ctx.first_output_ns,
                     error: error.or(http_error),
                     cancelled: client_cancelled,
+                    drain_timed_out: ctx.drain_timed_out,
                 });
                 return;
             }
@@ -578,6 +1047,7 @@ pub mod gateway_app {
                     record.completion_start_ns = Some(ctx.start_ns);
                     record.error = record.error.take().or(http_error);
                     record.cancelled = client_cancelled;
+                    record.drain_timed_out = ctx.drain_timed_out;
                     record.raw_request = raw_request;
                     record.raw_response = raw_response;
                     ctx.end_ns = now_ns();
@@ -585,11 +1055,14 @@ pub mod gateway_app {
                     record.end_ns = ctx.end_ns;
                     self.push_record(record);
                 }
-                None if http_error.is_some() => {
+                None if http_error.is_some() || (ctx.relay_done && client_cancelled) => {
                     // NIT-B: a proxy-level failure (no upstream response,
                     // or an unparseable error body) previously produced NO
                     // record at all — the errored turn vanished. Emit a
-                    // minimal record so the failure is observable.
+                    // minimal record so the failure is observable. A
+                    // relayed turn whose non-SSE body never parsed (drain
+                    // truncation beyond the cap) is covered by the same
+                    // arm — as a cancelled turn, not a failure.
                     ctx.end_ns = now_ns();
                     self.push_record(atg_model::TurnRecord {
                         protocol: protocol.to_string(),
@@ -608,6 +1081,8 @@ pub mod gateway_app {
                         error: http_error,
                         start_ns: ctx.start_ns,
                         end_ns: ctx.end_ns,
+                        cancelled: client_cancelled,
+                        drain_timed_out: ctx.drain_timed_out,
                         model_name: tf
                             .as_ref()
                             .map(|f| f.model_name.clone())
@@ -687,10 +1162,61 @@ pub mod gateway_app {
     /// Start the gateway on `listen`, forwarding to `upstream`. Blocks.
     /// `upstream` accepts "host:port", "http://host:port" or "https://host:port".
     pub fn run(listen: &str, upstream: &str) {
+        // Drain switch (v0.3.6): per-upstream client-disconnect policy.
+        // ATG_DRAIN_ON_CANCEL: truthy (1/true/yes/on) = keep consuming the
+        // upstream stream after the client disconnects; default = abort.
+        let drain_on_cancel = std::env::var("ATG_DRAIN_ON_CANCEL")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        // ATG_DRAIN_TIMEOUT_SECS: drain window (default 60s).
+        let drain_timeout = std::env::var("ATG_DRAIN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(60);
+        let sni = std::env::var("ATG_SNI").ok().filter(|s| !s.is_empty());
+        // BLOCK-A (RustGate §H): https bare-IP upstreams — URLs carry the
+        // SNI name, the resolve entry pins it to the real address.
+        let upstream_base = match sni_resolve_entry(upstream, sni.as_deref()) {
+            Some((name, _addr)) => {
+                let (scheme, _, port, path) = parse_upstream(upstream);
+                format!("{scheme}://{name}:{port}{path}")
+            }
+            None => {
+                let (scheme, host, port, path) = parse_upstream(upstream);
+                format!("{scheme}://{host}:{port}{path}")
+            }
+        };
+        let mut builder = reqwest::Client::builder()
+            // BLOCK-B (RustGate §H): ambient HTTPS_PROXY/HTTP_PROXY env vars
+            // would otherwise silently hijack the LLM data path — same
+            // reasoning as the exporter's client (export.rs, explicit
+            // no_proxy precedent).
+            .no_proxy();
+        if let Some((name, addr)) = sni_resolve_entry(upstream, sni.as_deref()) {
+            builder = builder.resolve(&name, addr);
+        }
+        let http = match builder.build() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("agent-trace-gateway: upstream HTTP client init failed: {e}");
+                std::process::exit(2);
+            }
+        };
         let mut server = Server::new(Some(Opt::default())).unwrap();
         server.bootstrap();
         let gateway = Gateway {
             upstream: upstream.to_string(),
+            upstream_base,
+            http,
+            drain_on_cancel,
+            drain_timeout: Duration::from_secs(drain_timeout),
             failed_frames: std::sync::atomic::AtomicU64::new(0),
             turns_total: std::sync::atomic::AtomicU64::new(0),
             loose_path_matches: std::sync::atomic::AtomicU64::new(0),
@@ -714,5 +1240,90 @@ pub mod gateway_app {
         svc.add_tcp(listen);
         server.add_service(svc);
         server.run_forever();
+    }
+
+    #[cfg(test)]
+    mod upstream_config_tests {
+        use super::*;
+
+        /// BLOCK-A config pins (RustGate §H): ATG_UPSTREAM parsing and the
+        /// ATG_SNI resolve entry — the relay connects to the pinned
+        /// address while presenting the SNI name.
+        #[test]
+        fn parse_upstream_forms() {
+            assert_eq!(
+                parse_upstream("1.2.3.4:8443"),
+                (
+                    "http".to_string(),
+                    "1.2.3.4".to_string(),
+                    8443,
+                    String::new()
+                )
+            );
+            assert_eq!(
+                parse_upstream("https://api.example.com"),
+                (
+                    "https".to_string(),
+                    "api.example.com".to_string(),
+                    443,
+                    String::new()
+                )
+            );
+            assert_eq!(
+                parse_upstream("http://127.0.0.1:17000"),
+                (
+                    "http".to_string(),
+                    "127.0.0.1".to_string(),
+                    17000,
+                    String::new()
+                )
+            );
+            // Base path + trailing slash survive (pre-relay parity).
+            assert_eq!(
+                parse_upstream("https://gw.example.com/llm"),
+                (
+                    "https".to_string(),
+                    "gw.example.com".to_string(),
+                    443,
+                    "/llm".to_string()
+                )
+            );
+            assert_eq!(
+                parse_upstream("http://127.0.0.1:17000/"),
+                (
+                    "http".to_string(),
+                    "127.0.0.1".to_string(),
+                    17000,
+                    String::new()
+                )
+            );
+            // Bracketed IPv6 with port.
+            assert_eq!(
+                parse_upstream("http://[::1]:8443"),
+                ("http".to_string(), "::1".to_string(), 8443, String::new())
+            );
+        }
+
+        #[test]
+        fn sni_resolve_entry_pins_bare_ip_https() {
+            let entry = sni_resolve_entry("https://1.2.3.4:8443", Some("api.example.com"))
+                .expect("bare-IP https + ATG_SNI must pin");
+            assert_eq!(entry.0, "api.example.com");
+            assert_eq!(
+                entry.1.to_string(),
+                "1.2.3.4:8443",
+                "the SNI name connects to the real upstream address"
+            );
+        }
+
+        #[test]
+        fn sni_resolve_entry_skips_non_pin_cases() {
+            // SNI name == upstream host: normal DNS applies.
+            assert!(sni_resolve_entry("api.example.com:443", Some("api.example.com")).is_none());
+            // No ATG_SNI: nothing to override.
+            assert!(sni_resolve_entry("1.2.3.4:443", None).is_none());
+            // Plain http: no TLS SNI involved.
+            assert!(sni_resolve_entry("http://1.2.3.4:8443", Some("api.example.com")).is_none());
+        }
     }
 }

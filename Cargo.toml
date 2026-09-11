@@ -14,6 +14,7 @@ atg-harness = { path = "crates/atg-harness" }
 async-trait = "0.1"
 bytes = "1"
 http = "1"
+futures-util = { version = "0.3", default-features = false }
 pingora = { version = "0.8", features = ["proxy", "boringssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 parking_lot = "0.12.5"
 hex = "0.4.3"
-reqwest = "0.13.4"
+reqwest = { version = "0.13.4", features = ["stream"] }
 
 [dev-dependencies]
 hyper = { version = "1", features = ["full"] }

@@ -686,6 +686,36 @@ mod tests {
         );
     }
 
+    /// v0.3.6 (drain switch): a cancelled turn — including one whose drain
+    /// window expired — is reconciliation material, NOT a failure: no
+    /// OTLP ERROR status (Langfuse level stays non-ERROR), and the
+    /// cancelled fact rides trace metadata only.
+    #[test]
+    fn cancelled_and_drain_timed_out_turns_are_not_errors() {
+        let mut cancelled = record("sess-cancel");
+        cancelled.cancelled = true;
+        let mut drain_to = record("sess-drain-to");
+        drain_to.cancelled = true;
+        drain_to.drain_timed_out = true;
+        for (label, r) in [("cancelled", cancelled), ("drain-timed-out", drain_to)] {
+            let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+            let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .unwrap();
+            let s = &spans[0];
+            assert!(
+                s.get("status").is_none(),
+                "{label}: cancelled turns must not carry an error status: {s}"
+            );
+            assert_eq!(
+                span_attr(s, "langfuse.trace.metadata.cancelled")
+                    .and_then(|v| v["stringValue"].as_str()),
+                Some("true"),
+                "{label}: the cancellation fact must be metadata: {s}"
+            );
+        }
+    }
+
     /// F2: harness attribution rides trace.tags + trace.metadata on the
     /// root generation; enrich pairs land as
     /// langfuse.trace.metadata.<key>; the borrowed dialect rides its own

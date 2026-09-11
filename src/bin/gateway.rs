@@ -2,7 +2,10 @@
 //! Env: ATG_LISTEN (default 127.0.0.1:6180), ATG_UPSTREAM (required),
 //! ATG_OTLP_ENDPOINT (optional), ATG_CAPTURE_MAX_BYTES, ATG_STITCH_CAPACITY,
 //! ATG_STITCH_TTL_MS, ATG_APIKEY_SALT (API-key fingerprint salt; default
-//! "atg-apikey-fp-salt-v1").
+//! "atg-apikey-fp-salt-v1"), ATG_SNI, ATG_DRAIN_ON_CANCEL (v0.3.6: keep
+//! consuming the upstream stream after the client disconnects — for
+//! upstreams that bill the completion regardless; default off = abort),
+//! ATG_DRAIN_TIMEOUT_SECS (drain window; default 60).
 fn main() {
     // `atg key-fp <key>`: recompute the trace fingerprint of an API key —
     // EXACTLY the runtime code path (ops verifiable recomputation: run it,

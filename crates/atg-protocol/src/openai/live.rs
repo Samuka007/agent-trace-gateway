@@ -261,6 +261,7 @@ impl WsTurnState {
             client_ua: String::new(),
             api_key_fp: String::new(),
             cancelled: false,
+            drain_timed_out: false,
             harness_candidates: Vec::new(),
             harness_anomaly: false,
             harness_enrich: Vec::new(),
