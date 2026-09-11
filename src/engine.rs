@@ -218,33 +218,45 @@ pub fn apply_sse_rule(
 pub fn stream_response(d: &ProtocolDescriptor, body: &[u8]) -> SseOutcome {
     let mut acc = SseAccum::default();
     for data in sse_data_frames(body) {
-        // Protocol-legal non-payload frames — skipped, never counted as
-        // errors: `:`-comment keep-alives produce empty payloads (the
-        // comment lines themselves never yield a data frame), and
-        // `data: [DONE]` is the OpenAI chat termination sentinel.
-        let trimmed = data.trim();
-        if trimmed.is_empty() || trimmed == "[DONE]" {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(data.as_ref()) else {
-            acc.frame_errors += 1;
-            continue;
-        };
-        // slop#6: terminal error frames mark the turn errored instead of
-        // recording a silently-successful half turn.
-        if let Some(err_text) = error_marker(d.name, &v) {
-            acc.error = Some(err_text);
-        }
-        let event = v["type"].as_str();
-        apply_sse_rule(&mut acc, d, event, &v);
-        // Usage harvest is FRAME-driven (descriptor usage_frames), never
-        // rule-gated: anthropic carries no Usage SSE action (its usage
-        // rides message_start/message_delta events) — gating on an action
-        // silently dropped streaming anthropic usage pre-v0.3.0.
-        if let Some(u) = atg_protocol::usage::usage_from_sse_frame(d, &v) {
-            atg_model::merge_usage(&mut acc.usage, u);
-        }
+        feed_frame(&mut acc, d, &data);
     }
+    finish_accum(acc, d)
+}
+
+/// Parse one SSE data frame into the accumulator — the exact per-frame path
+/// stream_response has always used (parse → error marker → rules → usage).
+fn feed_frame(acc: &mut SseAccum, d: &ProtocolDescriptor, data: &str) {
+    // Protocol-legal non-payload frames — skipped, never counted as
+    // errors: `:`-comment keep-alives produce empty payloads (the
+    // comment lines themselves never yield a data frame), and
+    // `data: [DONE]` is the OpenAI chat termination sentinel.
+    let trimmed = data.trim();
+    if trimmed.is_empty() || trimmed == "[DONE]" {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+        acc.frame_errors += 1;
+        return;
+    };
+    // slop#6: terminal error frames mark the turn errored instead of
+    // recording a silently-successful half turn.
+    if let Some(err_text) = error_marker(d.name, &v) {
+        acc.error = Some(err_text);
+    }
+    let event = v["type"].as_str();
+    apply_sse_rule(acc, d, event, &v);
+    // Usage harvest is FRAME-driven (descriptor usage_frames), never
+    // rule-gated: anthropic carries no Usage SSE action (its usage
+    // rides message_start/message_delta events) — gating on an action
+    // silently dropped streaming anthropic usage pre-v0.3.0.
+    if let Some(u) = atg_protocol::usage::usage_from_sse_frame(d, &v) {
+        atg_model::merge_usage(&mut acc.usage, u);
+    }
+}
+
+/// Finish an incrementally-fed accumulator (drain_feed) into the same
+/// outcome shape stream_response returns.
+pub fn finish_accum(mut acc: SseAccum, d: &ProtocolDescriptor) -> SseOutcome {
     let text = std::mem::take(&mut acc.text);
     let usage = acc.usage.take();
     let error = acc.error.take();
@@ -263,6 +275,54 @@ pub fn stream_response(d: &ProtocolDescriptor, body: &[u8]) -> SseOutcome {
         tools,
         frame_errors,
         error,
+    }
+}
+
+/// Incremental drain feed (v0.3.6): append one raw body chunk to `buf` and
+/// parse every COMPLETE SSE frame into `acc` — the identical per-frame path
+/// as stream_response, executed chunk-boundary-safely. `buf` retains the
+/// incomplete tail as RAW BYTES (possibly a half frame or half delimiter):
+/// chunk boundaries may fall mid-frame and mid-multibyte-UTF-8 without
+/// corruption, because the complete prefix always ends on a delimiter — an
+/// ASCII byte, hence a valid UTF-8 boundary — before it is decoded.
+pub fn drain_feed(acc: &mut SseAccum, d: &ProtocolDescriptor, buf: &mut Vec<u8>, chunk: &[u8]) {
+    buf.extend_from_slice(chunk);
+    let Some(cut) = last_frame_boundary(buf) else {
+        return;
+    };
+    let complete = String::from_utf8_lossy(&buf[..cut]).into_owned();
+    buf.drain(..cut);
+    for data in collect_frames(&complete) {
+        feed_frame(acc, d, &data);
+    }
+}
+
+/// Drain end (v0.3.6): flush the retained tail (a trailing frame without a
+/// blank-line terminator is legal SSE) and finish the accumulator — the
+/// outcome equals stream_response on the same concatenated body.
+pub fn drain_finish(mut acc: SseAccum, d: &ProtocolDescriptor, buf: &mut Vec<u8>) -> SseOutcome {
+    let tail = std::mem::take(buf);
+    let text = String::from_utf8_lossy(&tail).into_owned();
+    for data in collect_frames(&text) {
+        feed_frame(&mut acc, d, &data);
+    }
+    finish_accum(acc, d)
+}
+
+/// End offset of the LAST complete SSE frame boundary in `body` — a blank
+/// line, "\n\n" or CRLF-CRLF ("\n\r\n"; the lines' trailing CRs are shed by
+/// the line splitter). None while only a partial frame has arrived.
+fn last_frame_boundary(body: &[u8]) -> Option<usize> {
+    let end_of = |pat: &[u8]| {
+        if body.len() < pat.len() {
+            None
+        } else {
+            body.windows(pat.len()).rposition(|w| w == pat).map(|p| p + pat.len())
+        }
+    };
+    match (end_of(b"\n\r\n"), end_of(b"\n\n")) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (found_a, found_b) => found_a.or(found_b),
     }
 }
 
@@ -412,5 +472,55 @@ mod tests {
             out.tools[0].name
         );
         assert_eq!(out.tools[0].arguments, r#"{"path":"/tmp/x"}"#);
+    }
+
+    /// Drain equivalence (v0.3.6): feeding a stream through drain_feed one
+    /// byte at a time must produce EXACTLY the outcome of a whole-body
+    /// stream_response pass — chunk boundaries may land anywhere, including
+    /// inside frames and inside CRLF delimiters.
+    #[test]
+    fn drain_feed_byte_split_equals_whole_body_parse() {
+        let d = atg_protocol::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        let body = concat!(
+            ": keep-alive\r\n\r\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9}}}\r\n\r\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"he\"}}\n\n",
+            "event: x\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"y\"}}\r\n\r\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\r\n",
+            "data: [DONE]\n\n",
+        );
+        let whole = stream_response(d, body.as_bytes());
+        assert_eq!(whole.text, "hey");
+        let u = whole.usage.expect("usage");
+        assert_eq!(u.input_tokens, Some(9));
+        assert_eq!(u.output_tokens, Some(4));
+
+        // Every single-byte split position must agree with the whole-body pass.
+        for split in 0..body.len() {
+            let mut acc = SseAccum::default();
+            let mut buf = Vec::new();
+            drain_feed(&mut acc, d, &mut buf, &body.as_bytes()[..split]);
+            drain_feed(&mut acc, d, &mut buf, &body.as_bytes()[split..]);
+            let out = drain_finish(acc, d, &mut buf);
+            assert_eq!(out.text, whole.text, "split at {split}");
+            assert_eq!(out.usage, whole.usage, "split at {split}");
+            assert_eq!(out.frame_errors, whole.frame_errors, "split at {split}");
+        }
+
+        // Multibyte text: chunk boundaries may fall inside a code point.
+        let body = concat!(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"привет\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n",
+        );
+        let whole = stream_response(d, body.as_bytes());
+        assert_eq!(whole.text, "привет");
+        for split in 0..body.len() {
+            let mut acc = SseAccum::default();
+            let mut buf = Vec::new();
+            drain_feed(&mut acc, d, &mut buf, &body.as_bytes()[..split]);
+            drain_feed(&mut acc, d, &mut buf, &body.as_bytes()[split..]);
+            let out = drain_finish(acc, d, &mut buf);
+            assert_eq!(out.text, whole.text, "multibyte split at {split}");
+        }
     }
 }
