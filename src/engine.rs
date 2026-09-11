@@ -218,6 +218,14 @@ pub fn apply_sse_rule(
 pub fn stream_response(d: &ProtocolDescriptor, body: &[u8]) -> SseOutcome {
     let mut acc = SseAccum::default();
     for data in sse_data_frames(body) {
+        // Protocol-legal non-payload frames — skipped, never counted as
+        // errors: `:`-comment keep-alives produce empty payloads (the
+        // comment lines themselves never yield a data frame), and
+        // `data: [DONE]` is the OpenAI chat termination sentinel.
+        let trimmed = data.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            continue;
+        }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(data.as_ref()) else {
             acc.frame_errors += 1;
             continue;
@@ -311,6 +319,43 @@ pub fn nonstreaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counter semantics (user probe): protocol-legal non-payload frames
+    /// must not inflate frame_errors — comment keep-alives and the
+    /// OpenAI [DONE] sentinel are stream furniture, not parse failures.
+    #[test]
+    fn comment_and_done_frames_never_count_as_errors() {
+        let d =
+            atg_protocol::ProtocolDescriptor::detect_by_name("openai.chat_completions").unwrap();
+        let body = concat!(
+            ": keep-alive\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+            ": ping\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data:\n\n",
+            "data: [DONE]\n\n",
+        );
+        let out = stream_response(d, body.as_bytes());
+        assert_eq!(out.text, "hello");
+        assert_eq!(
+            out.frame_errors, 0,
+            "comment frames, empty payloads and [DONE] are legal stream furniture"
+        );
+        // The anthropic flavor: same furniture, no [DONE].
+        let d = atg_protocol::ProtocolDescriptor::detect_by_name("anthropic.messages").unwrap();
+        let body = concat!(
+            ": подключение установлено\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"привет\"}}\n\n",
+            ": ping\n\n",
+        );
+        let out = stream_response(d, body.as_bytes());
+        assert_eq!(out.text, "привет");
+        assert_eq!(out.frame_errors, 0);
+        // Genuinely broken frames still count (the counter must stay honest).
+        let body = "data: not-json\n\n";
+        let out = stream_response(d, body.as_bytes());
+        assert_eq!(out.frame_errors, 1);
+    }
 
     /// Pre-v0.3.0 gap pin: streaming anthropic usage rides
     /// message_start/message_delta (split frames, last-wins merge) — the

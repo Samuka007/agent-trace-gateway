@@ -92,7 +92,9 @@ async fn health() -> serde_json::Value {
 }
 
 async fn wait_port(port: u16) {
-    for _ in 0..100 {
+    // Generous window: under parallel test load the spawned gateway can
+    // take well over 10s to bind (observed flake at --jobs 6).
+    for _ in 0..300 {
         if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .is_ok()
