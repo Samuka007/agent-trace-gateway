@@ -20,6 +20,13 @@ jobs:
     # set). The devShell already carries openssl + pkg-config + bindgenHook,
     # so neither problem survives the switch.
     runs-on: ubuntu-latest
+    env:
+      # cargo output must live on the reclaimed /nix volume: nothing-but-nix
+      # folds the root disk's free space into /nix (root safe-haven defaults
+      # to 2GB), so the default ./target fills the root disk on the codex dep
+      # tree -> "No space left on device" writing target/debug/deps/*.rmeta.
+      # Same volume nix-installer already uses for builds (build-dir above).
+      CARGO_TARGET_DIR: /nix/build/target
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +49,14 @@ jobs:
           extra-conf: |
             build-dir = /nix/build
 
-      # Optional acceleration only: caches ./target + cargo registry across
-      # runs keyed on Cargo.lock. Safe to drop without affecting correctness.
+      # Optional acceleration only: caches the cargo target dir + registry
+      # across runs keyed on Cargo.lock. Safe to drop without affecting
+      # correctness. cache-directories must track CARGO_TARGET_DIR above,
+      # otherwise rust-cache keeps caching the old (now unused) ./target.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: |
+            /nix/build/target
 
       - name: rustfmt
         run: nix develop -c cargo fmt --check
