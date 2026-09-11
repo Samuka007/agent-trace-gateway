@@ -261,8 +261,15 @@ pub async fn poll_device_code(
             .map_err(|e| OAuthError::Transient(e.to_string()))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        if status.as_u16() == 400 {
-            // 用户尚未完成授权——按 interval 继续等
+        if status == http::StatusCode::FORBIDDEN || status == http::StatusCode::NOT_FOUND {
+            // 用户尚未完成授权——镜像 codex device_code_auth.rs:128-140：
+            // 403/404 = pending，按 interval 继续等，15 分钟上限。
+            // （RFC 8628 的 400=authorization_pending 惯例不适用于 ChatGPT
+            // 自定义端点 /api/accounts/deviceauth/token；此前误用 400 导致
+            // 真实登录首轮轮询即报错。）
+            if start.elapsed() > max_wait {
+                return Err(OAuthError::Transient("device login timed out (15m)".into()));
+            }
             tokio::time::sleep(std::time::Duration::from_secs(device.interval_secs.max(1))).await;
         } else if status.is_success() {
             #[derive(Deserialize)]
