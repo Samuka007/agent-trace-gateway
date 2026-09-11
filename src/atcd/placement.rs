@@ -67,6 +67,8 @@ mod tests {
             account_id: "a-full".into(),
             thread_id: "t".into(),
             session_id: "s".into(),
+            root_turn_id: "rt".into(),
+            context_window_id: "cw".into(),
             turns: 0,
             last_seen: 0,
         })

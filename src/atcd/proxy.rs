@@ -122,10 +122,13 @@ impl ProxyApp {
                 let v: serde_json::Value = serde_json::from_slice(raw.as_bytes()).ok()?;
                 v.get("installation_id")?.as_str().map(str::to_string)
             });
+        // 会话键提取链：codex 的 session-id → opencode 系的 x-session-id →
+        // body prompt_cache_key / 前缀散列（见下方 derive_session_key）。
         let session_key = req
             .headers()
             .get("session-id")
             .or_else(|| req.headers().get("session_id"))
+            .or_else(|| req.headers().get("x-session-id"))
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
@@ -146,8 +149,8 @@ impl ProxyApp {
         let codex_native = session_key.is_some();
         let session_key = session_key.unwrap_or_else(|| derive_session_key(&body));
         let existing = self.store.binding(&session_key).ok().flatten();
-        let (account_id, bound_session, bound_thread) = match existing {
-            Some(b) => (b.account_id, b.session_id, b.thread_id),
+        let (account_id, bound_session, bound_thread, bound_root_turn, bound_context_window) = match existing {
+            Some(b) => (b.account_id, b.session_id, b.thread_id, b.root_turn_id, b.context_window_id),
             None => {
                 let Some(account_id) = self.placement.place(&self.store) else {
                     return json_error(
@@ -170,15 +173,20 @@ impl ProxyApp {
                 } else {
                     rewrite::mint_thread_id()
                 };
+                // 跨轮稳定字段：root_turn 锚定首轮，context_window 在窗口期不变
+                let root_turn_id = if codex_native { String::new() } else { uuid::Uuid::now_v7().to_string() };
+                let context_window_id = if codex_native { String::new() } else { uuid::Uuid::now_v7().to_string() };
                 let _ = self.store.insert_binding(&BindingRow {
                     session_key: session_key.clone(),
                     account_id: account_id.clone(),
                     thread_id: bound_thread.clone(),
                     session_id: bound_session.clone(),
+                    root_turn_id: root_turn_id.clone(),
+                    context_window_id: context_window_id.clone(),
                     turns: 0,
                     last_seen: now_unix_ms(),
                 });
-                (account_id, bound_session, bound_thread)
+                (account_id, bound_session, bound_thread, root_turn_id, context_window_id)
             }
         };
 
@@ -238,6 +246,8 @@ impl ProxyApp {
                 &persona,
                 &access_token,
                 &bound_session,
+                &bound_root_turn,
+                &bound_context_window,
                 now_unix_ms(),
             );
         }
@@ -306,6 +316,8 @@ impl ProxyApp {
                                 &persona,
                                 token,
                                 &bound_session,
+                                &bound_root_turn,
+                                &bound_context_window,
                                 now_unix_ms(),
                             );
                         }

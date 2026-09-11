@@ -37,6 +37,10 @@ pub struct BindingRow {
     pub account_id: String,
     pub thread_id: String,
     pub session_id: String,
+    /// 根回合锚：对话首轮的 turn id，此后不变（真实客户端语义）。
+    pub root_turn_id: String,
+    /// 上下文窗口 id：窗口期内稳定，压缩后才换新。
+    pub context_window_id: String,
     pub turns: i64,
     pub last_seen: i64,
 }
@@ -70,6 +74,8 @@ CREATE TABLE IF NOT EXISTS bindings (
   account_id  TEXT NOT NULL REFERENCES accounts(account_id),
   thread_id   TEXT NOT NULL,
   session_id  TEXT NOT NULL,
+  root_turn_id     TEXT NOT NULL DEFAULT '',
+  context_window_id TEXT NOT NULL DEFAULT '',
   turns       INTEGER NOT NULL DEFAULT 0,
   last_seen   INTEGER NOT NULL DEFAULT 0
 );
@@ -204,7 +210,8 @@ impl Store {
     pub fn binding(&self, session_key: &str) -> rusqlite::Result<Option<BindingRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT session_key, account_id, thread_id, session_id, turns, last_seen
+            "SELECT session_key, account_id, thread_id, session_id, root_turn_id,
+                    context_window_id, turns, last_seen
              FROM bindings WHERE session_key = ?1",
         )?;
         let mut rows = stmt.query_map([session_key], |r| {
@@ -213,6 +220,8 @@ impl Store {
                 account_id: r.get("account_id")?,
                 thread_id: r.get("thread_id")?,
                 session_id: r.get("session_id")?,
+                root_turn_id: r.get("root_turn_id")?,
+                context_window_id: r.get("context_window_id")?,
                 turns: r.get("turns")?,
                 last_seen: r.get("last_seen")?,
             })
@@ -227,9 +236,9 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO bindings
-                 (session_key, account_id, thread_id, session_id, turns, last_seen)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            rusqlite::params![b.session_key, b.account_id, b.thread_id, b.session_id, b.turns, b.last_seen],
+                 (session_key, account_id, thread_id, session_id, root_turn_id, context_window_id, turns, last_seen)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![b.session_key, b.account_id, b.thread_id, b.session_id, b.root_turn_id, b.context_window_id, b.turns, b.last_seen],
         )?;
         Ok(())
     }
@@ -327,6 +336,8 @@ mod tests {
             account_id: "a1".into(),
             thread_id: "t".into(),
             session_id: "s".into(),
+            root_turn_id: "rt".into(),
+            context_window_id: "cw".into(),
             turns: 0,
             last_seen: 0,
         })

@@ -1,0 +1,12 @@
+{
+ "Authorization": "Bearer dummy-key-for-shape-capture",
+ "Content-Type": "application/json",
+ "User-Agent": "opencode/1.18.29 ai-sdk/provider-utils/4.0.38 runtime/bun/1.3.13",
+ "x-session-affinity": "ses_f710fbb05ffex6CPX9QuqFCgob",
+ "x-session-id": "ses_f710fbb05ffex6CPX9QuqFCgob",
+ "Connection": "keep-alive",
+ "Accept": "*/*",
+ "Host": "127.0.0.1:8499",
+ "Accept-Encoding": "gzip, deflate, br, zstd",
+ "Content-Length": "46738"
+}
