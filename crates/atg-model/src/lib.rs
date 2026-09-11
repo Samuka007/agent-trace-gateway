@@ -181,6 +181,13 @@ pub struct TurnRecord {
     /// already have drained/billed the request).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancelled: bool,
+    /// Drain-mode guard fired: the client had disconnected (cancelled=true)
+    /// and the upstream stream did not finish within the drain window
+    /// (ATG_DRAIN_TIMEOUT_SECS) — the drain was abandoned and the turn
+    /// records whatever partial content was captured. Not an error: the
+    /// cancellation itself is not a failure (see `cancelled`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drain_timed_out: bool,
     /// Salted-truncated fingerprint of the request's API credential
     /// (sha256(salt || key), first 16 hex chars) — key reuse correlation
     /// WITHOUT the key ever leaving the gateway. Empty when the request

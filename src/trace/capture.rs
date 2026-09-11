@@ -23,6 +23,13 @@ impl CaptureCap {
         Self { max_bytes }
     }
 
+    /// The configured cap in bytes — the drain capture growth bound
+    /// (v0.3.6): after the client dies, raw response bytes stop being
+    /// appended beyond this (the stream itself keeps being consumed).
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
     /// Bound captured content. Below the cap the content passes through
     /// verbatim; above it the verbatim prefix is kept up to the cap (on a
     /// UTF-8 boundary) followed by the deterministic marker.
