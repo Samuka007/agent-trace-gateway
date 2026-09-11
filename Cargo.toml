@@ -25,7 +25,10 @@ parking_lot = "0.12.5"
 hex = "0.4.3"
 reqwest = { version = "0.13.4", features = ["json", "stream", "socks"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+# 与 codex 同源的身份库：UA 的 OS 段与终端段由同一批库生成，保真由构造保证
+os_info = "3.15"
+codex-terminal-detection = { git = "https://github.com/openai/codex", package = "codex-terminal-detection" }
 
 [lib]
 name = "agent_trace_gateway"

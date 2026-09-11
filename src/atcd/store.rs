@@ -21,8 +21,7 @@ pub struct AccountRow {
     pub expires_at: Option<i64>,
     pub installation_id: String,
     pub version_pin: String,
-    pub os_desc: String,
-    pub arch: String,
+    pub user_agent: String,
     pub originator: String,
     pub proxy_url: Option<String>,
     pub state: String,
@@ -53,8 +52,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   expires_at      INTEGER,
   installation_id TEXT NOT NULL,
   version_pin     TEXT NOT NULL,
-  os_desc         TEXT NOT NULL,
-  arch            TEXT NOT NULL,
+  user_agent      TEXT NOT NULL,
   originator      TEXT NOT NULL,
   proxy_url       TEXT,
   state           TEXT NOT NULL DEFAULT 'active',
@@ -80,8 +78,7 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
         expires_at: r.get("expires_at")?,
         installation_id: r.get("installation_id")?,
         version_pin: r.get("version_pin")?,
-        os_desc: r.get("os_desc")?,
-        arch: r.get("arch")?,
+        user_agent: r.get("user_agent")?,
         originator: r.get("originator")?,
         proxy_url: r.get("proxy_url")?,
         state: r.get("state")?,
@@ -90,7 +87,7 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
 }
 
 const ACCOUNT_COLS: &str = "account_id, label, refresh_token, access_token, expires_at, \
-     installation_id, version_pin, os_desc, arch, originator, proxy_url, state, last_turn_at";
+     installation_id, version_pin, user_agent, originator, proxy_url, state, last_turn_at";
 
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
@@ -109,12 +106,12 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"INSERT INTO accounts (account_id, label, refresh_token, access_token, expires_at,
-                   installation_id, version_pin, os_desc, arch, originator, proxy_url, state, last_turn_at, created_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                   installation_id, version_pin, user_agent, originator, proxy_url, state, last_turn_at, created_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
                ON CONFLICT(account_id) DO UPDATE SET
                    label=excluded.label, refresh_token=excluded.refresh_token,
-                   version_pin=excluded.version_pin, os_desc=excluded.os_desc,
-                   arch=excluded.arch, proxy_url=excluded.proxy_url"#,
+                   version_pin=excluded.version_pin, user_agent=excluded.user_agent,
+                   proxy_url=excluded.proxy_url"#,
             rusqlite::params![
                 a.account_id,
                 a.label,
@@ -123,8 +120,7 @@ impl Store {
                 a.expires_at,
                 a.installation_id,
                 a.version_pin,
-                a.os_desc,
-                a.arch,
+                a.user_agent,
                 a.originator,
                 a.proxy_url,
                 a.state,
@@ -259,18 +255,17 @@ mod tests {
     use super::*;
 
     fn account(id: &str) -> AccountRow {
-        let p = crate::atcd::persona::Persona::mint(id, None, None, None, None);
+        let p = crate::atcd::persona::Persona::mint(id, None, None, None, None, None, None);
         AccountRow {
             account_id: p.account_id.clone(),
             label: id.into(),
             refresh_token: format!("rt-{id}"),
             access_token: None,
             expires_at: None,
-            installation_id: p.installation_id,
-            version_pin: p.version_pin,
-            os_desc: p.os_desc,
-            arch: p.arch,
-            originator: p.originator,
+            installation_id: p.installation_id.clone(),
+            version_pin: p.version_pin.clone(),
+            user_agent: p.user_agent(),
+            originator: p.originator.clone(),
             proxy_url: None,
             state: ACCOUNT_ACTIVE.into(),
             last_turn_at: 0,
@@ -303,7 +298,7 @@ mod tests {
         assert_eq!(a.expires_at, Some(999));
 
         // 人设不变：token 刷新不碰 installation
-        let p = crate::atcd::persona::Persona::mint("a1", None, None, None, None);
+        let p = crate::atcd::persona::Persona::mint("a1", None, None, None, None, None, None);
         assert_ne!(a.installation_id, p.installation_id);
         assert_eq!(a.installation_id, s.get_account("a1").unwrap().unwrap().installation_id);
     }

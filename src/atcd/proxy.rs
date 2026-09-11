@@ -88,8 +88,20 @@ impl ProxyApp {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "only POST is supported");
         }
 
-        // 捕获入站 turn 元数据（剥离前），供改写保留非身份字段。
+        // 捕获入站工件（剥离前）：turn 元数据原样、下游 installation。
         let inbound_turn_metadata = req.headers().get("x-codex-turn-metadata").cloned();
+        let downstream_installation = req
+            .headers()
+            .get("x-codex-installation-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                // 头缺失时从 turn 元数据 JSON 提取
+                let raw = inbound_turn_metadata.as_ref()?;
+                let v: serde_json::Value = serde_json::from_slice(raw.as_bytes()).ok()?;
+                v.get("installation_id")?.as_str().map(str::to_string)
+            });
         let session_key = req
             .headers()
             .get("session-id")
@@ -107,13 +119,13 @@ impl ProxyApp {
             return json_error(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
         }
 
-        // ── 绑定或放置 ──────────────────────────────────────────────
+        // ── 绑定（仅路由粘性；身份是下游真实工件，不替换） ───────────
         let existing = match &session_key {
             Some(key) => self.store.binding(key).ok().flatten(),
             None => None,
         };
-        let (account_id, thread_id, session_id) = match existing {
-            Some(b) => (b.account_id, b.thread_id, b.session_id),
+        let account_id = match existing {
+            Some(b) => b.account_id,
             None => {
                 let Some(account_id) = self.placement.place(&self.store) else {
                     return json_error(
@@ -121,19 +133,23 @@ impl ProxyApp {
                         "no available account in pool",
                     );
                 };
-                let thread_id = uuid::Uuid::new_v4().to_string();
-                let session_id = uuid::Uuid::new_v4().to_string();
                 if let Some(key) = &session_key {
+                    let thread_id = parts
+                        .headers
+                        .get("thread-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
                     let _ = self.store.insert_binding(&BindingRow {
                         session_key: key.clone(),
                         account_id: account_id.clone(),
-                        thread_id: thread_id.clone(),
-                        session_id: session_id.clone(),
+                        thread_id,
+                        session_id: key.clone(),
                         turns: 0,
                         last_seen: now_unix_ms(),
                     });
                 }
-                (account_id, thread_id, session_id)
+                account_id
             }
         };
 
@@ -171,8 +187,7 @@ impl ProxyApp {
             account_id: account.account_id.clone(),
             installation_id: account.installation_id.clone(),
             version_pin: account.version_pin.clone(),
-            os_desc: account.os_desc.clone(),
-            arch: account.arch.clone(),
+            ua: account.user_agent.clone(),
             originator: account.originator.clone(),
             proxy_url: account.proxy_url.clone(),
         };
@@ -182,12 +197,17 @@ impl ProxyApp {
             &mut headers,
             &RewriteInput {
                 persona: &persona,
-                session_id: &session_id,
-                thread_id: &thread_id,
                 access_token: &access_token,
-                now_unix_ms: now_unix_ms(),
+                downstream_installation: downstream_installation.as_deref(),
                 inbound_turn_metadata: inbound_turn_metadata.as_ref(),
             },
+        );
+
+        // body 外科替换：仅 installation 投影，其余字节不动
+        let body = rewrite::surgical_installation_replace(
+            body,
+            downstream_installation.as_deref(),
+            persona.installation_id.as_str(),
         );
 
         let url = format!("{}{}", self.upstream.trim_end_matches('/'), parts.uri.path());
@@ -219,10 +239,8 @@ impl ProxyApp {
                             &mut headers,
                             &RewriteInput {
                                 persona: &persona,
-                                session_id: &session_id,
-                                thread_id: &thread_id,
                                 access_token: token,
-                                now_unix_ms: now_unix_ms(),
+                                downstream_installation: downstream_installation.as_deref(),
                                 inbound_turn_metadata: inbound_turn_metadata.as_ref(),
                             },
                         );

@@ -4,7 +4,7 @@
 //!   atcd serve   启动代理（环境变量配置，见下）
 //!   atcd import  导入账号：stdin 或文件参数，每行一个 JSON
 //!                {"account_id":"...","refresh_token":"...","label":"...",
-//!                 "proxy_url":null,"version_pin":null,"os_desc":null,"arch":null}
+//!                 "proxy_url":null,"version_pin":null,"os_type":null,"os_version":null,"terminal":null}
 //!   atcd list    列出账号与绑定计数
 //!
 //! 环境变量（serve）：
@@ -103,8 +103,10 @@ async fn import() -> i32 {
         let persona = Persona::mint(
             &account_id,
             v["version_pin"].as_str().map(str::to_string),
-            v["os_desc"].as_str().map(str::to_string),
+            v["os_type"].as_str().map(str::to_string),
+            v["os_version"].as_str().map(str::to_string),
             v["arch"].as_str().map(str::to_string),
+            v["terminal"].as_str().map(str::to_string),
             v["proxy_url"].as_str().map(str::to_string),
         );
         let row = AccountRow {
@@ -115,8 +117,7 @@ async fn import() -> i32 {
             expires_at: v["expires_at"].as_i64(),
             installation_id: persona.installation_id.clone(),
             version_pin: persona.version_pin.clone(),
-            os_desc: persona.os_desc.clone(),
-            arch: persona.arch.clone(),
+            user_agent: persona.user_agent(),
             originator: persona.originator.clone(),
             proxy_url: persona.proxy_url.clone(),
             state: store::ACCOUNT_ACTIVE.into(),

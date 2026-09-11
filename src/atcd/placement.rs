@@ -30,18 +30,17 @@ mod tests {
     use crate::atcd::store::{AccountRow, BindingRow, Store, ACCOUNT_ACTIVE, ACCOUNT_COOLING};
 
     fn account(id: &str, state: &str, last_turn: i64) -> AccountRow {
-        let p = Persona::mint(id, None, None, None, None);
+        let p = Persona::mint(id, None, None, None, None, None, None);
         AccountRow {
             account_id: id.into(),
             label: id.into(),
             refresh_token: format!("rt-{id}"),
             access_token: None,
             expires_at: None,
-            installation_id: p.installation_id,
-            version_pin: p.version_pin,
-            os_desc: p.os_desc,
-            arch: p.arch,
-            originator: p.originator,
+            installation_id: p.installation_id.clone(),
+            version_pin: p.version_pin.clone(),
+            user_agent: p.user_agent(),
+            originator: p.originator.clone(),
             proxy_url: None,
             state: state.into(),
             last_turn_at: last_turn,
