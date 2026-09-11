@@ -13,6 +13,68 @@ pub mod gateway_app {
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
 
+    /// Session-error classification — THREE outcomes by direction
+    /// (user ruling, v0.3.5):
+    ///
+    /// 1. IdleNoise — teardown AFTER the response was fully delivered:
+    ///    debug-grade noise, no marker at all (production evidence:
+    ///    sub2api idle-timeout RST post-response, cause context
+    ///    "during HTTP idle state"). Two discriminants:
+    ///    (a) FAIL-SAFE BELT: the cause chain carries Pingora's
+    ///    "during HTTP idle state" context — that window is
+    ///    post-response by definition, so it cannot fire on a
+    ///    truncated response; overlaps (b) on the production
+    ///    signature and holds if the structural gate regresses.
+    ///    (b) STRUCTURAL GATE: response ran to end_of_stream (headers
+    ///    alone prove nothing) AND 2xx AND a downstream-sourced
+    ///    error — downstream activity then can only be the idle
+    ///    next-request probe.
+    /// 2. ClientCancelled — a downstream-sourced session error that is
+    ///    NOT idle teardown: the CLIENT hung up mid-turn (write side
+    ///    failing to deliver, or read side closed before end_of_stream).
+    ///    The turn records normally with its partial content plus a
+    ///    cancelled=true metadata marker — no error marker, no ERROR
+    ///    level (reconciliation material: the upstream may already have
+    ///    drained/billed the request; production precedent).
+    /// 3. ProxyError — everything else (upstream-sourced interruption,
+    ///    half bodies, 5xx, dead connections): the existing failure
+    ///    classification, unchanged.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum SessionErrorClass {
+        IdleNoise,
+        ClientCancelled,
+        ProxyError,
+    }
+
+    fn classify_session_error(
+        err_text: &str,
+        downstream_sourced: bool,
+        resp_status: u16,
+        response_complete: bool,
+    ) -> SessionErrorClass {
+        if err_text.contains("during HTTP idle state")
+            || (downstream_sourced && response_complete && (200..300).contains(&resp_status))
+        {
+            return SessionErrorClass::IdleNoise;
+        }
+        if downstream_sourced {
+            return SessionErrorClass::ClientCancelled;
+        }
+        SessionErrorClass::ProxyError
+    }
+
+    /// Discriminator-level entry for tests (fabricating pingora Errors is
+    /// impractical; the classifier's inputs are exactly these).
+    #[doc(hidden)]
+    pub fn __classify_session_error(
+        err_text: &str,
+        downstream_sourced: bool,
+        resp_status: u16,
+        response_complete: bool,
+    ) -> SessionErrorClass {
+        classify_session_error(err_text, downstream_sourced, resp_status, response_complete)
+    }
+
     pub struct Gateway {
         pub upstream: String,
         pub store: TraceStore,
@@ -41,6 +103,45 @@ pub mod gateway_app {
         }
     }
 
+    /// Salted API-credential fingerprint: sha256(salt || key), first 16
+    /// hex chars. The salt defaults to a compile-time value and can be
+    /// overridden via ATG_APIKEY_SALT (rotating the salt invalidates
+    /// cross-version correlation but never exposes the key). The raw key
+    /// is dropped immediately — no log, record or export path ever sees
+    /// the plaintext.
+    pub fn api_key_fp(key: &str) -> String {
+        use sha2::Digest;
+        let salt = std::env::var("ATG_APIKEY_SALT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "atg-apikey-fp-salt-v1".to_string());
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(salt.as_bytes());
+        hasher.update(key.as_bytes());
+        hex::encode(hasher.finalize())[..16].to_string()
+    }
+
+    /// Extract the request's API credential and fingerprint it:
+    /// anthropic.messages -> x-api-key header; openai.* -> Authorization
+    /// Bearer. None when the request carried no credential (internal
+    /// probes) — no error, no field.
+    fn request_api_key_fp(protocol: &str, header_get: &dyn Fn(&str) -> Option<String>) -> String {
+        let key = if protocol == "anthropic.messages" {
+            header_get("x-api-key")
+        } else {
+            header_get("authorization").and_then(|v| {
+                v.strip_prefix("Bearer ")
+                    .map(str::to_string)
+                    // Non-Bearer schemes are not API credentials here.
+                    .filter(|k| !k.is_empty())
+            })
+        };
+        match key {
+            Some(k) if !k.trim().is_empty() => api_key_fp(k.trim()),
+            _ => String::new(),
+        }
+    }
+
     fn now_ns() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -66,6 +167,12 @@ pub mod gateway_app {
         /// Upstream response status (0 = no upstream response arrived —
         /// proxy-level failure); captured at upstream_response_filter.
         pub resp_status: u16,
+        /// The response body stream ran to its end (end_of_stream reached
+        /// in response_body_filter) — the "fully delivered" gate for the
+        /// idle-teardown classifier. resp_status alone only proves the
+        /// HEADERS arrived; a mid-body disconnect must not classify as
+        /// idle (BLOCK: truncated responses would launder into clean turns).
+        pub response_complete: bool,
     }
 
     #[async_trait]
@@ -84,6 +191,7 @@ pub mod gateway_app {
                 end_ns: 0,
                 first_output_ns: None,
                 resp_status: 0,
+                response_complete: false,
             }
         }
 
@@ -220,9 +328,12 @@ pub mod gateway_app {
             &self,
             session: &mut Session,
             body: &mut Option<Bytes>,
-            _end: bool,
+            end: bool,
             ctx: &mut Self::CTX,
         ) -> Result<Option<std::time::Duration>> {
+            if end {
+                ctx.response_complete = true;
+            }
             if session.was_upgraded() {
                 if let Some(b) = body {
                     for payload in ctx.ws_server_parser.push(b) {
@@ -277,8 +388,34 @@ pub mod gateway_app {
             // frames (error_marker) only cover in-stream failures; a 4xx/5xx
             // JSON body or a proxy error previously exported as a
             // successful turn. Protocol-level markers win when both exist.
+            // Three-way session-error classification (see
+            // classify_session_error): idle noise marks nothing; a client
+            // cancellation marks cancelled=true (no error — partial
+            // content records normally, reconciliation material);
+            // everything else keeps the proxy_error marker.
+            let mut client_cancelled = false;
             let http_error = if let Some(e) = e {
-                Some(format!("proxy_error: {e:?}"))
+                let err_text = format!("{e:?}");
+                let downstream_sourced = *e.esource() == pingora::ErrorSource::Downstream;
+                match classify_session_error(
+                    &err_text,
+                    downstream_sourced,
+                    ctx.resp_status,
+                    ctx.response_complete,
+                ) {
+                    SessionErrorClass::IdleNoise => {
+                        eprintln!(
+                            "ATG: idle teardown after response (path={path}) — not a failure"
+                        );
+                        None
+                    }
+                    SessionErrorClass::ClientCancelled => {
+                        eprintln!("ATG: client cancelled mid-turn (path={path})");
+                        client_cancelled = true;
+                        None
+                    }
+                    SessionErrorClass::ProxyError => Some(format!("proxy_error: {err_text}")),
+                }
             } else if ctx.resp_status >= 400 {
                 Some(format!("http_status: {}", ctx.resp_status))
             } else {
@@ -314,6 +451,9 @@ pub mod gateway_app {
                     None => u.to_string(),
                 })
                 .unwrap_or_default();
+            // Salted API-credential fingerprint (correlation without the
+            // key; plaintext never enters any downstream path).
+            let api_key_fp = request_api_key_fp(protocol, &header_get);
             // Request-side facts: ONE descriptor lookup + ONE pass over
             // the parsed body (F6 single entry; the old scattered
             // detect_by_name calls and the messages re-parse are gone).
@@ -412,12 +552,14 @@ pub mod gateway_app {
                     harness,
                     dialect: dialect.clone(),
                     client_ua: client_ua.clone(),
+                    api_key_fp: api_key_fp.clone(),
                     harness_candidates,
                     harness_anomaly: hfacts.protocol_anomaly,
                     harness_enrich,
                     session_synthetic,
                     completion_start_ns: ctx.first_output_ns,
                     error: error.or(http_error),
+                    cancelled: client_cancelled,
                 });
                 return;
             }
@@ -428,12 +570,14 @@ pub mod gateway_app {
                     record.harness = harness;
                     record.dialect = dialect;
                     record.client_ua = client_ua;
+                    record.api_key_fp = api_key_fp;
                     record.harness_candidates = harness_candidates;
                     record.harness_anomaly = hfacts.protocol_anomaly;
                     record.harness_enrich = harness_enrich;
                     record.session_synthetic = session_synthetic;
                     record.completion_start_ns = Some(ctx.start_ns);
                     record.error = record.error.take().or(http_error);
+                    record.cancelled = client_cancelled;
                     record.raw_request = raw_request;
                     record.raw_response = raw_response;
                     ctx.end_ns = now_ns();
@@ -493,11 +637,30 @@ pub mod gateway_app {
             &self,
             session: &mut Session,
             e: &Error,
-            _ctx: &mut Self::CTX,
+            ctx: &mut Self::CTX,
         ) -> FailToProxy {
             let path = session.req_header().uri.path().to_string();
             let err = format!("{e:?}");
-            eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
+            // Same classification as the logging hook: idle teardown is
+            // debug-grade noise and a client cancellation is not a gateway
+            // failure — neither reaches the fail_to_proxy log line.
+            let downstream_sourced = *e.esource() == pingora::ErrorSource::Downstream;
+            match classify_session_error(
+                &err,
+                downstream_sourced,
+                ctx.resp_status,
+                ctx.response_complete,
+            ) {
+                SessionErrorClass::IdleNoise => {
+                    eprintln!("ATG: idle teardown after response (path={path}) — not a failure");
+                }
+                SessionErrorClass::ClientCancelled => {
+                    eprintln!("ATG: client cancelled mid-turn (path={path})");
+                }
+                SessionErrorClass::ProxyError => {
+                    eprintln!("GATEWAY fail_to_proxy: path={path} error={err}");
+                }
+            }
             let code = match e.etype() {
                 pingora::HTTPStatus(code) => *code,
                 _ => match e.esource() {

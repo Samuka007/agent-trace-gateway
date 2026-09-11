@@ -174,6 +174,19 @@ pub struct TurnRecord {
     /// from what reached ATG).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_ua: String,
+    /// The CLIENT actively disconnected mid-turn (downstream-sourced
+    /// session error after the request was accepted): the turn records
+    /// normally with its partial content and a cancelled=true metadata
+    /// marker — NOT an error (reconciliation material: the upstream may
+    /// already have drained/billed the request).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
+    /// Salted-truncated fingerprint of the request's API credential
+    /// (sha256(salt || key), first 16 hex chars) — key reuse correlation
+    /// WITHOUT the key ever leaving the gateway. Empty when the request
+    /// carried no credential.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key_fp: String,
     /// Same-strength identification conflicts (CC header + codex body etc.)
     /// — recorded as metadata, never force-disambiguated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

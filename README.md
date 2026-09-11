@@ -110,7 +110,16 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 | `GET /__atg/health` | `{exported, failed, dropped}` 导出健康计数 |
 | `GET /__atg/records` | 进程内已收集 turn 记录 JSON 快照（调试用，内存有界） |
 
-### 配置项
+### API Key 指纹（client_key_fp）
+
+请求的 API 凭据以盐化指纹落 trace metadata（`langfuse.trace.metadata.client_key_fp`）——同 key 同指纹（跨协议），明文永不离开网关。
+
+- **公式（可复算）**：`sha256(salt || key)` 的 UTF-8 字节流，取结果前 16 个 hex 字符
+- **salt**：环境变量 `ATG_APIKEY_SALT`（compose 可见）；未设置时默认 `atg-apikey-fp-salt-v1`
+- **复算**：`gateway key-fp <api-key>`（与运行时同一代码路径，输出即 trace 里的 client_key_fp）
+- 无凭据请求（内部探针）→ 字段缺省，不报错
+
+## 配置项
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
