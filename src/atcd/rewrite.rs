@@ -18,6 +18,9 @@
 //! 是同一身份的两个投影，只换头不换 body 会制造"身份分裂"签名；字符串
 //! 级替换保证其余字节逐位不动。
 
+use codex_core::responses_metadata::{CodexResponsesMetadata, CodexResponsesRequestKind};
+use codex_protocol::protocol::ThreadSource;
+
 use crate::atcd::persona::Persona;
 
 /// 入站需要剥离的头：逐跳头 + 我们要重新写入的身份/凭据头。
@@ -214,9 +217,7 @@ const CODEX_BODY_FIELD_ORDER: &[&str] = &[
 /// 解析失败时原样返回（非 JSON body 不是我们的输入）。
 pub fn codex_envelope_body(
     body: &[u8],
-    persona: &Persona,
-    session_id: &str,
-    turn_metadata: &http::HeaderValue,
+    client_metadata: &std::collections::HashMap<String, String>,
 ) -> Option<bytes::Bytes> {
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = v.as_object_mut()?;
@@ -227,16 +228,8 @@ pub fn codex_envelope_body(
     obj.insert("prompt_cache_key".into(), session_id.into());
     obj.entry("parallel_tool_calls")
         .or_insert(serde_json::Value::Bool(true));
-    obj.insert(
-        "client_metadata".into(),
-        serde_json::json!({
-            "session_id": session_id,
-            "thread_id": session_id,
-            "x-codex-installation-id": persona.installation_id,
-            "x-codex-window-id": format!("{session_id}:0"),
-            "x-codex-turn-metadata": turn_metadata.to_str().ok()?,
-        }),
-    );
+    let cm = client_metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Map<_, _>>();
+    obj.insert("client_metadata".into(), serde_json::Value::Object(cm));
 
     // 键序重排：codex 字段序在前，其余未知字段按原相对顺序跟在后面。
     let mut ordered = serde_json::Map::new();

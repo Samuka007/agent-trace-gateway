@@ -17,6 +17,8 @@ use hyper::body::{Frame, Incoming};
 use hyper::{HeaderMap, Request, Response, StatusCode};
 use tokio::sync::Mutex as AsyncMutex;
 
+use std::collections::HashMap as StdHashMap;
+
 use crate::atcd::placement::Placement;
 use crate::atcd::refresh::{self, RefreshError};
 use crate::atcd::rewrite::{self, RewriteInput};
@@ -230,6 +232,23 @@ impl ProxyApp {
         };
         let mut headers = parts.headers.clone();
         rewrite::strip_inbound(&mut headers);
+        // 第三方路径：先用 codex 自身结构体铸造本轮身份（元数据头与 body
+        // 投影共用同一份，保证 header/body 身份一致）。
+        let third_party_meta = if codex_native {
+            None
+        } else {
+            let identity = rewrite::TurnIdentity {
+                installation_id: &persona.installation_id,
+                session_id: &bound_session,
+                thread_id: &bound_thread,
+                root_turn_id: &bound_root_turn,
+                context_window_id: &bound_context_window,
+                agent_name: rewrite::pick_agent_name(&session_key),
+                sandbox: rewrite::DEFAULT_SANDBOX,
+                sandbox_mode: rewrite::DEFAULT_SANDBOX_MODE,
+            };
+            Some(rewrite::mint_metadata(&identity, now_unix_ms()))
+        };
         if codex_native {
             rewrite::apply(
                 &mut headers,
@@ -245,10 +264,8 @@ impl ProxyApp {
                 &mut headers,
                 &persona,
                 &access_token,
+                third_party_meta.as_ref().expect("third-party metadata"),
                 &bound_session,
-                &bound_root_turn,
-                &bound_context_window,
-                now_unix_ms(),
             );
         }
 
@@ -262,17 +279,11 @@ impl ProxyApp {
                 persona.installation_id.as_str(),
             )
         } else {
-            let tm = headers.get("x-codex-turn-metadata").cloned();
-            match tm {
-                Some(tm) => rewrite::codex_envelope_body(
-                    &body,
-                    &persona,
-                    &bound_session,
-                    &tm,
-                )
-                .unwrap_or(body),
-                None => body,
-            }
+            let cm: StdHashMap<String, String> = third_party_meta
+                .as_ref()
+                .map(|m| m.client_metadata())
+                .unwrap_or_default();
+            rewrite::codex_envelope_body(&body, &cm).unwrap_or(body)
         };
 
         let url = format!("{}{}", self.upstream.trim_end_matches('/'), parts.uri.path());
@@ -315,10 +326,8 @@ impl ProxyApp {
                                 &mut headers,
                                 &persona,
                                 token,
+                                third_party_meta.as_ref().expect("third-party metadata"),
                                 &bound_session,
-                                &bound_root_turn,
-                                &bound_context_window,
-                                now_unix_ms(),
                             );
                         }
                         if let Ok(retried) =

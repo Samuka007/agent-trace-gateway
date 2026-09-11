@@ -29,6 +29,10 @@ uuid = { version = "1", features = ["v4", "v7"] }
 # 与 codex 同源的身份库：UA 的 OS 段与终端段由同一批库生成，保真由构造保证
 os_info = "3.15"
 codex-terminal-detection = { git = "https://github.com/openai/codex", package = "codex-terminal-detection" }
+# LLM 请求的字段正确性由 codex 自身代码保证（fork 补丁仅翻转可见性，
+# 见 fork 分支 atcd-libs 与 docs/atcd-requirements.md R8）
+codex-core = { git = "https://github.com/Samuka007/codex", branch = "atcd-libs", package = "codex-core" }
+codex-protocol = { git = "https://github.com/Samuka007/codex", branch = "atcd-libs", package = "codex-protocol" }
 # OAuth（device + 粘贴回调）：wire 镜像 codex-rs/login 源码（见 oauth.rs
 # 模块注释）。曾尝试直接引用 codex-login：其硬依赖 native-tls/openssl 在
 # nix 构建环境无法链接，且 tokio-tungstenite 走 codex 私有 fork 引发解析
