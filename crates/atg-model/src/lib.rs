@@ -10,12 +10,13 @@ use serde::Serialize;
 pub const LANGFUSE_TRACE_NAME: &str = "agent.turn";
 pub const LANGFUSE_TRACE_TAG: &str = "line:atg";
 
-/// agent is a first-class observation type (2025-08): the agent.turn root
-/// span carries it. usage/cost/completionStartTime are generation-exclusive —
-/// they live on the generation child span, never on the agent span (values
-/// set on an agent span are silently ignored by ingestion).
+/// GENERATION-only trace shape (v0.4): the forward gateway is
+/// 1-request↔1-call — a root GENERATION observation per turn (the
+/// single-call-integration convention: the Langfuse OpenAI/LangChain SDK
+/// wrappers root the generation directly with no container span). The
+/// former AGENT container carried only redundant classification, now in
+/// trace metadata (harness/dialect).
 pub const ATTR_OBSERVATION_TYPE: &str = "langfuse.observation.type";
-pub const OBSERVATION_TYPE_AGENT: &str = "agent";
 pub const OBSERVATION_TYPE_GENERATION: &str = "generation";
 pub const GENERATION_SPAN_NAME: &str = "agent.turn.generation";
 

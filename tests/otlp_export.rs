@@ -154,19 +154,19 @@ async fn otlp_export() {
         .unwrap_or_else(|| panic!("OTLP spans missing: {payload}"));
     assert_eq!(
         spans.len(),
-        6,
-        "three turns, each with agent+generation span: {spans:?}"
+        3,
+        "three turns, one root generation span each: {spans:?}"
     );
-    // P0-N1: each turn's agent+generation share ONE traceId and link
-    // parentSpanId -> agent spanId; the two turns land in distinct traces.
-    assert_eq!(spans[0]["traceId"], spans[1]["traceId"], "turn 1 one trace");
-    assert_eq!(spans[2]["traceId"], spans[3]["traceId"], "turn 2 one trace");
+    // GENERATION-only shape: no container span, no parentSpanId; turns
+    // land in distinct traces.
+    for s in spans {
+        assert_eq!(s["name"], "agent.turn.generation", "{s}");
+        assert!(s.get("parentSpanId").is_none(), "no container: {s}");
+    }
     assert_ne!(
-        spans[0]["traceId"], spans[2]["traceId"],
+        spans[0]["traceId"], spans[1]["traceId"],
         "turns must not share a trace"
     );
-    assert_eq!(spans[1]["parentSpanId"], spans[0]["spanId"]);
-    assert_eq!(spans[3]["parentSpanId"], spans[2]["spanId"]);
     let span = &spans[0];
     // Session id present as an attribute; turn content carried verbatim.
     let attrs = span["attributes"].as_array().expect("span attributes");
@@ -214,15 +214,14 @@ async fn otlp_export() {
         attr("raw_request").contains("otlp-turn"),
         "verbatim request must be exported: {attrs:?}"
     );
-    // Usage attributes (adaptor): the chat fixture reports 8/2/10. They live
-    // on the generation child span only — the agent root span must stay
-    // usage-free (generation-exclusive fields are ignored on agent type).
-    assert_eq!(attr("langfuse.observation.type"), "agent");
-    assert!(attr("langfuse.observation.usage_details").is_empty());
-    let generation = spans
-        .iter()
-        .find(|s| s["name"] == "agent.turn.generation")
-        .unwrap_or_else(|| panic!("generation child span missing: {spans:?}"));
+    // GENERATION-only: the root observation IS the generation — usage
+    // (the chat fixture reports 8/2/10) lives on it directly.
+    assert_eq!(
+        attr("langfuse.observation.type"),
+        "generation",
+        "the root observation IS the generation: {attrs:?}"
+    );
+    let generation = span;
     let gen_value = |k: &str| {
         generation["attributes"]
             .as_array()
@@ -242,7 +241,8 @@ async fn otlp_export() {
     // be input - cached (fixture chat usage: prompt 8, cached 0 → 8; with a
     // cache hit recorded here for the exclusive derivation).
     // (covered by adaptor unit tests; here we pin the wire shape)
-    // P0-3: official observation content keys on the agent span.
+    // P0-3: official observation content keys on the root generation
+    // (LEGAL on generations per the mapping table).
     assert_eq!(
         attr("langfuse.observation.input"),
         "otlp-turn",
@@ -457,6 +457,6 @@ async fn otlp_export() {
             !has_session_attr,
             "empty-session span must omit session attributes: {span}"
         );
-        assert_eq!(span["name"], "agent.turn");
+        assert_eq!(span["name"], "agent.turn.generation");
     }
 }
