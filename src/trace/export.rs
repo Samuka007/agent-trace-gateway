@@ -13,8 +13,7 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 use atg_model::{
     usage_details_json, ATTR_COMPLETION_START_TIME, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT,
     ATTR_OBSERVATION_OUTPUT, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID,
-    GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_AGENT,
-    OBSERVATION_TYPE_GENERATION,
+    GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_GENERATION,
 };
 
 #[derive(Default)]
@@ -198,8 +197,8 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // Trace-level attributes (session/tags/name) are copied onto
             // every span in the trace (spec section 3).
             let mut attributes = Vec::new();
-            // F2 harness wire (trace-level, propagated to both spans):
-            // tag harness:<name> + langfuse.trace.metadata.{harness,…}.
+            // F2 harness wire (trace-level): tag harness:<name> +
+            // langfuse.trace.metadata.{harness,…}.
             let harness_tag = (!r.harness.is_empty()).then(|| format!("harness:{}", r.harness));
             let tags: Vec<&str> = match &harness_tag {
                 Some(t) => vec![LANGFUSE_TRACE_TAG, t.as_str()],
@@ -250,7 +249,7 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 kv("protocol", &r.protocol),
                 kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
                 kv_array("langfuse.trace.tags", &tags),
-                kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_AGENT),
+                kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
                 kv("user_input", &r.user_input),
                 kv("final_output", &r.final_output),
                 kv("raw_request", &r.raw_request),
@@ -258,7 +257,8 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
                 kv("breakpoint", if r.breakpoint { "true" } else { "false" }),
             ]);
             // P0-3: official observation content keys (UI panel reads these);
-            // empty strings are omitted.
+            // empty strings are omitted. LEGAL on generations (the mapping
+            // table allows input/output on any observation type).
             if !r.user_input.is_empty() {
                 attributes.push(kv(ATTR_OBSERVATION_INPUT, &r.user_input));
             }
@@ -268,20 +268,37 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             if !r.final_output.is_empty() {
                 attributes.push(kv(ATTR_OBSERVATION_OUTPUT, &r.final_output));
             }
+            if !r.model_name.is_empty() {
+                attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
+            }
+            // P1-8: generation-exclusive completion start (ISO 8601 Z,
+            // nanosecond precision) — first output byte on the wire
+            // (streaming) or the request start (non-streaming).
+            if let Some(ns) = r.completion_start_ns {
+                attributes.push(kv(ATTR_COMPLETION_START_TIME, &iso8601_z(ns)));
+            }
+            // Usage (exclusive buckets) — generation-only field, now on the
+            // root generation itself.
+            if let Some(u) = &r.usage {
+                // G1: an all-zero usage passes the is_empty() gate but
+                // serializes to "{}" — omit the attribute entirely
+                // (zero ≙ unreported, same rule as the entry level).
+                let details = usage_details_json(u);
+                if details != "{}" {
+                    attributes.push(kv(ATTR_USAGE_DETAILS, &details));
+                }
+            }
             if !r.tool_calls.is_empty() {
                 let tool_calls_json = serde_json::to_string(&r.tool_calls).unwrap_or_default();
                 attributes.push(kv("tool_calls", &tool_calls_json));
             }
             attributes.extend(trace_extra.iter().cloned());
-            // P0-N1: one traceId per TURN — the agent root and its
-            // generation child share it; per-call random ids put the two
-            // spans in different traces with a dangling parentSpanId.
+            // P0-N1 (carried over): one random traceId + spanId per TURN.
             let trace_id = random_trace_id();
-            let agent_span_id = random_span_id();
-            let mut agent_span = serde_json::json!({
+            let mut span = serde_json::json!({
                 "traceId": trace_id,
-                "spanId": agent_span_id,
-                "name": "agent.turn",
+                "spanId": random_span_id(),
+                "name": GENERATION_SPAN_NAME,
                 "kind": 3,
                 "startTimeUnixNano": r.start_ns.to_string(),
                 "endTimeUnixNano": r.end_ns.to_string(),
@@ -292,82 +309,17 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // `span.status.code` and its `statusMessage` from
             // `span.status.message` (observation-level mapping table:
             // level ← "Inferred from span.status.code", statusMessage ←
-            // "Inferred from span.status.message"). The mapping is
-            // per-span, so the generation child carries the same ERROR
-            // status as its agent parent — generation-filtered error views
-            // would otherwise lose errored turns. Native form chosen over
-            // a `langfuse.observation.status_message` attribute because
-            // the native block sets both level and message in one field.
-            let status = r.error.as_ref().map(|err| {
-                serde_json::json!({
+            // "Inferred from span.status.message"). Native form chosen
+            // over a `langfuse.observation.status_message` attribute
+            // because the native block sets both level and message.
+            if let Some(err) = &r.error {
+                span["status"] = serde_json::json!({
                     // OTLP StatusCode::Error — Langfuse maps to level=ERROR.
                     "code": 2,
                     "message": err
-                })
-            });
-            if let Some(s) = &status {
-                agent_span["status"] = s.clone();
+                });
             }
-            // Generation child span: carries the usage_details (exclusive
-            // buckets) — the only span type Langfuse reads usage from. The
-            // child span id is fresh so it never collides with the parent
-            // (Langfuse upserts span ids — collisions are silently dropped).
-            let usage_attrs: Vec<serde_json::Value> = match &r.usage {
-                Some(u) => {
-                    // G1: an all-zero usage passes the is_empty() gate but
-                    // serializes to "{}" — omit the attribute entirely
-                    // (zero ≙ unreported, same rule as the entry level).
-                    let details = usage_details_json(u);
-                    if details == "{}" {
-                        Vec::new()
-                    } else {
-                        vec![kv(ATTR_USAGE_DETAILS, &details)]
-                    }
-                }
-                _ => Vec::new(),
-            };
-            // Trace-level attributes (session/tags/name) are copied onto
-            // every span in the trace (spec section 3) — including the
-            // generation child, so observation-level session filters see usage.
-            let mut generation_attributes: Vec<serde_json::Value> = vec![
-                kv("langfuse.trace.name", LANGFUSE_TRACE_NAME),
-                kv_array("langfuse.trace.tags", &tags),
-                kv(ATTR_OBSERVATION_TYPE, OBSERVATION_TYPE_GENERATION),
-            ];
-            if !r.session_id.is_empty() {
-                // P2-14: single official key (dual spelling converged).
-                generation_attributes.push(kv("langfuse.session.id", &r.session_id));
-            }
-            if !r.user_id.is_empty() {
-                generation_attributes.push(kv(ATTR_USER_ID, &r.user_id));
-            }
-            if !r.model_name.is_empty() {
-                generation_attributes.push(kv(ATTR_MODEL_NAME, &r.model_name));
-            }
-            // P1-8: generation-exclusive completion start (ISO 8601 Z,
-            // nanosecond precision) — first output byte on the wire
-            // (streaming) or the request start (non-streaming).
-            if let Some(ns) = r.completion_start_ns {
-                generation_attributes.push(kv(ATTR_COMPLETION_START_TIME, &iso8601_z(ns)));
-            }
-            generation_attributes.extend(usage_attrs);
-            generation_attributes.extend(trace_extra.iter().cloned());
-            let mut generation_span = serde_json::json!({
-                "traceId": trace_id,
-                "spanId": random_span_id(),
-                "parentSpanId": agent_span_id,
-                "name": GENERATION_SPAN_NAME,
-                "kind": 3,
-                "startTimeUnixNano": r.start_ns.to_string(),
-                "endTimeUnixNano": r.end_ns.to_string(),
-                "attributes": generation_attributes
-            });
-            // AMB-7: same ERROR status as the agent span (mapping is
-            // per-span — see the status block above).
-            if let Some(s) = &status {
-                generation_span["status"] = s.clone();
-            }
-            vec![agent_span, generation_span]
+            vec![span]
         })
         .collect();
     serde_json::json!({
@@ -558,39 +510,22 @@ mod tests {
         };
         // P2-14: single official key (dual spelling converged).
         assert_eq!(value("langfuse.session.id"), "sess-1");
-        assert_eq!(value("langfuse.session.id"), "sess-1");
         assert_eq!(value("langfuse.trace.name"), "agent.turn");
-        assert_eq!(value("langfuse.observation.type"), "agent");
-        // An agent-type span must not carry generation-exclusive usage keys.
-        assert!(
-            span_attr(span, "langfuse.observation.usage_details").is_none(),
-            "agent span must not carry usage_details"
-        );
+        // GENERATION-only shape: one span per turn, the root generation.
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        assert_eq!(spans.len(), 1, "one root generation per turn: {spans:?}");
+        assert_eq!(span["name"], "agent.turn.generation");
+        assert_eq!(value("langfuse.observation.type"), "generation");
+        // Without usage the root generation carries no usage_details.
+        assert!(span_attr(span, "langfuse.observation.usage_details").is_none());
+        // No container: the root generation has no parentSpanId.
+        assert!(span.get("parentSpanId").is_none(), "{span}");
         let tags = span_attr(span, "langfuse.trace.tags")
             .and_then(|v| v["arrayValue"]["values"].as_array())
             .unwrap_or_else(|| panic!("tags must be an OTLP array: {span}"));
         assert_eq!(tags[0]["stringValue"], "line:atg");
-
-        // The generation child span carries the usage_details.
-        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
-            .as_array()
-            .unwrap();
-        let generation = spans
-            .iter()
-            .find(|s| s["name"] == "agent.turn.generation")
-            .expect("generation child span must exist");
-        assert_eq!(
-            span_attr(generation, "langfuse.observation.type").unwrap()["stringValue"],
-            "generation"
-        );
-        // Without usage the child carries no usage_details.
-        assert!(span_attr(generation, "langfuse.observation.usage_details").is_none());
-        // Parent link.
-        assert_eq!(
-            generation["parentSpanId"], span["spanId"],
-            "generation must be a child of agent.turn"
-        );
-        assert_ne!(generation["spanId"], span["spanId"]);
     }
 
     /// G1 (empty-session variant): session attributes are omitted entirely.
@@ -608,7 +543,7 @@ mod tests {
         );
     }
 
-    /// Generation child span carries usage_details when usage is present.
+    /// The root generation carries usage_details when usage is present.
     #[test]
     fn generation_span_carries_usage_details() {
         let mut r = record("sess-usage");
@@ -623,10 +558,9 @@ mod tests {
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();
-        let generation = spans
-            .iter()
-            .find(|s| s["name"] == "agent.turn.generation")
-            .expect("generation child span");
+        assert_eq!(spans.len(), 1);
+        let generation = &spans[0];
+        assert_eq!(generation["name"], "agent.turn.generation");
         let value = |k: &str| {
             span_attr(generation, k)
                 .and_then(|v| v["stringValue"].as_str())
@@ -637,8 +571,6 @@ mod tests {
             r#"{"cache_creation_input_tokens":4,"cache_read_input_tokens":3,"input":12,"output":7}"#
         );
         // total omitted: derived server-side as bucket sum.
-        let agent = &spans[0];
-        assert!(span_attr(agent, "langfuse.observation.usage_details").is_none());
     }
 
     /// G2/P0-1: ids are random per turn — replaying the same record twice
@@ -646,7 +578,7 @@ mod tests {
     /// Langfuse's span upsert never silently swallows turns.
     #[test]
     fn replayed_turns_get_distinct_ids() {
-        // 5 identical records -> 10 distinct ids (agent + generation each).
+        // 5 identical records -> 5 distinct root-generation ids.
         let mut records = Vec::new();
         for _ in 0..5 {
             records.push(record("sess-1"));
@@ -675,35 +607,29 @@ mod tests {
         assert_eq!(trace_ids.len(), before, "replayed turns shared a trace id");
     }
 
-    /// P0-N1: ONE traceId per turn — the agent root and its generation
-    /// child must share it (per-call random ids split the turn across two
-    /// traces with a dangling parentSpanId); turns stay mutually distinct.
+    /// P0-N1 (GENERATION-only era): one span per turn — every turn gets a
+    /// fresh traceId and spanId (no upsert collisions, no cross-turn trace
+    /// sharing); the historical parent/child linkage assertions are void
+    /// with the container removed.
     #[test]
-    fn same_turn_spans_share_one_trace() {
+    fn turns_get_one_span_and_distinct_traces() {
         let records: Vec<_> = (0..5).map(|_| record("sess-t")).collect();
         let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&records)).unwrap();
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();
-        assert_eq!(spans.len(), 10);
-        let mut turn_trace_ids = Vec::new();
-        for pair in spans.chunks(2) {
-            let (agent, generation) = (&pair[0], &pair[1]);
-            assert_eq!(
-                agent["traceId"], generation["traceId"],
-                "agent+generation of one turn must share the traceId"
-            );
-            assert_eq!(
-                generation["parentSpanId"], agent["spanId"],
-                "generation must link to its agent parent"
-            );
-            assert_ne!(agent["spanId"], generation["spanId"]);
-            turn_trace_ids.push(agent["traceId"].as_str().unwrap_or_default().to_string());
+        assert_eq!(spans.len(), 5, "one root generation per turn");
+        for s in spans {
+            assert!(s.get("parentSpanId").is_none(), "no container: {s}");
         }
-        turn_trace_ids.sort();
-        let before = turn_trace_ids.len();
-        turn_trace_ids.dedup();
-        assert_eq!(turn_trace_ids.len(), before, "turns must not share traces");
+        let mut trace_ids: Vec<String> = spans
+            .iter()
+            .map(|s| s["traceId"].as_str().unwrap_or_default().to_string())
+            .collect();
+        trace_ids.sort();
+        let before = trace_ids.len();
+        trace_ids.dedup();
+        assert_eq!(trace_ids.len(), before, "turns must not share traces");
     }
 
     /// G1: an all-zero usage is unreported — the usage_details attribute
@@ -729,31 +655,29 @@ mod tests {
         }
     }
 
-    /// AMB-7: an errored turn marks BOTH spans — Langfuse infers each
-    /// observation's level from its own span.status.code (per-span
-    /// mapping), so the generation child needs the ERROR status for
-    /// generation-scoped error views.
+    /// AMB-7 (GENERATION-only): an errored turn marks the root generation
+    /// — Langfuse infers the observation's level from span.status.code.
     #[test]
-    fn errored_turn_marks_both_spans() {
+    fn errored_turn_marks_the_generation() {
         let mut r = record("sess-err");
         r.error = Some("response.failed: upstream 500".to_string());
         let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();
-        assert_eq!(spans.len(), 2);
-        for s in spans {
-            assert_eq!(s["status"]["code"], 2, "both spans must be ERROR: {s}");
-            assert_eq!(
-                s["status"]["message"], "response.failed: upstream 500",
-                "statusMessage must carry the error text: {s}"
-            );
-        }
+        assert_eq!(spans.len(), 1);
+        let s = &spans[0];
+        assert_eq!(s["status"]["code"], 2, "the generation must be ERROR: {s}");
+        assert_eq!(
+            s["status"]["message"], "response.failed: upstream 500",
+            "statusMessage must carry the error text: {s}"
+        );
     }
 
-    /// F2: harness attribution rides trace.tags + trace.metadata, on both
-    /// spans; enrich pairs land as langfuse.trace.metadata.<key>; the
-    /// borrowed dialect rides its own metadata.dialect key (omp case).
+    /// F2: harness attribution rides trace.tags + trace.metadata on the
+    /// root generation; enrich pairs land as
+    /// langfuse.trace.metadata.<key>; the borrowed dialect rides its own
+    /// metadata.dialect key (omp case).
     #[test]
     fn harness_turn_emits_tag_and_metadata() {
         let mut r = record("sess-h");
@@ -766,7 +690,7 @@ mod tests {
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();
-        assert_eq!(spans.len(), 2);
+        assert_eq!(spans.len(), 1);
         for s in spans {
             let value = |k: &str| {
                 span_attr(s, k)
@@ -808,29 +732,25 @@ mod tests {
         let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
             .as_array()
             .unwrap();
-        let agent = &spans[0];
-        let generation = &spans[1];
-        let value = |s: &serde_json::Value, k: &str| -> String {
-            span_attr(s, k)
+        assert_eq!(spans.len(), 1);
+        let generation = &spans[0];
+        let value = |k: &str| -> String {
+            span_attr(generation, k)
                 .and_then(|v| v["stringValue"].as_str())
                 .unwrap_or_default()
                 .to_string()
         };
         assert_eq!(
-            value(generation, "langfuse.observation.completion_start_time"),
+            value("langfuse.observation.completion_start_time"),
             "2026-09-09T00:00:00.000000042Z",
             "ISO 8601 Z with nanosecond precision"
         );
-        // Generation-exclusive: never on the agent span.
-        assert!(span_attr(agent, "langfuse.observation.completion_start_time").is_none());
         // P1-10 trace metadata, modeltrace-aligned key names.
-        for s in [agent, generation] {
-            assert_eq!(
-                value(s, "langfuse.trace.metadata.entry_protocol"),
-                "openai.responses"
-            );
-            assert_eq!(value(s, "langfuse.trace.metadata.client_model"), "m");
-        }
+        assert_eq!(
+            value("langfuse.trace.metadata.entry_protocol"),
+            "openai.responses"
+        );
+        assert_eq!(value("langfuse.trace.metadata.client_model"), "m");
     }
 
     /// The otelcol OTLP/HTTP receiver only accepts POSTs on /v1/traces; a
