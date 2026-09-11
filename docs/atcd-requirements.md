@@ -33,7 +33,7 @@
 | R5 | （冻结）存量账号 installation 迁移断崖的错峰方案 | 用户指示"列到 future dream" | 冻结 | 接生产池时再启 |
 | R6 | （冻结）vendor 栈跟随 codex 升级的维护节奏 | 用户指示"列到 future dream" | 冻结 | 同上 |
 | R8 | CI 迁移 nix 工具链并充分利用 runner：现 ci.yml 用 ubuntu-latest + rust:1-bookworm 浮动工具链，且缺 libssl-dev（codex 依赖树 native-tls 必挂）；目标 = 与 dev 同源（flake/fenix 1.95.0），评估 self-hosted runner 可用性 | 用户指令（"ci.yml 使用 nix 工具链…让 subagent 去看看怎么充分利用 runner"） | 进行中 | .scratch/atcd-ci-nix/ |
-| R9 | fork 补丁自动化：维护 Samuka007/codex@atcd-libs 相对 openai/codex 的 patch list，自动 apply 到 latest upstream 并验证（构建测试），产出可重复执行的同步工具 | 用户指令（"fork然后维护一个patch list自动给latest upstream patch到fork去"） | 进行中 | .scratch/atcd-fork-patchlist/ |
+| R9 | fork 补丁自动化：维护 Samuka007/codex@atcd-libs 相对 openai/codex 的 patch list，自动 apply 到 latest upstream 并验证（构建测试），产出可重复执行的同步工具 | 用户指令（"fork然后维护一个patch list自动给latest upstream patch到fork去"） | 已完成 | scripts/fork-sync + PATCHLIST.md（2 补丁均为可见性翻转）；atcd-libs-sync-20260911 重放验证通过，未 push |
 | R10 | OAuth web/PKCE 远端登录流研究：codex 自身跨设备登录（VPS 发起、另一设备浏览器授权）的真实流程与 atcd web 形态差距评估（R1 已有粘贴回调雏形） | 用户指令（"研究一下…他是走的什么流程"） | 待办 | 研究类票，排队 |
 
 ## 已证伪/已废弃的认知（防回潮）

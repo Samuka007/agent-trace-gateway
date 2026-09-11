@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# scripts/fork-sync — codex fork (atcd-libs) 补丁台账 + upstream 自动同步工具 (R9)
+#
+# 用途
+#   维护 Samuka007/codex@atcd-libs 相对 openai/codex 的 fork-only 补丁集：
+#   1. 生成/更新 PATCHLIST.md（补丁清单 + 逐个目的说明 + 与 atcd 用途对照）；
+#   2. fetch 最新 upstream → 在 upstream/main HEAD 上重放补丁；
+#   3. 重放后跑 `cargo check -p codex-core -p codex-protocol` 作为最低验证；
+#   4. 产出本地分支 `atcd-libs-sync-<YYYYMMDD>`，**不 push**（push/PR 由 PM 核验后执行）。
+#
+# 重放方式（按补丁性质选择）
+#   `git format-patch --stdout` 导出 atcd-libs 相对 upstream/main 的补丁集，
+#   再 `git am -3` 重放到 upstream/main 之上。理由：
+#   - 补丁是 fork-only 的少量小补丁（可见性翻转，文本级改动），am 的
+#     blob 三方合并对上游上下文漂移鲁棒；
+#   - 逐字节保留补丁 commit（作者/信息不变，从不改写补丁内容）；
+#   - 冲突时 am 停在精确的补丁上，可列出冲突文件后干净回退（--abort）。
+#   （备选 rebase 会重写 committer 信息且冲突时易留下半交互状态，不采用。）
+#
+# 冲突处理（硬约束）
+#   重放冲突 → 立即失败退出：打印失败补丁与冲突文件清单，`git am --abort`
+#   回到干净状态，删除半成品 sync 分支，退出码 1。绝不改写补丁内容、
+#   绝不强解冲突。人工处置路径见下方"使用说明"。
+#
+# 使用说明
+#   触发时机：
+#   - upstream openai/codex 有更新、atcd 想跟进（新特性/修复）时；
+#   - atcd 发布/升级依赖前，需要把 atcd-libs 前移到新 upstream 基线时；
+#   - fork checkout 可丢弃重建：删掉 codex-fork-sync/ 目录后重跑本脚本即
+#     自动 bootstrap（clone + 双 remote + fetch）。
+#   常规运行（在 atcd worktree 根目录）：
+#       scripts/fork-sync
+#   只重新生成 PATCHLIST.md，不重放不检查：
+#       scripts/fork-sync --list-only
+#   跳过 cargo check（仅重放）：
+#       scripts/fork-sync --no-check
+#   冲突时的人工操作：
+#   1. 看脚本输出的失败补丁（subject/sha）与冲突文件清单；
+#   2. 在 codex-fork-sync 工作区手动观察上游如何演变：
+#          git -C codex-fork-sync checkout upstream/main
+#          git -C codex-fork-sync show <失败补丁对应的上游文件历史>
+#   3. 只有三种正当出路：(a) 上游重命名/重构了目标代码 → 在 fork 上
+#      以**新 commit** 适配（绝不 amend 改写旧补丁语义，然后更新
+#      fork-sync 里 purpose_for 的目的映射并重跑）；(b) 上游行为等价
+#      只是上下文移动 → 等价于 (a)；(c) 上游已原生满足需求 → 从
+#      atcd-libs 里 drop 该补丁（新建分支，不改历史）。人工适配完成后
+#      push atcd-libs（PM 执行），再重跑本脚本验证。
+#   产物：
+#   - PATCHLIST.md：默认 .scratch/atcd-fork-patchlist/PATCHLIST.md（可 --patchlist 改）
+#   - 本地分支 atcd-libs-sync-<date>（在 codex-fork-sync 工作区；不 push 不 force）
+#   - cargo check 全量日志：codex-fork-sync/cargo-check-<date>.log
+#   环境变量：
+#   - CODEX_FORK_WS  fork 工作区路径（默认 /home/nixos/workspace/scitrace/codex-fork-sync）
+#   - ATCD_WS        提供 fenix 1.95.0 工具链的 atcd flake 路径（默认本仓库 atcd worktree）
+#   - PATCHLIST_OUT  PATCHLIST.md 输出路径（默认随 --patchlist 逻辑）
+#   - SKIP_CHECK=1   等价 --no-check
+#   退出码：0 成功；1 冲突/验证失败/环境错误。
+#
+set -euo pipefail
+
+# ── 路径解析 ────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ATCD_WS="$(cd "$SCRIPT_DIR/.." && pwd)"
+FORK_URL="git@github.com:Samuka007/codex.git"
+UPSTREAM_URL="https://github.com/openai/codex.git"
+UPSTREAM_REF="upstream/main"
+FORK_BRANCH="atcd-libs"
+FORK_REF="origin/atcd-libs"
+
+WORKTREE="${CODEX_FORK_WS:-/home/nixos/workspace/scitrace/codex-fork-sync}"
+ATCD_WS="${ATCD_WS:-$DEFAULT_ATCD_WS}"
+PATCHLIST_OUT="${PATCHLIST_OUT:-}"
+LIST_ONLY=0
+RUN_CHECK=1
+if [[ "${SKIP_CHECK:-0}" == "1" ]]; then RUN_CHECK=0; fi
+
+for arg in "$@"; do
+  case "$arg" in
+    --list-only)  LIST_ONLY=1 ;;
+    --no-check)   RUN_CHECK=0 ;;
+    --worktree)   : ;; # 值由下一个循环消费
+    --worktree=*) WORKTREE="${arg#*=}" ;;
+    --patchlist=*) PATCHLIST_OUT="${arg#*=}" ;;
+    --help|-h)
+      sed -n '2,60p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *)
+      # 支持 "--flag value" 形式
+      if [[ "${PREV:-}" == "--worktree" ]]; then WORKTREE="$arg"
+      elif [[ "${PREV:-}" == "--patchlist" ]]; then PATCHLIST_OUT="$arg"
+      else echo "未知参数: $arg（--help 查看用法）" >&2; exit 1; fi ;;
+  esac
+  PREV="$arg"
+done
+if [[ "$LIST_ONLY" == "1" ]]; then RUN_CHECK=0; fi
+if [[ -z "$PATCHLIST_OUT" ]]; then
+  PATCHLIST_OUT="$ATCD_WS/.scratch/atcd-fork-patchlist/PATCHLIST.md"
+fi
+
+log()  { printf '[fork-sync] %s\n' "$*"; }
+die()  { printf '[fork-sync] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# ── 0. 工作区 bootstrap（可丢弃重建）────────────────────────────────────────
+if [[ ! -d "$WORKTREE/.git" ]]; then
+  log "工作区不存在，bootstrap clone → $WORKTREE"
+  git clone "$FORK_URL" "$WORKTREE"
+  git -C "$WORKTREE" remote add upstream "$UPSTREAM_URL"
+fi
+cd "$WORKTREE"
+git remote get-url origin    >/dev/null 2>&1 || die "origin remote 缺失"
+git remote get-url upstream  >/dev/null 2>&1 || {
+  log "补充 upstream remote"; git remote add upstream "$UPSTREAM_URL"; }
+
+log "fetch $FORK_REF 与 $UPSTREAM_REF"
+git fetch origin "+$FORK_BRANCH:refs/remotes/origin/$FORK_BRANCH"
+git fetch upstream main
+git rev-parse -q --verify "refs/remotes/$FORK_REF" >/dev/null || die "fork 分支 $FORK_BRANCH 不存在（origin）"
+git rev-parse -q --verify "refs/remotes/$UPSTREAM_REF" >/dev/null || die "upstream ref $UPSTREAM_REF 不存在"
+
+UPSTREAM_HEAD="$(git rev-parse "$UPSTREAM_REF")"
+FORK_HEAD="$(git rev-parse "$FORK_REF")"
+log "upstream/main = $UPSTREAM_HEAD"
+log "$FORK_BRANCH = $FORK_HEAD"
+
+# ── 1. 补丁清单 PATCHLIST.md ────────────────────────────────────────────────
+# 目的映射：commit subject 前缀 → 目的说明（人工维护；新补丁必须补条目，
+# 否则 PATCHLIST.md 会标出 ⚠ 未归纳，台账不允许无目的补丁存在）。
+purpose_for() {
+  case "$1" in
+    "atcd: expose CodexResponsesMetadata projection publicly")
+      echo "把 codex-rs/core/src/responses_metadata.rs 内 94 处 pub(crate) 翻转为 pub：\
+CodexResponsesMetadata 全部字段与 new()、client_metadata()/turn_metadata_json() 等投影方法、\
+CompactionTurnMetadata、TurnMetadataWorkspace、请求种类枚举与 KEY 常量对 crate 外可见。\
+atcd 侧用途：src/atcd/rewrite.rs 的 mint_metadata() 直接构造该结构体并逐字段赋值\
+（turn_id/root_turn_id/context_window_id/agent_name/request_kind/sandbox/window_number 等），\
+apply_third_party() 调 turn_metadata_json()/client_metadata() 生成 wire 投影——\
+字段名/类型/序列化的正确性由 codex 自身代码保证（by construction），替代 wire 转录。\
+对照 docs/atcd-requirements.md R1a（依赖对齐决策）与 Cargo.toml 中 codex-core/codex-protocol\
+（git = Samuka007/codex, branch = atcd-libs）处的注释（R8 行）。" ;;
+    "atcd: pub mod responses_metadata")
+      echo "codex-rs/core/src/lib.rs 一行：mod responses_metadata → pub mod。\
+使模块本身可被外部 crate 引用（否则上一补丁翻转的 pub 项仍困在私有模块内）。\
+atcd 侧用途：rewrite.rs 的 use codex_core::responses_metadata::{CodexResponsesMetadata, CodexResponsesRequestKind}\
+依赖该模块路径公开。与上一补丁构成完整的最小可见性补丁集。" ;;
+    *)
+      echo "" ;;
+  esac
+}
+
+mkdir -p "$(dirname "$PATCHLIST_OUT")"
+PL="$PATCHLIST_OUT"
+GEN_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+{
+  echo "# codex fork (atcd-libs) 补丁台账"
+  echo
+  echo "- 生成时间：$GEN_UTC（由 scripts/fork-sync 自动生成，勿手改；目的映射在脚本 purpose_for()）"
+  echo "- 补丁源：\`$FORK_URL\` 分支 \`$FORK_BRANCH\` @ \`$FORK_HEAD\`"
+  echo "- 重放基线：openai/codex \`main\` @ \`$UPSTREAM_HEAD\`"
+  echo "- 补丁集：\`git rev-list --reverse $UPSTREAM_REF..$FORK_REF\`（共 $(git rev-list --count "$UPSTREAM_REF..$FORK_REF") 个）"
+  echo "- atcd 依赖：agent-trace-gateway Cargo.toml 的 codex-core/codex-protocol 指向本分支；"
+  echo "  用途 = 公开 CodexResponsesMetadata 字段可见性与模块路径（docs/atcd-requirements.md R1a/R8）。"
+  echo "- 重放/验证：\`scripts/fork-sync\`（am -3 重放 + cargo check -p codex-core -p codex-protocol）"
+  echo
+  echo "## 补丁清单"
+  echo
+  n=0
+  while read -r sha; do
+    n=$((n+1))
+    subj="$(git log -1 --format=%s "$sha")"
+    purpose="$(purpose_for "$subj")"
+    echo "### $n. \`$(git rev-parse --short=10 "$sha")\` $subj"
+    echo
+    echo '```'
+    git log -1 --format='Author: %an <%ae>%nDate:   %ad%n%n%B' --date=iso-strict "$sha" | sed 's/[[:space:]]*$//'
+    echo '```'
+    echo
+    echo '```'
+    git show --stat --format='' "$sha"
+    echo '```'
+    echo
+    if [[ -n "$purpose" ]]; then
+      echo "**目的**：$purpose"
+    else
+      echo "> ⚠ 未归纳目的：新增补丁必须在 scripts/fork-sync 的 purpose_for() 补充目的说明后重新生成台账。"
+    fi
+    echo
+  done < <(git rev-list --reverse "$UPSTREAM_REF..$FORK_REF")
+  if [[ "$(git rev-list --count "$UPSTREAM_REF..$FORK_REF")" == "0" ]]; then
+    echo "（当前 atcd-libs 相对 upstream/main 无 fork-only 提交）"
+    echo
+  fi
+} > "$PL"
+log "PATCHLIST.md → $PL（$(git rev-list --count "$UPSTREAM_REF..$FORK_REF") 个补丁）"
+if grep -q '^> ⚠ 未归纳目的' "$PL"; then
+  die "PATCHLIST.md 含未归纳目的的新补丁 — 请在 purpose_for() 补充后重跑"
+fi
+if [[ "$LIST_ONLY" == "1" ]]; then
+  log "--list-only：完成（未重放、未验证）"
+  exit 0
+fi
+
+# ── 2. 重放补丁到 upstream/main ─────────────────────────────────────────────
+SYNC_BRANCH="atcd-libs-sync-$(date +%Y%m%d)"
+TMPDIR_SYNC="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_SYNC"' EXIT
+
+git checkout -q -B "$SYNC_BRANCH" "$UPSTREAM_REF"
+log "分支 $SYNC_BRANCH ← $UPSTREAM_REF，重放 $(git rev-list --count "$UPSTREAM_REF..$FORK_REF") 个补丁（format-patch + am -3）"
+
+git format-patch "$UPSTREAM_REF..$FORK_REF" --stdout > "$TMPDIR_SYNC/patches.mbox"
+
+AM_LOG="$TMPDIR_SYNC/am.log"
+if ! git am -3 "$TMPDIR_SYNC/patches.mbox" >"$AM_LOG" 2>&1; then
+  echo
+  echo "═══ 重放冲突（失败退出，补丁未被改写）═══" >&2
+  NEXT_N="$(cat .git/rebase-apply/next 2>/dev/null || true)"
+  FAIL_SUBJECT="$(sed -n 's/^Subject: //p' ".git/rebase-apply/$(printf '%04d' "${NEXT_N:-0}")" 2>/dev/null || true)"
+  cat "$AM_LOG" >&2 || true
+  echo >&2
+  echo "冲突文件：" >&2
+  git diff --name-only --diff-filter=U >&2
+  echo >&2
+  echo "当前停在第 ${NEXT_N:-?} 个补丁${FAIL_SUBJECT:+：$FAIL_SUBJECT}" >&2
+  echo "人工处置见 scripts/fork-sync 头部注释『冲突时的人工操作』。回退干净状态：" >&2
+  echo "  git -C $WORKTREE am --abort" >&2
+  git am --abort
+  git checkout -q -
+  git branch -D "$SYNC_BRANCH" >/dev/null
+  die "重放冲突，已回退；同步分支已删除"
+fi
+SYNC_HEAD="$(git rev-parse HEAD)"
+PATCH_COUNT="$(git rev-list --count "$UPSTREAM_REF..$SYNC_BRANCH")"
+log "重放完成：$SYNC_BRANCH @ $SYNC_HEAD（$PATCH_COUNT 个补丁）"
+
+# ── 3. cargo check 验证 ─────────────────────────────────────────────────────
+CHECK_STATUS="skipped"
+if [[ "$RUN_CHECK" == "1" ]]; then
+  log "cargo check -p codex-core -p codex-protocol（codex-rs 工作区）"
+  CHECK_LOG="$WORKTREE/cargo-check-$(date +%Y%m%d).log"
+  if ! ( cd codex-rs && nix develop "$ATCD_WS" -c cargo check -p codex-core -p codex-protocol ) >"$CHECK_LOG" 2>&1; then
+    status=$?
+    echo "cargo check 失败（日志：$CHECK_LOG，尾部 40 行如下）" >&2
+    tail -n 40 "$CHECK_LOG" >&2 || true
+    die "cargo check 失败，退出码 $status"
+  fi
+  CHECK_STATUS="pass"
+  log "cargo check 通过（全量日志：$CHECK_LOG）"
+fi
+
+# ── 4. 汇总 ────────────────────────────────────────────────────────────────
+echo
+echo "═══ fork-sync 完成 ═══"
+echo "  台账      : $PL"
+echo "  重放基线  : $UPSTREAM_REF @ $UPSTREAM_HEAD"
+echo "  补丁分支  : $FORK_REF @ $FORK_HEAD"
+echo "  产出分支  : $SYNC_BRANCH @ $SYNC_HEAD（$PATCH_COUNT 个补丁，本地 only，未 push）"
+echo "  cargo check: $CHECK_STATUS"
+if [[ "$RUN_CHECK" == "1" ]]; then echo "  check 日志 : $WORKTREE/cargo-check-$(date +%Y%m%d).log"; fi
+echo "  push/PR 由 PM 核验后执行。"

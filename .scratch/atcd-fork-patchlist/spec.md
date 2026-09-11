@@ -1,6 +1,6 @@
 # Spec: R9 — codex fork patch list 自动同步工具
 
-Status: in-progress
+Status: resolved（2026-09-11，ForkSync 执行，PM 抽验通过）
 Owner: PM 验收；PATCHLIST agent 执行
 
 ## Requirement
@@ -28,9 +28,9 @@ Samuka007/codex@atcd-libs 相对 openai/codex 的补丁集要有台账和可重�
 
 ## Acceptance
 
-- [ ] PATCHLIST.md 生成：补丁清单 + 每个补丁的目的说明（从 commit message 与
+- [x] PATCHLIST.md 生成：补丁清单 + 每个补丁的目的说明（从 commit message 与
       diff 归纳，与 atcd 用途对照）
-- [ ] scripts/fork-sync 落盘并在当前 upstream HEAD 上完整跑通一次（产出
+- [x] scripts/fork-sync 落盘并在当前 upstream HEAD 上完整跑通一次（产出
       atcd-libs-sync 分支 + 验证通过/冲突报告）
-- [ ] 使用说明（触发时机、冲突时的操作）写入脚本头部注释或 docs/atcd-build-infra.md
-- [ ] 不 push 不 force；一切产出可丢弃重建
+- [x] 使用说明（触发时机、冲突时的操作）写入脚本头部注释或 docs/atcd-build-infra.md
+- [x] 不 push 不 force；一切产出可丢弃重建
