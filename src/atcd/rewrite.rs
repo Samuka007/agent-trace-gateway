@@ -97,25 +97,47 @@ pub fn mint_thread_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// 逐轮合成 turn 元数据：turn_id 新 v7、时戳取真实发送时刻，
-/// window 挂在 thread 名下（thread:0），thread_source 如实为 user。
+/// 逐轮合成 turn 元数据。字段集逐字对齐真实捕获
+/// （scripts/fixtures/codex_exec_0.153.4.headers.json，codex 0.153.4）：
+/// 共 17 字段，缺字段本身就是稀疏签名。turn_id 每轮新 v7，
+/// root_turn_id 同值，时戳取真实发送时刻。
+#[allow(clippy::too_many_arguments)]
 pub fn mint_turn_metadata(
     installation_id: &str,
     session_id: &str,
     thread_id: &str,
+    agent_name: &str,
+    sandbox: &str,
+    sandbox_mode: &str,
     now_unix_ms: i64,
 ) -> http::HeaderValue {
+    let turn_id = uuid::Uuid::now_v7().to_string();
     let v = serde_json::json!({
         "installation_id": installation_id,
         "session_id": session_id,
         "thread_id": thread_id,
+        "agent_name": agent_name,
+        "turn_id": turn_id,
         "window_id": format!("{thread_id}:0"),
-        "turn_id": uuid::Uuid::now_v7().to_string(),
-        "turn_started_at_unix_ms": now_unix_ms,
+        "window_number": 0,
+        "context_window_id": uuid::Uuid::now_v7().to_string(),
+        "request_kind": "turn",
+        "root_turn_id": turn_id,
         "thread_source": "user",
+        "sandbox": sandbox,
+        "sandbox_mode": sandbox_mode,
+        "auto_review_enabled": false,
+        "node_repl_auto_review_required": false,
+        "node_repl_disabled": false,
+        "turn_started_at_unix_ms": now_unix_ms,
     });
     http::HeaderValue::from_str(&v.to_string()).expect("turn metadata header")
 }
+
+/// 第三方客户端的人设扩展字段（agent_name/sandbox 等从 persona 派生）。
+pub const DEFAULT_AGENT_NAME: &str = "/root";
+pub const DEFAULT_SANDBOX: &str = "seccomp";
+pub const DEFAULT_SANDBOX_MODE: &str = "read-only";
 
 /// 第三方客户端的完整身份头：铸造的身份树 + 账号人设壳。
 /// instructions/工具表保留客户端自己的——第三方 ChatGPT 登录客户端
@@ -125,9 +147,11 @@ pub fn apply_third_party(
     persona: &Persona,
     access_token: &str,
     session_id: &str,
-    thread_id: &str,
     now_unix_ms: i64,
 ) {
+    // 真实捕获（codex_exec 0.153.4）中 session_id == thread_id，
+    // 因此铸造时二者同值，调用方只需给一个。
+    let thread_id = session_id;
     apply(
         headers,
         &RewriteInput {
@@ -150,6 +174,9 @@ pub fn apply_third_party(
             persona.installation_id.as_str(),
             session_id,
             thread_id,
+            DEFAULT_AGENT_NAME,
+            DEFAULT_SANDBOX,
+            DEFAULT_SANDBOX_MODE,
             now_unix_ms,
         ),
     );

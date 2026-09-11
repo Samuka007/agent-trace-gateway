@@ -28,6 +28,7 @@
 | R3 | 其他 responses 原生 agent（omp/opencode）支持：无 codex 身份头时铸造 v7 身份树 + 合成 turn 元数据，会话键 prompt_cache_key → body 前缀 sha256 兜底；instructions/工具表保留其自洽家族 | 用户需求（已确认 omp 支持 Responses） | 已完成（含开放问题 R3a） | 冒烟路径B：铸造 session/thread/turn 全 v7 + UA 人设壳 |
 | R3a | 【R3 开放问题】第三方路径的家族一致性裂缝：头里铸造的 session-id ≠ body 透传的 prompt_cache_key（真实 codex 两者相等，因 cache key 默认从 session 派生），而头声称 codex 家族。修法 A：把 body cache key 重写为铸造值（完全 codex 形状，body 改一个字段）；修法 B：第三方不声称 codex（去 originator/installation 声明，通用 SDK 形态）。决策依据：上游是否做该一致性检查（黑盒）——待 ATG 观测或 A/B | 自查发现 | 待办（排在 R4 后） |
 | R4 | WebSocket V2 支持 | 用户需求 | 待办（已定位协议源码） | codex 侧协议在 codex-rs/codex-api/src/endpoint/realtime_websocket/（protocol_v2.rs / methods_v2.rs）；下一步读 wire 出设计 |
+| R7 | 真实下游流量捕获（金样本）：codex 0.153.4 custom provider (wire_api=responses) 模式实测，nix 提供二进制 | 用户审计提问（"你真的捕获过下游流量吗"） | 已完成（首个样本） | scripts/fixtures/codex_exec_0.153.4.{headers.json,body.json}；发现：①身份头全套存在（session-id/thread-id/window/turn/β-features），codex_native 判定成立 ②session_id==thread_id（exec 模式）③turn 元数据 17 字段（agent_name/context_window_id/request_kind/sandbox 等远超早期假设）④originator 随表面变化（exec=codex_exec），UA 带 "(codex_exec; 0.153.4)" 后缀 ⑤os_info 渲染第三次验证（NixOS 26.11.0）⑥流断自动重连 5 次 ⑦已据此升级 mint_turn_metadata 全字段集 + session==thread 对齐 |
 | R1a | 依赖对齐决策记录：曾按"依赖以 codex 为准"引入 codex-login + 双层 tungstenite fork patch → codex-http-client 硬依赖 native-tls/openssl，nix shell 链接失败（rama 全系需 pin alpha.4 亦已处理）。reqwest 已切 rustls（对齐 codex TLS 栈）；tokio-tungstenite 维持 0.27（仅测试用帧解析）。若未来换有 openssl 的构建环境，可重启 codex-login 引用 | 用户指令 + 环境 blockers | 已完成（决策关闭） | Cargo.toml 注释 + 本行 |
 | R5 | （冻结）存量账号 installation 迁移断崖的错峰方案 | 用户指示"列到 future dream" | 冻结 | 接生产池时再启 |
 | R6 | （冻结）vendor 栈跟随 codex 升级的维护节奏 | 用户指示"列到 future dream" | 冻结 | 同上 |
@@ -51,5 +52,7 @@
 
 ## 待办顺序（下次继续从此处开始）
 
-1. ~~R1/R2/R3 收尾~~ 已完成（本轮提交）
-2. R4：读 protocol_v2.rs + methods_v2.rs 出 wire 设计 → 实现透传桥（上游 socks 绑定列为已知缺口）
+1. ~~R1/R2/R3 收尾~~ 已完成
+2. ~~R7 首次金样本捕获~~ 已完成（codex_exec 0.153.4 custom provider 模式）
+3. R4：读 protocol_v2.rs + methods_v2.rs 出 wire 设计 → 实现透传桥（上游 socks 绑定列为已知缺口）
+4. 金样本扩容：codex TUI 模式（originator/UA 后缀差异）、opencode 1.18.29（nix 可用）、多轮对话样本

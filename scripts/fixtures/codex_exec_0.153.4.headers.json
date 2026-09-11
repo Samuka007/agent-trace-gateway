@@ -1,0 +1,15 @@
+{
+ "x-codex-beta-features": "remote_compaction_v2",
+ "x-codex-window-id": "01a08ee3-a004-7201-aa4c-fc498da682a2:0",
+ "x-codex-turn-metadata": "{\"installation_id\":\"5018873f-6aea-4fa4-a85a-df741527f321\",\"session_id\":\"01a08ee3-a004-7201-aa4c-fc498da682a2\",\"thread_id\":\"01a08ee3-a004-7201-aa4c-fc498da682a2\",\"agent_name\":\"/root\",\"turn_id\":\"01a08ee3-a0a6-7573-8540-cb5367a29aad\",\"window_id\":\"01a08ee3-a004-7201-aa4c-fc498da682a2:0\",\"window_number\":0,\"context_window_id\":\"01a08ee3-a004-7201-aa4c-fc5e68b88953\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a08ee3-a0a6-7573-8540-cb5367a29aad\",\"thread_source\":\"user\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1789103677607}",
+ "x-client-request-id": "01a08ee3-a004-7201-aa4c-fc498da682a2",
+ "session-id": "01a08ee3-a004-7201-aa4c-fc498da682a2",
+ "thread-id": "01a08ee3-a004-7201-aa4c-fc498da682a2",
+ "accept": "text/event-stream",
+ "content-type": "application/json",
+ "authorization": "Bearer dummy-key-for-shape-capture",
+ "originator": "codex_exec",
+ "user-agent": "codex_exec/0.153.4 (NixOS 26.11.0; x86_64) dumb (codex_exec; 0.153.4)",
+ "host": "127.0.0.1:8499",
+ "content-length": "46268"
+}

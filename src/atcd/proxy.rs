@@ -238,7 +238,6 @@ impl ProxyApp {
                 &persona,
                 &access_token,
                 &bound_session,
-                &bound_thread,
                 now_unix_ms(),
             );
         }
@@ -291,7 +290,6 @@ impl ProxyApp {
                                 &persona,
                                 token,
                                 &bound_session,
-                                &bound_thread,
                                 now_unix_ms(),
                             );
                         }
