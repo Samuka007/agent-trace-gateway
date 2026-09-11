@@ -19,12 +19,12 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use std::collections::HashMap as StdHashMap;
 
+use crate::atcd::persona::Persona;
 use crate::atcd::placement::Placement;
 use crate::atcd::refresh::{self, RefreshError};
 use crate::atcd::rewrite::{self, RewriteInput};
 use crate::atcd::scheduler::PacingGate;
 use crate::atcd::store::{self, BindingRow, Store, ACCOUNT_COOLING};
-use crate::atcd::persona::Persona;
 
 pub type RespBody = UnsyncBoxBody<Bytes, io::Error>;
 pub type HyperResponse = Response<RespBody>;
@@ -44,7 +44,7 @@ pub struct ProxyApp {
     pub per_proxy: AsyncMutex<HashMap<String, reqwest::Client>>,
 }
 
-fn now_unix_ms() -> i64 {
+pub(crate) fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -68,14 +68,14 @@ fn derive_session_key(body: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(&body[..body.len().min(4096)]);
-    format!("pfx:{}", hex::encode(h.finalize())[..16].to_string())
+    format!("pfx:{}", &hex::encode(h.finalize())[..16])
 }
 
 fn header_f64(headers: &HeaderMap, name: &str) -> Option<f64> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
-fn json_error(status: StatusCode, message: &str) -> HyperResponse {
+pub(crate) fn json_error(status: StatusCode, message: &str) -> HyperResponse {
     let body = serde_json::json!({"error": {"message": message}});
     Response::builder()
         .status(status)
@@ -96,49 +96,48 @@ fn full_response(status: StatusCode, text: &str) -> HyperResponse {
 }
 
 fn strip_response_hop_by_hop(headers: &mut HeaderMap) {
-    for name in ["connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade"] {
+    for name in [
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+    ] {
         headers.remove(name);
     }
 }
 
 impl ProxyApp {
-    pub async fn handle(&self, req: Request<Incoming>) -> HyperResponse {
+    /// 入口分发：healthz / WebSocket 升级（D7 桥）/ HTTP Responses。
+    pub async fn route(self: Arc<Self>, req: Request<Incoming>) -> HyperResponse {
         if req.uri().path() == "/healthz" {
             return full_response(StatusCode::OK, "ok");
         }
+        if super::ws::is_websocket_upgrade(&req) {
+            return self.ws_upgrade(req).await;
+        }
+        self.handle(req).await
+    }
+
+    pub async fn handle(&self, req: Request<Incoming>) -> HyperResponse {
         if req.method() != hyper::Method::POST {
             return json_error(StatusCode::METHOD_NOT_ALLOWED, "only POST is supported");
         }
 
         // 捕获入站工件（剥离前）：turn 元数据原样、下游 installation。
         let inbound_turn_metadata = req.headers().get("x-codex-turn-metadata").cloned();
-        let downstream_installation = req
-            .headers()
-            .get("x-codex-installation-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                // 头缺失时从 turn 元数据 JSON 提取
-                let raw = inbound_turn_metadata.as_ref()?;
-                let v: serde_json::Value = serde_json::from_slice(raw.as_bytes()).ok()?;
-                v.get("installation_id")?.as_str().map(str::to_string)
-            });
+        let downstream_installation = extract_downstream_installation(req.headers());
         // 会话键提取链：codex 的 session-id → opencode 系的 x-session-id →
         // body prompt_cache_key / 前缀散列（见下方 derive_session_key）。
-        let session_key = req
-            .headers()
-            .get("session-id")
-            .or_else(|| req.headers().get("session_id"))
-            .or_else(|| req.headers().get("x-session-id"))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let session_key = extract_session_key(req.headers());
 
         let (parts, body) = req.into_parts();
         let body = match BodyExt::collect(body).await {
             Ok(collected) => collected.to_bytes(),
-            Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("body read failed: {e}")),
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, &format!("body read failed: {e}"))
+            }
         };
         if body.len() > MAX_BODY_BYTES {
             return json_error(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
@@ -150,52 +149,39 @@ impl ProxyApp {
         // turn 元数据——这是"第三方 ChatGPT 登录客户端"的自洽形态。
         let codex_native = session_key.is_some();
         let session_key = session_key.unwrap_or_else(|| derive_session_key(&body));
-        let existing = self.store.binding(&session_key).ok().flatten();
-        let (account_id, bound_session, bound_thread, bound_root_turn, bound_context_window) = match existing {
-            Some(b) => (b.account_id, b.session_id, b.thread_id, b.root_turn_id, b.context_window_id),
-            None => {
-                let Some(account_id) = self.placement.place(&self.store) else {
-                    return json_error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "no available account in pool",
-                    );
-                };
-                let bound_session = if codex_native {
-                    session_key.clone()
-                } else {
-                    rewrite::mint_session_id()
-                };
-                let bound_thread = if codex_native {
-                    parts
-                        .headers
-                        .get("thread-id")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or_default()
-                        .to_string()
-                } else {
-                    rewrite::mint_thread_id()
-                };
-                // 跨轮稳定字段：root_turn 锚定首轮，context_window 在窗口期不变
-                let root_turn_id = if codex_native { String::new() } else { uuid::Uuid::now_v7().to_string() };
-                let context_window_id = if codex_native { String::new() } else { uuid::Uuid::now_v7().to_string() };
-                let _ = self.store.insert_binding(&BindingRow {
-                    session_key: session_key.clone(),
-                    account_id: account_id.clone(),
-                    thread_id: bound_thread.clone(),
-                    session_id: bound_session.clone(),
-                    root_turn_id: root_turn_id.clone(),
-                    context_window_id: context_window_id.clone(),
-                    turns: 0,
-                    last_seen: now_unix_ms(),
-                });
-                (account_id, bound_session, bound_thread, root_turn_id, context_window_id)
-            }
+        let thread_hint = if codex_native {
+            parts
+                .headers
+                .get("thread-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            String::new()
         };
+        let Some(binding) = self.bind_session(&session_key, codex_native, &thread_hint) else {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no available account in pool",
+            );
+        };
+        let (account_id, bound_session, bound_thread, bound_root_turn, bound_context_window) = (
+            binding.account_id,
+            binding.session_id,
+            binding.thread_id,
+            binding.root_turn_id,
+            binding.context_window_id,
+        );
 
         // ── 确保令牌 ────────────────────────────────────────────────
         let mut account = match self.store.get_account(&account_id) {
             Ok(Some(a)) => a,
-            _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "binding to missing account"),
+            _ => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "binding to missing account",
+                )
+            }
         };
         match self.ensure_token(&account).await {
             Ok(()) => {}
@@ -207,15 +193,20 @@ impl ProxyApp {
                         &format!("account {account_id} entered cooling: refresh failed terminally"),
                     );
                 }
-                return json_error(StatusCode::BAD_GATEWAY, &format!("token refresh failed: {e}"));
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("token refresh failed: {e}"),
+                );
             }
         }
         // ensure_token 可能已更新令牌
-        account = self.store.get_account(&account_id).ok().flatten().unwrap_or(account);
-        let access_token = account
-            .access_token
-            .clone()
-            .unwrap_or_default();
+        account = self
+            .store
+            .get_account(&account_id)
+            .ok()
+            .flatten()
+            .unwrap_or(account);
+        let access_token = account.access_token.clone().unwrap_or_default();
 
         // ── 节奏门 ──────────────────────────────────────────────────
         let _slot = self.gate.slot(&account_id).await;
@@ -286,7 +277,11 @@ impl ProxyApp {
             rewrite::codex_envelope_body(&body, &cm).unwrap_or(body)
         };
 
-        let url = format!("{}{}", self.upstream.trim_end_matches('/'), parts.uri.path());
+        let url = format!(
+            "{}{}",
+            self.upstream.trim_end_matches('/'),
+            parts.uri.path()
+        );
         let client = self.client_for(persona.proxy_url.as_deref()).await;
 
         let mut resp = match client
@@ -363,7 +358,10 @@ impl ProxyApp {
             .map(|r| r.map(Frame::data).map_err(io::Error::other));
         match builder.body(UnsyncBoxBody::new(StreamBody::new(stream))) {
             Ok(r) => r,
-            Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("build response: {e}")),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("build response: {e}"),
+            ),
         }
     }
 
@@ -376,8 +374,61 @@ impl ProxyApp {
         }
     }
 
+    /// 绑定查找或放置：与 HTTP/WS 共用（同一张表同一把键，B3 粘性）。
+    /// 返回 None = 池中无可用账号（不落任何绑定行）。
+    pub(crate) fn bind_session(
+        &self,
+        session_key: &str,
+        codex_native: bool,
+        thread_hint: &str,
+    ) -> Option<BindingRow> {
+        let existing = self.store.binding(session_key).ok().flatten();
+        match existing {
+            Some(b) => Some(b),
+            None => {
+                let account_id = self.placement.place(&self.store)?;
+                let bound_session = if codex_native {
+                    session_key.to_string()
+                } else {
+                    rewrite::mint_session_id()
+                };
+                let bound_thread = if codex_native {
+                    thread_hint.to_string()
+                } else {
+                    rewrite::mint_thread_id()
+                };
+                // 跨轮稳定字段：root_turn 锚定首轮，context_window 在窗口期不变
+                let root_turn_id = if codex_native {
+                    String::new()
+                } else {
+                    uuid::Uuid::now_v7().to_string()
+                };
+                let context_window_id = if codex_native {
+                    String::new()
+                } else {
+                    uuid::Uuid::now_v7().to_string()
+                };
+                let row = BindingRow {
+                    session_key: session_key.to_string(),
+                    account_id,
+                    thread_id: bound_thread,
+                    session_id: bound_session,
+                    root_turn_id,
+                    context_window_id,
+                    turns: 0,
+                    last_seen: now_unix_ms(),
+                };
+                let _ = self.store.insert_binding(&row);
+                Some(row)
+            }
+        }
+    }
+
     /// 令牌双检：未过期直接用；过期则每账号串行刷新并落库。
-    async fn ensure_token(&self, account: &store::AccountRow) -> Result<(), RefreshError> {
+    pub(crate) async fn ensure_token(
+        &self,
+        account: &store::AccountRow,
+    ) -> Result<(), RefreshError> {
         let fresh = match (account.access_token.as_deref(), account.expires_at) {
             (Some(_), Some(exp)) => exp - TOKEN_REFRESH_MARGIN_SECS > now_unix(),
             (Some(_), None) => true, // 无过期信息：姑且使用，401 路径会自愈
@@ -389,10 +440,7 @@ impl ProxyApp {
 
         let lock = {
             let mut locks = self.refresh_locks.lock().await;
-            locks
-                .entry(account.account_id.clone())
-                .or_default()
-                .clone()
+            locks.entry(account.account_id.clone()).or_default().clone()
         };
         let _guard = lock.lock().await;
 
@@ -419,7 +467,10 @@ impl ProxyApp {
                 &account.account_id,
                 &access,
                 tokens.id_token.as_deref(),
-                tokens.refresh_token.as_deref().unwrap_or(&account.refresh_token),
+                tokens
+                    .refresh_token
+                    .as_deref()
+                    .unwrap_or(&account.refresh_token),
                 expires_at,
             )
             .map_err(|e| RefreshError::Transient(e.to_string()))?;
@@ -441,11 +492,40 @@ impl ProxyApp {
                     builder = builder.proxy(p);
                 }
                 let client = builder.build().unwrap_or_else(|_| self.http.clone());
-                self.per_proxy.lock().await.insert(url.to_string(), client.clone());
+                self.per_proxy
+                    .lock()
+                    .await
+                    .insert(url.to_string(), client.clone());
                 client
             }
         }
     }
+}
+
+/// 会话键提取链（HTTP 与 WS 共用）：session-id → session_id → x-session-id。
+pub(crate) fn extract_session_key(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("session-id")
+        .or_else(|| headers.get("session_id"))
+        .or_else(|| headers.get("x-session-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 下游 installation 提取（HTTP 与 WS 共用）：头优先，缺失时从 turn 元数据
+/// JSON 提取。
+pub(crate) fn extract_downstream_installation(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-codex-installation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let raw = headers.get("x-codex-turn-metadata")?;
+            let v: serde_json::Value = serde_json::from_slice(raw.as_bytes()).ok()?;
+            v.get("installation_id")?.as_str().map(str::to_string)
+        })
 }
 
 /// hyper Service 包装：handle 永不返回 Err。
@@ -461,6 +541,6 @@ impl hyper::service::Service<Request<Incoming>> for ProxyService {
 
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let app = self.0.clone();
-        Box::pin(async move { Ok(app.handle(req).await) })
+        Box::pin(async move { Ok(app.route(req).await) })
     }
 }

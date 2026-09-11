@@ -12,7 +12,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.27"
+# 0.28 对齐 openai-oss-forks tokio 层 fork 的版本号（0.27 patch 因版本错位
+# 不生效，见 docs/atcd-design.md §12 D7.7）；rustls 出口给上游 wss 用
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 base64 = "0.22"
 

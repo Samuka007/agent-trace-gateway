@@ -124,6 +124,7 @@ prompt_cache_key → body 前缀散列）查绑定表得账号；表无则放置
 | D4 | 依赖以 codex 工作区为准；fork 补丁系列自动化重放到上游新版本 | 本地构建需 openssl（codex-http-client 硬依赖 native-tls） |
 | D5 | 需求台账 + 映射文档为唯一事实来源；新需求入账排队，不立即切换方向 | docs/atcd-requirements.md + 本文件 |
 | D6 | 语义映射范围 = 认证头 + 源信息（身份树）。系统提示词与工具调用不属于映射范围：不注入人设提示词、不补齐请求参数（store/include 等按下游原样透传，缺失的后果由下游配置承担） | 用户指令（范围收窄） |
+| D7 | WebSocket V2 透传桥：wire 透传优先（消息层字节保真），身份面与 HTTP 同一套规则；桥零协议语义（不解析帧内容） | 详见 §12；关闭台账 R4 |
 
 ## 9. 验证策略：金样本差分
 
@@ -159,5 +160,123 @@ fixtures: `scripts/fixtures/codex_exec_0.153.4.*`
 1. fork 补丁 #2：Responses 请求类型（request struct + input items）pub 化
 2. 单路径重构：删除 surgical/envelope 双分支，统一走"解析→映射→重建"
 3. 金样本差分测试（§9）自动化
-4. R4 WebSocket V2（codex-api/src/endpoint/realtime_websocket/protocol_v2.rs）
+4. ~~R4 WebSocket V2~~ 已完成（§12 D7 桥落地：src/atcd/ws.rs；真实上游
+   chatgpt.com realtime 端到端验证待有可用账号后补）
 5. 金样本扩容：codex TUI、opencode 多轮、omp
+
+## 12. D7：WebSocket V2 透传桥（realtime WS）
+
+> 协议真源：codex fork checkout
+> `codex-rs/codex-api/src/endpoint/realtime_websocket/`（下述行号均指该 checkout，
+> `core/src/realtime_conversation.rs` 除外）。
+
+### 12.1 协议事实（全部有源码依据）
+
+1. **三种 wire adapter**：`RealtimeEventParser::{V1, RealtimeV2, FramelessBidi}`
+   （protocol.rs:15-19）。v3 = FramelessBidi（`/v1/live` + call_id 路径段），
+   **不在 R4 范围**；v1 与 v2 共用 `/v1/realtime` 路径族且都是 JSON 文本帧——
+   桥不解析帧语义，故对 v1 天然兼容。R4 目标 = RealtimeV2。
+2. **URL 推导**（methods.rs:1077-1202）：provider.base_url → scheme
+   http→ws / https→wss；路径归一（`normalize_realtime_path`，非 frameless 分支）：
+   空/`/` → `/v1/realtime`；`…/realtime` 保持；`…/realtime/` 去尾斜杠；
+   `…/v1` 追加 `/realtime`；`…/v1/` 追加 `realtime`；**其他路径原样保持**。
+   query：intent（v1=`quicksilver`，v2=无，methods_v2.rs:178-180）+ model
+   （可选）+ provider.query_params；call_id 对 V1/V2 走 query
+   （methods.rs:1159-1161）。
+3. **帧格式**：出站消息全部是 serde 序列化的 JSON **单 Text 帧**
+   （protocol.rs:50-85 `RealtimeOutboundMessage` 全集：input_audio_buffer.append /
+   input_audio.append / conversation.item.create / session.update /
+   response.create / session.close / conversation.handoff.append /
+   delegation.context.append / session.context.append）；入站按 `"type"`
+   字段分发（protocol_v2.rs:24-79，v2 事件全集见该 match）。
+   **无 Binary 帧**（v2 客户端收到 binary 报错，methods.rs:570-574）、
+   **无子协议**（握手全源码无 Sec-WebSocket-Protocol）、
+   **无 permessage-deflate**（realtime 用 `WebSocketConfig::default()`，
+   methods.rs:1073-1075；对比 responses WS 显式启用压缩
+   responses_websocket.rs:559-566）。
+4. **帧内无身份投影点**：出/入站 v2 类型全集（protocol.rs:50-85、
+   protocol_v2.rs:27-77）与 session.update 结构（methods_v2.rs:75-169）
+   均无 installation / client_metadata 字段。**installation 在 WS 通道的
+   帧投影 = 空集**。
+5. **握手头**（真实 codex v2 出站，realtime_conversation.rs:1799-1833 +
+   headers.rs:5-14 + default_client.rs:335-351）：
+   `authorization: Bearer <api_key>`（realtime v2 现仅支持 API key 认证，
+   realtime_conversation.rs:1773-1797）、`x-session-id`（realtime 会话 id）、
+   `originator`、`session-id` / `thread-id`、`x-codex-turn-metadata`（可选）、
+   `user-agent`（default_headers 兜底槽）。**不含**
+   `x-codex-installation-id` / `chatgpt-account-id`。
+6. **心跳/超时/关闭**：无应用层 ping（客户端不主动 ping）；收 Ping 即回
+   Pong（methods.rs:123-130，由 tungstenite 读路径自动完成）；无读空闲超时
+   （realtime 事件循环无限阻塞）。Close 帧对 v2/v1 = 会话流正常结束
+   （methods.rs:548-557，`Ok(None)`）；CloseCode 区分语义仅 v3 使用
+   （methods.rs:558-568）。
+
+### 12.2 设计
+
+**拓扑**：codex 客户端 ──ws──▶ atcd ──wss(+socks 出口)──▶ ATCD_UPSTREAM。
+两条 tungstenite `WebSocketStream`，单任务 `select` 双向转发。
+
+**D7.1 保真目标（B1 在 WS 通道的落点）**：**WebSocket 消息层字节保真**——
+Text/Binary 帧 payload 原样转发（不解析、不重序列化、不重编码）；Close 帧
+code/reason 原样转发。Ping/Pong 是连接级控制帧：由本侧 tungstenite 读路径
+自动应答（RFC 6455 要求 Pong 走同连接；跨连接转发属协议违规），**不转发**。
+两跳都不协商 permessage-deflate（与 codex realtime 一致），消息层保真即
+帧 payload 保真。已知协议事实 3/4 ⇒ **帧层零改写**。
+
+**D7.2 下行握手**：hyper `serve_connection_with_upgrades`；atcd 识别
+GET + `upgrade: websocket` + `sec-websocket-key`，自算
+`Sec-WebSocket-Accept = base64(sha1(key + GUID))` 回 101（hyper `on_upgrade`
+取 `Upgraded` 流），`WebSocketStream::from_raw_socket(.., Role::Server)`。
+不回显任何 Sec-WebSocket-Protocol（协议事实 3：codex 无子协议）。
+
+**D7.3 上行 URL**：`ATCD_UPSTREAM` 基址按 12.1-2 的 codex 归一规则推导路径，
+**入站 query 原样透传**（客户端已按 codex 规则整形 intent/model/call_id，
+atcd 不重排、不增删——重排即 URL 字节发散）。v3 路径（`/v1/live`）显式拒绝。
+
+**D7.4 出口绑定（关闭台账 R4 已知缺口）**：persona.proxy_url 有值时先建
+SOCKS5 CONNECT 隧道（socks5=本地解析、socks5h=代理端解析；RFC 1929
+userpass 支持；自实现 ~90 行，与 HTTP 路径 reqwest socks 行为对齐），
+TLS（wss）由 tokio-tungstenite `Connector::Rustls` 在隧道上完成
+（webpki-roots，与 codex 同 rustls 栈）。无代理直连。http:// 代理不支持
+（本部署 persona 出口均为 socks，遇 http 代理报错退出）。
+
+**D7.5 身份面（B4 在 WS 通道的落点）**：
+- 会话键链与 HTTP 相同：`session-id` → `x-session-id`（realtime 恒带其一；
+  均缺 → 拒绝升级 400，B3 粘性必须有键，WS 无 body 可兜底）。
+- 绑定表/放置/粘性与 HTTP **同一张表同一把键**：同一 codex 会话的 HTTP
+  Responses 调用与 realtime WS 必然落同一账号。
+- 身份工件透传：session-id / thread-id / x-session-id / turn-metadata 其余
+  字段原样上行。
+- installation 三投影在 WS 通道的应用：
+  ① `x-codex-installation-id` 头 → persona（复用 rewrite::strip_inbound +
+  rewrite::apply，与 HTTP 同一函数）；② `x-codex-turn-metadata` JSON 的
+  `installation_id` 字段 → persona（rewrite::turn_metadata_with_installation）；
+  ③ 帧投影 = **空集**（12.1-4，逐字段依据已列，帧层零改写）。
+- 声明偏差：真实 codex v2 握手今日不带 `chatgpt-account-id` /
+  `x-codex-installation-id`（12.1-5；realtime 现仅 API key）。atcd 仍写
+  persona 值——账号平面一致性优先（与同会话 HTTP 请求呈现同一设备身份），
+  且与 codex realtime 接入 ChatGPT 认证的演进方向一致。
+
+**D7.6 生命周期**：升级前完成 ensure_token（复用）→ 绑定/放置（复用）→
+`gate.slot` 并发名额**连接期持有** + `wait_turn` 一次（连接建立视作一回合；
+帧级不加间隔——音频流不可插入人为延迟，此为与 HTTP 逐回合记账的声明差异）；
+上行握手失败：401/403 刷新一次重拨一次（镜像 HTTP 401 自愈），仍失败则
+拒绝升级（升级前）或 Close(1011)（升级后）；任一侧 IO 错误 → 对侧
+Close(1011)；断开时 touch binding/account（记账一次）。
+
+**D7.7 依赖决策**：tokio-tungstenite 0.27 → **0.28**（openai-oss-forks
+tokio 层 fork 版本号即 0.28.0——0.27 patch 因版本错位从未生效，锁文件仍是
+registry 源；0.28 起双层真正对齐 codex）。features：
+`rustls-tls-webpki-roots`（TLS 栈与 reqwest 的 rustls 同源 0.23）。
+不引 tokio-socks（自实现隧道，少一个依赖面）。
+
+**D7.8 验证面**：单测 = URL 归一（对拍 codex methods.rs 测试预期值）、
+握手 accept-key（RFC 6455 官方向量）、SOCKS URL 解析、Close code/reason
+语义；集成 = mock WS 上游 + ProxyApp 全栈：v2 帧双向**字节级相等**
+（含 unicode/转义/未知 type 的刁钻帧与 Binary 帧）、身份头替换断言、
+Close code 透传。
+
+**拒绝的替代**：复用 codex-api `RealtimeWebsocketClient` 做上行——其 connect
+会代客户端发 session.update（桥必须零语义）；HTTP CONNECT 盲字节代理——
+握手层身份改写与账号绑定是 atcd 存在的理由，终结不可避免；tokio-socks
+新依赖——REQ：90 行 vs 一个供应链面，不值得。

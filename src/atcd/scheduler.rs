@@ -55,7 +55,10 @@ fn jitter_ns(period_ns: u128) -> u128 {
 
 impl PacingGate {
     pub fn new(cfg: PacingConfig) -> Self {
-        Self { cfg, inner: Mutex::new(Inner::default()) }
+        Self {
+            cfg,
+            inner: Mutex::new(Inner::default()),
+        }
     }
 
     pub fn config(&self) -> &PacingConfig {
@@ -106,7 +109,9 @@ impl PacingGate {
     /// 记录一次回合时刻（内存态；持久化由调用方选择性落库）。
     pub fn record_turn(&self, account_id: &str) {
         let mut inner = self.inner.lock().unwrap();
-        inner.last_turn.insert(account_id.to_string(), std::time::Instant::now());
+        inner
+            .last_turn
+            .insert(account_id.to_string(), std::time::Instant::now());
     }
 }
 
@@ -136,7 +141,10 @@ mod tests {
         gate.wait_turn("a").await;
         let t0 = std::time::Instant::now();
         gate.wait_turn("a").await;
-        assert!(t0.elapsed() >= Duration::from_millis(100), "间隔内第二回合应等待");
+        assert!(
+            t0.elapsed() >= Duration::from_millis(100),
+            "间隔内第二回合应等待"
+        );
     }
 
     #[tokio::test]

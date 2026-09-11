@@ -108,13 +108,17 @@ impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn upsert_account(&self, a: &AccountRow, now: i64) -> rusqlite::Result<()> {
@@ -267,11 +271,11 @@ impl Store {
                    LIMIT 1"#,
             )
             .ok()?;
-        stmt
-            .query_row(rusqlite::params![max_sessions_per_account, quota_ceiling], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
+        stmt.query_row(
+            rusqlite::params![max_sessions_per_account, quota_ceiling],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
     }
 
     /// 单账号绑定数（"这个人同时开着几个终端"）。
@@ -348,7 +352,8 @@ mod tests {
         s.touch_binding("sk-1", 200).unwrap();
         assert_eq!(s.binding("sk-1").unwrap().unwrap().turns, 1);
 
-        s.update_tokens("a1", "at", Some("it"), "rt-new", Some(999)).unwrap();
+        s.update_tokens("a1", "at", Some("it"), "rt-new", Some(999))
+            .unwrap();
         let a = s.get_account("a1").unwrap().unwrap();
         assert_eq!(a.access_token.as_deref(), Some("at"));
         assert_eq!(a.refresh_token, "rt-new");
@@ -357,6 +362,9 @@ mod tests {
         // 人设不变：token 刷新不碰 installation
         let p = crate::atcd::persona::Persona::mint("a1", None, None, None, None, None, None);
         assert_ne!(a.installation_id, p.installation_id);
-        assert_eq!(a.installation_id, s.get_account("a1").unwrap().unwrap().installation_id);
+        assert_eq!(
+            a.installation_id,
+            s.get_account("a1").unwrap().unwrap().installation_id
+        );
     }
 }

@@ -36,11 +36,17 @@ use agent_trace_gateway::atcd::scheduler::{PacingConfig, PacingGate};
 use agent_trace_gateway::atcd::store::{self, AccountRow, Store};
 
 fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| default.to_string())
+    std::env::var(key)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn now_unix() -> i64 {
@@ -216,7 +222,10 @@ fn set_state(id: Option<&String>, state: &str) -> i32 {
         return 2;
     };
     let store = open_store();
-    match store.set_state(id, state).and_then(|_| store.get_account(id)) {
+    match store
+        .set_state(id, state)
+        .and_then(|_| store.get_account(id))
+    {
         Ok(Some(_)) => {
             println!("{id} → {state}");
             0
@@ -254,10 +263,11 @@ async fn login(args: &[String]) -> i32 {
     };
 
     let store = open_store();
-    let account_id = oauth::chatgpt_account_id_from_id_token(&tokens.id_token).unwrap_or_else(|| {
-        eprintln!("warning: id_token 无 chatgpt_account_id claim，请手工核对账号");
-        format!("pending-{}", now_unix())
-    });
+    let account_id =
+        oauth::chatgpt_account_id_from_id_token(&tokens.id_token).unwrap_or_else(|| {
+            eprintln!("warning: id_token 无 chatgpt_account_id claim，请手工核对账号");
+            format!("pending-{}", now_unix())
+        });
     let expires_at = refresh::jwt_exp(&tokens.id_token);
     let persona = Persona::mint(&account_id, version_pin, None, None, None, None, proxy_url);
     let row = AccountRow {
@@ -284,7 +294,9 @@ async fn login(args: &[String]) -> i32 {
     println!(
         "login ok: {account_id} installation={} expires_at={}",
         persona.installation_id,
-        expires_at.map(|t| t.to_string()).unwrap_or_else(|| "?".into())
+        expires_at
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "?".into())
     );
     0
 }
@@ -297,18 +309,22 @@ async fn login(args: &[String]) -> i32 {
 /// redirect_uri 交换（无 localhost 依赖）。
 async fn login_device() -> Result<oauth::ExchangedTokens, i32> {
     let issuer = oauth::ISSUER;
-    let device = oauth::request_device_code(issuer, CODEX_CLIENT_ID).await.map_err(|e| {
-        eprintln!("device code request failed: {e}");
-        1i32
-    })?;
+    let device = oauth::request_device_code(issuer, CODEX_CLIENT_ID)
+        .await
+        .map_err(|e| {
+            eprintln!("device code request failed: {e}");
+            1i32
+        })?;
     println!(
         "1. 在任意设备浏览器打开: {}\n2. 输入代码: {}\n（等待授权中，最长 15 分钟……）",
         device.verification_url, device.user_code
     );
-    let ex = oauth::poll_device_code(issuer, &device).await.map_err(|e| {
-        eprintln!("device login failed: {e}");
-        1i32
-    })?;
+    let ex = oauth::poll_device_code(issuer, &device)
+        .await
+        .map_err(|e| {
+            eprintln!("device login failed: {e}");
+            1i32
+        })?;
     oauth::exchange_code(
         issuer,
         CODEX_CLIENT_ID,
@@ -378,7 +394,9 @@ async fn serve() -> i32 {
         store: store.clone(),
         gate: Arc::new(PacingGate::new(pacing)),
         placement,
-        http: reqwest::Client::builder().build().expect("build http client"),
+        http: reqwest::Client::builder()
+            .build()
+            .expect("build http client"),
         upstream,
         refresh_locks: tokio::sync::Mutex::new(HashMap::new()),
         per_proxy: tokio::sync::Mutex::new(HashMap::new()),
@@ -391,7 +409,10 @@ async fn serve() -> i32 {
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     let accounts = store.list_accounts().map(|v| v.len()).unwrap_or(0);
-    println!("atcd serving {addr} → {} ({} account(s))", app.upstream, accounts);
+    println!(
+        "atcd serving {addr} → {} ({} account(s))",
+        app.upstream, accounts
+    );
 
     loop {
         let (stream, _) = match listener.accept().await {

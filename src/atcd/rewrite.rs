@@ -43,6 +43,11 @@ pub fn strip_inbound(headers: &mut http::HeaderMap) {
         "x-codex-installation-id",
         "originator",
         "user-agent",
+        // WS 升级工件（WS 桥复用本函数剥入站；上游握手自生成）。
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "sec-websocket-extensions",
     ];
     for name in STRIP {
         headers.remove(*name);
@@ -218,7 +223,10 @@ pub fn codex_envelope_body(
     let mut v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = v.as_object_mut()?;
     if let Some(sid) = client_metadata.get("session_id") {
-        obj.insert("prompt_cache_key".into(), serde_json::Value::String(sid.clone()));
+        obj.insert(
+            "prompt_cache_key".into(),
+            serde_json::Value::String(sid.clone()),
+        );
     }
     let mut cm = serde_json::Map::new();
     for (k, v) in client_metadata {
@@ -280,8 +288,19 @@ mod tests {
     fn apply_replaces_only_account_level_identity() {
         let p = persona();
         let mut h = http::HeaderMap::new();
-        h.insert("user-agent", "codex_cli_rs/9.9.9 (Mac OS 15; arm64) iTerm.app/3.5".parse().unwrap());
-        h.insert("x-codex-turn-metadata", serde_json::json!({"installation_id":"their-install"}).to_string().parse().unwrap());
+        h.insert(
+            "user-agent",
+            "codex_cli_rs/9.9.9 (Mac OS 15; arm64) iTerm.app/3.5"
+                .parse()
+                .unwrap(),
+        );
+        h.insert(
+            "x-codex-turn-metadata",
+            serde_json::json!({"installation_id":"their-install"})
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
         h.insert("authorization", "Bearer downstream".parse().unwrap());
         h.insert("session-id", "their-real-session".parse().unwrap());
         h.insert("thread-id", "their-real-thread".parse().unwrap());
@@ -297,7 +316,10 @@ mod tests {
         );
 
         // 账号级：替换
-        assert_eq!(h.get("x-codex-installation-id").unwrap(), "our-install-uuid");
+        assert_eq!(
+            h.get("x-codex-installation-id").unwrap(),
+            "our-install-uuid"
+        );
         assert_eq!(h.get("authorization").unwrap(), "Bearer at");
         assert_eq!(h.get("chatgpt-account-id").unwrap(), "acc-1");
         assert_eq!(
@@ -321,7 +343,12 @@ mod tests {
         h.insert("session-id", "their-session".parse().unwrap());
         h.insert("x-custom-keep", "keepme".parse().unwrap());
         strip_inbound(&mut h);
-        for gone in ["host", "connection", "authorization", "x-codex-installation-id"] {
+        for gone in [
+            "host",
+            "connection",
+            "authorization",
+            "x-codex-installation-id",
+        ] {
             assert!(h.get(gone).is_none(), "{gone} 应被剥离");
         }
         // 客户端工件保留
@@ -363,11 +390,8 @@ mod tests {
         let body = format!(
             r#"{{"client_metadata":{{"installation_id":"{downstream}","x-codex-installation-id":"{downstream}","session_id":"s"}},"input":[]}}"#
         );
-        let out = surgical_installation_replace(
-            bytes::Bytes::from(body.clone()),
-            Some(downstream),
-            ours,
-        );
+        let out =
+            surgical_installation_replace(bytes::Bytes::from(body.clone()), Some(downstream), ours);
         let s = String::from_utf8(out.to_vec()).unwrap();
         assert!(!s.contains(downstream));
         assert_eq!(s.matches(ours).count(), 2);
@@ -436,7 +460,9 @@ mod tests {
         // 纯函数契约：非 JSON 输入返回 None；透传是 proxy 调用方的
         // .unwrap_or(body) 职责，不在本函数。
         let cm: std::collections::HashMap<String, String> =
-            [("session_id".to_string(), "s".to_string())].into_iter().collect();
+            [("session_id".to_string(), "s".to_string())]
+                .into_iter()
+                .collect();
         assert!(codex_envelope_body(&raw[..], &cm).is_none());
     }
 
@@ -446,7 +472,12 @@ mod tests {
         let mut h = http::HeaderMap::new();
         apply(
             &mut h,
-            &RewriteInput { persona: &p, access_token: "at", downstream_installation: None, inbound_turn_metadata: None },
+            &RewriteInput {
+                persona: &p,
+                access_token: "at",
+                downstream_installation: None,
+                inbound_turn_metadata: None,
+            },
         );
         let names: HashSet<_> = h.keys().map(|k| k.as_str().to_string()).collect();
         assert_eq!(names.len(), h.keys_len());
@@ -485,7 +516,12 @@ mod tests {
         let mut h2 = http::HeaderMap::new();
         apply(
             &mut h2,
-            &RewriteInput { persona: &p, access_token: "at", downstream_installation: None, inbound_turn_metadata: None },
+            &RewriteInput {
+                persona: &p,
+                access_token: "at",
+                downstream_installation: None,
+                inbound_turn_metadata: None,
+            },
         );
         assert!(h2.get("x-codex-turn-metadata").is_none());
     }

@@ -119,9 +119,17 @@ mod tests {
         // os_info 会把 Ubuntu 22.04 渲染成 "22.4.0"；终端 token 随真实终端变化。
         // 拼装函数对两者都原样保留，不做"纠正"。
         let ua = assemble_user_agent(
-            "codex_cli_rs", "0.154.0", "Mac OS", "15.5.0", "aarch64", "iTerm.app/3.5.11",
+            "codex_cli_rs",
+            "0.154.0",
+            "Mac OS",
+            "15.5.0",
+            "aarch64",
+            "iTerm.app/3.5.11",
         );
-        assert_eq!(ua, "codex_cli_rs/0.154.0 (Mac OS 15.5.0; aarch64) iTerm.app/3.5.11");
+        assert_eq!(
+            ua,
+            "codex_cli_rs/0.154.0 (Mac OS 15.5.0; aarch64) iTerm.app/3.5.11"
+        );
     }
 
     #[test]

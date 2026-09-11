@@ -24,3 +24,4 @@ pub mod refresh;
 pub mod rewrite;
 pub mod scheduler;
 pub mod store;
+pub mod ws;

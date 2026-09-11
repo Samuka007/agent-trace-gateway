@@ -42,18 +42,14 @@ pub fn reassemble_sse_output(protocol: &str, response_body: &[u8]) -> String {
             continue;
         };
         match protocol {
-            "openai_responses" => {
-                if v["type"] == "response.output_text.delta" {
-                    if let Some(d) = v["delta"].as_str() {
-                        out.push_str(d);
-                    }
+            "openai_responses" if v["type"] == "response.output_text.delta" => {
+                if let Some(d) = v["delta"].as_str() {
+                    out.push_str(d);
                 }
             }
-            "anthropic_messages" => {
-                if v["type"] == "content_block_delta" {
-                    if let Some(d) = v["delta"]["text"].as_str() {
-                        out.push_str(d);
-                    }
+            "anthropic_messages" if v["type"] == "content_block_delta" => {
+                if let Some(d) = v["delta"]["text"].as_str() {
+                    out.push_str(d);
                 }
             }
             "openai_chat" => {

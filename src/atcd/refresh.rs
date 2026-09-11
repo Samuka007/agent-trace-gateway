@@ -104,7 +104,9 @@ pub async fn refresh(
 /// 解析 JWT（未验证签名——我们只读上游刚发回来的 exp，不做信任判断）。
 pub fn jwt_exp(token: &str) -> Option<i64> {
     let mid = token.split('.').nth(1)?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(mid).ok()?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(mid)
+        .ok()?;
     let val: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     val.get("exp")?.as_i64()
 }

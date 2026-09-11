@@ -55,12 +55,19 @@ mod tests {
     #[test]
     fn skips_cooling_and_capped_picks_lru() {
         let s = Store::open_in_memory().unwrap();
-        s.upsert_account(&account("a-recent", ACCOUNT_ACTIVE, 500), 1).unwrap();
-        s.upsert_account(&account("a-idle", ACCOUNT_ACTIVE, 100), 1).unwrap();
-        s.upsert_account(&account("a-cool", ACCOUNT_COOLING, 0), 1).unwrap();
-        s.upsert_account(&account("a-full", ACCOUNT_ACTIVE, 0), 1).unwrap();
+        s.upsert_account(&account("a-recent", ACCOUNT_ACTIVE, 500), 1)
+            .unwrap();
+        s.upsert_account(&account("a-idle", ACCOUNT_ACTIVE, 100), 1)
+            .unwrap();
+        s.upsert_account(&account("a-cool", ACCOUNT_COOLING, 0), 1)
+            .unwrap();
+        s.upsert_account(&account("a-full", ACCOUNT_ACTIVE, 0), 1)
+            .unwrap();
 
-        let p = LruPlacement { max_sessions_per_account: 1, quota_ceiling_percent: 85.0 };
+        let p = LruPlacement {
+            max_sessions_per_account: 1,
+            quota_ceiling_percent: 85.0,
+        };
         // a-full 已有一个绑定，容量满；a-cool 冷却；先轮到最久未用的 a-idle
         s.insert_binding(&BindingRow {
             session_key: "sk".into(),

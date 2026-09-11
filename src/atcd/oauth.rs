@@ -5,6 +5,7 @@
 //!    web 登录形态（sub2api 式）只能自己实现交换调用；
 //! 2. 其依赖 tokio-tungstenite 被 codex 工作区 patch 到私有 fork
 //!    （带 proxy feature），与本地依赖解析冲突。
+//!
 //! 因此本模块 wire 逐字镜像 codex 源码（main，2026-09）：
 //! - PKCE 生成：codex-rs/login/src/pkce.rs（64 随机字节 → b64url verifier，
 //!   challenge = b64url(SHA256(verifier))，S256）
@@ -25,7 +26,6 @@ use base64::Engine;
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-
 
 pub const ISSUER: &str = "https://auth.openai.com";
 /// 与 codex CLI 的 Hydra redirect 白名单一致（login/src/server.rs，端口 1455/1457）。
@@ -48,7 +48,10 @@ pub fn generate_pkce() -> PkceCodes {
     let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let digest = Sha256::digest(code_verifier.as_bytes());
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    PkceCodes { code_verifier, code_challenge }
+    PkceCodes {
+        code_verifier,
+        code_challenge,
+    }
 }
 
 /// 逐字镜像 codex login/src/server.rs 的 generate_state。
@@ -95,7 +98,9 @@ pub fn build_authorize_url(
 /// （codex login/src/token_data.rs 同路径）。
 pub fn chatgpt_account_id_from_id_token(id_token: &str) -> Option<String> {
     let mid = id_token.split('.').nth(1)?;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(mid).ok()?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(mid)
+        .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
     v.get("https://api.openai.com/auth")?
         .get("chatgpt_account_id")?
@@ -188,10 +193,7 @@ pub struct DeviceCode {
 }
 
 /// 逐字镜像 codex login/src/device_code_auth.rs 的 request_user_code。
-pub async fn request_device_code(
-    issuer: &str,
-    client_id: &str,
-) -> Result<DeviceCode, OAuthError> {
+pub async fn request_device_code(issuer: &str, client_id: &str) -> Result<DeviceCode, OAuthError> {
     let base = issuer.trim_end_matches('/');
     let url = format!("{base}/api/accounts/deviceauth/usercode");
     let body = serde_json::json!({ "client_id": client_id }).to_string();
@@ -268,8 +270,8 @@ pub async fn poll_device_code(
                 authorization_code: String,
                 code_verifier: String,
             }
-            let c: CodeSuccessResp = serde_json::from_str(&text)
-                .map_err(|e| OAuthError::Transient(e.to_string()))?;
+            let c: CodeSuccessResp =
+                serde_json::from_str(&text).map_err(|e| OAuthError::Transient(e.to_string()))?;
             return Ok(DeviceExchange {
                 authorization_code: c.authorization_code,
                 code_verifier: c.code_verifier,
@@ -298,7 +300,9 @@ pub fn parse_callback_url(url: &str, expected_state: &str) -> Result<String, OAu
     }
     let state = state.ok_or_else(|| OAuthError::Terminal("回调缺少 state".into()))?;
     if state != expected_state {
-        return Err(OAuthError::Terminal("state 不匹配（防 CSRF 校验失败）".into()));
+        return Err(OAuthError::Terminal(
+            "state 不匹配（防 CSRF 校验失败）".into(),
+        ));
     }
     code.ok_or_else(|| OAuthError::Terminal("回调缺少 code".into()))
 }
