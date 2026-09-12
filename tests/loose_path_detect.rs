@@ -75,6 +75,23 @@ async fn post(path: &str, body: &str) -> StatusCode {
     status
 }
 
+/// GET probe for paths with fewer segments than any loose endpoint
+/// (/models, /) — the v0.3.7 incident shapes. Fail-open contract: the
+/// gateway must answer (forward transparently to the upstream), NEVER
+/// drop the connection with an identification panic.
+async fn get(path: &str) -> StatusCode {
+    let req = Request::get(format!("http://127.0.0.1:{GW_PORT}{path}"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = client().request(req).await.expect(
+        "the request must be served — a transport error here means the \
+         identification path panicked (fail-closed regression)",
+    );
+    let status = resp.status();
+    let _ = resp.collect().await;
+    status
+}
+
 async fn records() -> Vec<serde_json::Value> {
     let req = Request::get(format!("http://127.0.0.1:{GW_PORT}/__atg/records"))
         .body(Full::new(Bytes::new()))
@@ -139,6 +156,13 @@ async fn loose_path_detect_and_upstream_gating() {
         .await,
         StatusCode::OK
     );
+
+    // 5) Incident shapes (v0.3.7): short/root paths previously panicked
+    // detect_path's loose loop — the request died with zero delivery.
+    // They must transparently forward to the upstream (which answers
+    // 200 for GETs) and mint NO turn (no LLM semantics in the path).
+    assert_eq!(get("/models").await, StatusCode::OK);
+    assert_eq!(get("/").await, StatusCode::OK);
 
     // Records: logging is async — poll.
     let mut recs = Vec::new();

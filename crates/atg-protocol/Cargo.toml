@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 atg-model = { path = "../atg-model" }
 serde_json = "1"
+[dev-dependencies]
+proptest = "1"
