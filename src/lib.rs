@@ -698,7 +698,21 @@ pub mod gateway_app {
         // Control endpoint: dump collected turn records as JSON.
         async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
             if session.req_header().uri.path() == "/__atg/records" {
-                let records = self.store.snapshot();
+                // Pagination (v0.3.9): ?limit=N&offset=M windows the NEWEST
+                // end — endpoint access no longer clones the whole store
+                // (a full pull used to duplicate every captured byte).
+                let (mut limit, mut offset) = (0usize, 0usize);
+                if let Some(q) = session.req_header().uri.query() {
+                    for pair in q.split('&') {
+                        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+                        match k {
+                            "limit" => limit = v.parse().unwrap_or(0),
+                            "offset" => offset = v.parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                }
+                let records = self.store.snapshot_bounded(limit, offset);
                 let body = serde_json::to_vec(&records).unwrap_or_default();
                 let mut resp = ResponseHeader::build(200, None)?;
                 resp.insert_header("content-type", "application/json")?;
@@ -729,6 +743,7 @@ pub mod gateway_app {
                     "failed": failed,
                     "dropped": dropped,
                     "panicked": panicked,
+                    "store_dropped": self.store.dropped(),
                     "failed_frames": failed_frames,
                     "turns_total": turns_total,
                     "loose_path_matches": loose_path_matches,
