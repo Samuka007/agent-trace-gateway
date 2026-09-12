@@ -243,9 +243,14 @@ impl ProtocolDescriptor {
                     if window != ep.as_slice() {
                         continue;
                     }
-                    let tail = &segments[start + ep.len()..];
+                    // saturating_add: start + ep.len() <= segments.len() by
+                    // the windows() contract — the saturating form is only
+                    // the lint-explicit spelling of a provable sum.
+                    let tail = segments
+                        .get(start.saturating_add(ep.len())..)
+                        .unwrap_or_default();
                     let anchored = tail.is_empty()
-                        || (tail.len() == 1 && LOOSE_SUBRESOURCES.contains(&tail[0]));
+                        || tail.first().is_some_and(|t| LOOSE_SUBRESOURCES.contains(t));
                     if anchored {
                         return Some(PathMatch {
                             descriptor,

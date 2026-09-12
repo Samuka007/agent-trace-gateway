@@ -45,6 +45,14 @@ failures degrade to "unknown protocol, forward transparently"
 (`detect_path_fail_open`). New per-request code needs a total-input-space
 test (empty/deep/unicode/pathological shapes) before merge.
 
+The gate is mechanical since v0.3.8: CI runs
+`cargo clippy --workspace --lib --bins -- -D clippy::indexing_slicing -D
+clippy::arithmetic_side_effects -D clippy::unwrap_used -D
+clippy::expect_used` (non-test targets via `--lib --bins`). Legacy audited
+sites carry file-level `// PANIC-AUDIT v0.3.8: …` allows with the audit
+rationale and the PanicAudit issue reference — do not extend those allows
+to new code, and do not strip the rationale comments.
+
 Review log with signatures: see the session review report
 (`.tmp-atg-rust-review.md` in the working workspace) — §D/§E/§F contain the
 full BLOCK/AMBIGUITY history of the descriptor, P0-semantics, and three-layer

@@ -1,6 +1,12 @@
 //! Capture size caps: bound verbatim content in turn records with a
 //! deterministic truncation marker carrying original and captured byte counts.
 //! Not a security control (D4: no redaction) — pure unbounded-growth defense.
+// PANIC-AUDIT v0.3.8: audited file — serde_json Value key-index (miss →
+// Null, never panics on objects) and provably-bounded slices/arithmetic on
+// locally-owned buffers (wire bodies capped by the capture layer). The
+// indexing/arithmetic lints are syntax-broad here; tracked in the
+// PanicAudit issue.
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub struct CaptureCap {
     max_bytes: usize,
 }

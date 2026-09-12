@@ -3,6 +3,13 @@
 //! Turn boundaries come from protocol frames (turn_markers), never from
 //! connection lifetime; the text/tool event names are sourced from this
 //! descriptor's sse_rules (the same knowledge the SSE engine would use).
+// PANIC-AUDIT v0.3.8: serde_json Value key-index in apply_client_frame /
+// apply_server_frame is panic-free for the audited shapes (miss → Null;
+// frames are JSON objects) — the indexing_slicing lint is syntax-broad
+// over Value::index. Tracked in the PanicAudit issue.
+// The two expects below are static descriptor-contract asserts: the table
+// is a compile-time constant whose sse_rules are fixed in this file.
+#![allow(clippy::indexing_slicing, clippy::expect_used)]
 use crate::{ProtocolDescriptor, SseAction};
 use atg_model::{ToolCall, TurnRecord};
 
@@ -110,42 +117,70 @@ impl WsFrameParser {
     }
 
     /// Feed raw bytes; returns complete text-frame payloads.
+    ///
+    /// Panic-free by construction over ARBITRARY remote bytes (v0.3.8 WS
+    /// hardening): the 64-bit declared frame length is remote-controlled —
+    /// checked arithmetic replaces the overflowing add, and frames whose
+    /// payload exceeds MAX_WS_FRAME_PAYLOAD are refused (parse buffer
+    /// dropped; later bytes restart a fresh parse — invalid frames are
+    /// ignored by the turn state, the stream itself keeps flowing).
+    /// A frame declaring an absurd length simply waits for bytes that
+    /// never come — memory stays bounded by the bytes actually received.
     pub fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
-        loop {
-            if self.buf.len() < 2 {
-                break;
-            }
-            let opcode = self.buf[0] & 0x0f;
-            let masked = self.buf[1] & 0x80 != 0;
-            let mut len = (self.buf[1] & 0x7f) as usize;
+        while let Some(&[b0, b1]) = self.buf.first_chunk::<2>() {
+            let opcode = b0 & 0x0f;
+            let masked = b1 & 0x80 != 0;
+            let mut len = u64::from(b1 & 0x7f);
             let mut hdr = 2usize;
             if len == 126 {
-                if self.buf.len() < 4 {
+                let Some(h4) = self.buf.first_chunk::<4>() else {
                     break;
-                }
-                len = u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize;
+                };
+                len = u16::from_be_bytes([h4[2], h4[3]]) as u64;
                 hdr = 4;
             } else if len == 127 {
-                if self.buf.len() < 10 {
+                let Some(h10) = self.buf.first_chunk::<10>() else {
                     break;
-                }
-                let mut arr = [0u8; 8];
-                arr.copy_from_slice(&self.buf[2..10]);
-                len = u64::from_be_bytes(arr) as usize;
+                };
+                let &[_, _, a, b, c, d, e, f, g, h] = h10;
+                len = u64::from_be_bytes([a, b, c, d, e, f, g, h]);
                 hdr = 10;
             }
-            let mask_len = if masked { 4 } else { 0 };
-            let total = hdr + mask_len + len;
+            let mask_len: u64 = if masked { 4 } else { 0 };
+            let Some(total) = (hdr as u64)
+                .checked_add(mask_len)
+                .and_then(|t| t.checked_add(len))
+            else {
+                // Overflow impossible even in principle (len < 2^64): the
+                // arithmetic above already bounds it — kept for rigor.
+                self.buf.clear();
+                return out;
+            };
+            if len > MAX_WS_FRAME_PAYLOAD as u64 {
+                // Remote-declared oversized frame: refuse. The frame's wire
+                // bytes cannot be skipped without trusting `len`, so the
+                // parse buffer is dropped — transparent forward is
+                // unaffected, turn parsing restarts on a clean slate.
+                self.buf.clear();
+                return out;
+            }
+            let total = total as usize;
             if self.buf.len() < total {
                 break;
             }
-            let mut payload = self.buf[hdr + mask_len..total].to_vec();
+            let payload_start = hdr.saturating_add(mask_len as usize);
+            let Some(payload_bytes) = self.buf.get(payload_start..total) else {
+                break; // unreachable: total <= buf.len() by the check above
+            };
+            let mut payload = payload_bytes.to_vec();
             if masked {
-                let mask = &self.buf[hdr..hdr + 4];
+                let Some(mask) = self.buf.get(hdr..hdr.saturating_add(4)) else {
+                    break; // unreachable: total >= hdr + 4 when masked
+                };
                 for (i, b) in payload.iter_mut().enumerate() {
-                    *b ^= mask[i % 4];
+                    *b ^= mask[i & 3]; // mask length 4: & 3 == % 4
                 }
             }
             self.buf.drain(..total);
@@ -154,6 +189,50 @@ impl WsFrameParser {
             }
         }
         out
+    }
+}
+
+/// Hard cap on a single WS frame payload the parser will assemble
+/// (matches the default capture cap). Turn frames are small JSON —
+/// anything beyond this is hostile or broken.
+pub const MAX_WS_FRAME_PAYLOAD: usize = 16 << 20;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // v0.3.8 WS hardening: push() must be total over ARBITRARY remote
+    // bytes — including frames declaring lengths around u64::MAX, where
+    // the pre-fix arithmetic overflowed and reversed-sliced (exit 101 on
+    // any WS-upgraded connection, both directions).
+    proptest! {
+        #[test]
+        fn ws_push_never_panics(data in proptest::collection::vec(proptest::num::u8::ANY, 0..512)) {
+            let mut p = WsFrameParser::new(false);
+            let _ = p.push(&data);
+            let mut masked = WsFrameParser::new(true);
+            let _ = masked.push(&data);
+        }
+
+        #[test]
+        fn ws_push_u64max_lengths_never_panics(
+            len in proptest::num::u64::ANY,
+            prefix in proptest::collection::vec(proptest::num::u8::ANY, 0..16),
+            tail in proptest::collection::vec(proptest::num::u8::ANY, 0..64),
+            opcode in 0x00u8..=0x0f,
+            masked in proptest::bool::ANY,
+        ) {
+            // 127-form frame header declaring `len` — the hostile space.
+            let mut frame = vec![opcode, 0x7f | if masked { 0x80 } else { 0 }];
+            frame.extend_from_slice(&len.to_be_bytes());
+            frame.extend_from_slice(&tail);
+            let mut p = WsFrameParser::new(false);
+            let _ = p.push(&prefix);
+            let _ = p.push(&frame);
+            // A follow-up push after any buffer state must stay safe too.
+            let _ = p.push(b"\x81\x05hello");
+        }
     }
 }
 

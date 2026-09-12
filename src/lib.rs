@@ -130,6 +130,7 @@ pub mod gateway_app {
         /// — drain final_output/usage must include the delivered prefix,
         /// not just post-death bytes — and return the drain deadline.
         /// Idempotent: the accumulator is seeded once.
+        #[allow(clippy::arithmetic_side_effects)] // Instant + Duration: overflow is +584 years
         fn begin_drain(
             &self,
             ctx: &mut Ctx,
@@ -141,6 +142,19 @@ pub mod gateway_app {
                 ctx.drain_acc = Some(acc);
             }
             tokio::time::Instant::now() + self.drain_timeout
+        }
+
+        /// Bounded raw capture during drain (v0.3.8 helper): bytes stop at
+        /// the capture cap; overflow is counted. Bounds are provable —
+        /// take = min(cap − buf.len(), chunk.len()) — the allow covers the
+        /// lint's syntax-broad view of the provable slice/subtraction.
+        #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+        fn drain_capture(&self, ctx: &mut Ctx, bytes: &[u8]) {
+            let cap = self.cap.max_bytes();
+            let room = cap.saturating_sub(ctx.resp_buf.len());
+            let take = room.min(bytes.len());
+            ctx.resp_buf.extend_from_slice(&bytes[..take]);
+            ctx.drain_overflow += (bytes.len() - take) as u64;
         }
 
         /// Owned request relay (v0.3.6): forwards one LLM API request to
@@ -371,11 +385,7 @@ pub mod gateway_app {
                 } else if self.drain_on_cancel {
                     // Draining: forward nothing, capture bounded, parse
                     // incrementally so final_output/usage survive the cap.
-                    let cap = self.cap.max_bytes();
-                    let room = cap.saturating_sub(ctx.resp_buf.len());
-                    let take = room.min(bytes.len());
-                    ctx.resp_buf.extend_from_slice(&bytes[..take]);
-                    ctx.drain_overflow += (bytes.len() - take) as u64;
+                    self.drain_capture(ctx, &bytes);
                     if ctx.drain_acc.is_none() && unpack::looks_like_sse(&ctx.resp_content_type) {
                         ctx.drain_acc = Some(crate::engine::SseAccum::default());
                     }
@@ -678,7 +688,7 @@ pub mod gateway_app {
                 return Ok(true);
             }
             if session.req_header().uri.path() == "/__atg/health" {
-                let (exported, failed, dropped) = self.exporter.health.snapshot();
+                let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
                 let failed_frames = self
                     .failed_frames
                     .load(std::sync::atomic::Ordering::Relaxed);
@@ -696,6 +706,7 @@ pub mod gateway_app {
                     "exported": exported,
                     "failed": failed,
                     "dropped": dropped,
+                    "panicked": panicked,
                     "failed_frames": failed_frames,
                     "turns_total": turns_total,
                     "loose_path_matches": loose_path_matches,
@@ -747,8 +758,20 @@ pub mod gateway_app {
         ) -> Result<()> {
             if session.was_upgraded() {
                 if let Some(b) = body {
-                    for payload in ctx.ws_client_parser.push(b) {
-                        ctx.ws_turn.apply_client_frame(&payload);
+                    // Fail-open (v0.3.8): a WS parse panic must not kill the
+                    // request — the parse state resets and the stream keeps
+                    // forwarding transparently.
+                    let parse = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        for payload in ctx.ws_client_parser.push(b) {
+                            ctx.ws_turn.apply_client_frame(&payload);
+                        }
+                    }));
+                    if parse.is_err() {
+                        eprintln!(
+                            "ATG: ws client frame parse panicked — parse state reset, forwarding continues"
+                        );
+                        ctx.ws_client_parser = atg_protocol::openai::live::WsFrameParser::new(true);
+                        ctx.ws_turn = atg_protocol::openai::live::WsTurnState::default();
                     }
                 }
             } else if let Some(b) = body {
@@ -782,17 +805,30 @@ pub mod gateway_app {
             }
             if session.was_upgraded() {
                 if let Some(b) = body {
-                    for payload in ctx.ws_server_parser.push(b) {
-                        if ctx.ws_turn.active() && ctx.first_output_ns.is_none() {
-                            ctx.first_output_ns = Some(now_ns());
+                    // Fail-open (v0.3.8): same degrade contract as the
+                    // client arm — the stream keeps flowing, a partial
+                    // turn may be lost instead of the request.
+                    let parse = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        for payload in ctx.ws_server_parser.push(b) {
+                            if ctx.ws_turn.active() && ctx.first_output_ns.is_none() {
+                                ctx.first_output_ns = Some(now_ns());
+                            }
+                            if let Some(mut record) = ctx.ws_turn.apply_server_frame(&payload) {
+                                ctx.end_ns = now_ns();
+                                record.start_ns = ctx.start_ns;
+                                record.end_ns = ctx.end_ns;
+                                record.completion_start_ns = ctx.first_output_ns.take();
+                                self.push_record(record);
+                            }
                         }
-                        if let Some(mut record) = ctx.ws_turn.apply_server_frame(&payload) {
-                            ctx.end_ns = now_ns();
-                            record.start_ns = ctx.start_ns;
-                            record.end_ns = ctx.end_ns;
-                            record.completion_start_ns = ctx.first_output_ns.take();
-                            self.push_record(record);
-                        }
+                    }));
+                    if parse.is_err() {
+                        eprintln!(
+                            "ATG: ws server frame parse panicked — parse state reset, forwarding continues"
+                        );
+                        ctx.ws_server_parser =
+                            atg_protocol::openai::live::WsFrameParser::new(false);
+                        ctx.ws_turn = atg_protocol::openai::live::WsTurnState::default();
                     }
                 }
             } else if let Some(b) = body {
@@ -875,6 +911,10 @@ pub mod gateway_app {
             } else {
                 None
             };
+            // Fail-open record assembly (v0.3.8): everything below is
+            // observability — the response is already delivered, so a panic
+            // here must degrade to "no turn recorded", never kill the
+            // request task.
             let header_get = |name: &str| -> Option<String> {
                 session
                     .req_header()
@@ -883,226 +923,236 @@ pub mod gateway_app {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string)
             };
-            // Single parse of req_buf — shared with every extractor (C14).
-            let parsed_req: Option<serde_json::Value> = unpack::parse_body(&ctx.req_buf);
-            // Harness attribution (orthogonal to session extraction; the
-            // user-agent is the canary-path signal — the main OTLP path
-            // records no UA).
-            let ua = header_get("user-agent");
-            let hfacts =
-                atg_harness::identify(protocol, parsed_req.as_ref(), ua.as_deref(), &header_get);
-            // Two-tier (v0.3.2): identity label for harness metadata/tags;
-            // the matched session-carrying dialect rides its own field.
-            let harness = hfacts.harness_label();
-            let dialect = hfacts.dialect.to_string();
-            // Attribution-evidence audit: record the UA this gateway
-            // actually saw (production misattribution triage) — capped at
-            // 256 bytes on a char boundary (unbounded header attribute).
-            let client_ua = ua
-                .as_deref()
-                .map(|u| match u.char_indices().nth(256) {
-                    Some((i, _)) => u[..i].to_string(),
-                    None => u.to_string(),
-                })
-                .unwrap_or_default();
-            // Salted API-credential fingerprint (correlation without the
-            // key; plaintext never enters any downstream path).
-            let api_key_fp = request_api_key_fp(protocol, &header_get);
-            // Request-side facts: ONE descriptor lookup + ONE pass over
-            // the parsed body (F6 single entry; the old scattered
-            // detect_by_name calls and the messages re-parse are gone).
-            let tf = parsed_req
-                .as_ref()
-                .and_then(|req| unpack::turn_facts(protocol, req, &header_get, &hfacts));
-            let mut session_id = tf
-                .as_ref()
-                .and_then(|f| f.session_id.clone())
-                .unwrap_or_default();
-            let mut session_synthetic = false;
-            // F3 tightening (user ruling): the stitcher runs ONLY for
-            // protocols with session semantics (anthropic/responses — chat
-            // SDK traffic is stateless single-shot, force-stitching is
-            // noise) and only mints a session when the replayed chain has
-            // >=2 messages (a single message cannot evidence continuity).
-            let stitch_eligible = tf.as_ref().is_some_and(|f| {
-                f.stitch_eligible && f.messages.as_ref().is_some_and(|m| m.len() >= 2)
-            });
-            self.turns_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Annotation-rate metric counts the IDENTITY layer only
-            // (§6 ruling) — "-compatible" downgrades stay unannotated.
-            if hfacts.identity.is_some() {
-                self.turns_with_harness
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Single parse of req_buf — shared with every extractor (C14).
+                let parsed_req: Option<serde_json::Value> = unpack::parse_body(&ctx.req_buf);
+                // Harness attribution (orthogonal to session extraction; the
+                // user-agent is the canary-path signal — the main OTLP path
+                // records no UA).
+                let ua = header_get("user-agent");
+                let hfacts = atg_harness::identify(
+                    protocol,
+                    parsed_req.as_ref(),
+                    ua.as_deref(),
+                    &header_get,
+                );
+                // Two-tier (v0.3.2): identity label for harness metadata/tags;
+                // the matched session-carrying dialect rides its own field.
+                let harness = hfacts.harness_label();
+                let dialect = hfacts.dialect.to_string();
+                // Attribution-evidence audit: record the UA this gateway
+                // actually saw (production misattribution triage) — capped at
+                // 256 bytes on a char boundary (unbounded header attribute).
+                let client_ua = ua
+                    .as_deref()
+                    .map(|u| match u.char_indices().nth(256) {
+                        Some((i, _)) => u[..i].to_string(),
+                        None => u.to_string(),
+                    })
+                    .unwrap_or_default();
+                // Salted API-credential fingerprint (correlation without the
+                // key; plaintext never enters any downstream path).
+                let api_key_fp = request_api_key_fp(protocol, &header_get);
+                // Request-side facts: ONE descriptor lookup + ONE pass over
+                // the parsed body (F6 single entry; the old scattered
+                // detect_by_name calls and the messages re-parse are gone).
+                let tf = parsed_req
+                    .as_ref()
+                    .and_then(|req| unpack::turn_facts(protocol, req, &header_get, &hfacts));
+                let mut session_id = tf
+                    .as_ref()
+                    .and_then(|f| f.session_id.clone())
+                    .unwrap_or_default();
+                let mut session_synthetic = false;
+                // F3 tightening (user ruling): the stitcher runs ONLY for
+                // protocols with session semantics (anthropic/responses — chat
+                // SDK traffic is stateless single-shot, force-stitching is
+                // noise) and only mints a session when the replayed chain has
+                // >=2 messages (a single message cannot evidence continuity).
+                let stitch_eligible = tf.as_ref().is_some_and(|f| {
+                    f.stitch_eligible && f.messages.as_ref().is_some_and(|m| m.len() >= 2)
+                });
+                self.turns_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            let harness_candidates = hfacts
-                .candidates
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>();
-            let harness_enrich = parsed_req
-                .as_ref()
-                .map(|req| atg_harness::enrich(&hfacts, req))
-                .unwrap_or_default();
-            let mut breakpoint = false;
-            if session_id.is_empty() && stitch_eligible {
-                if let Some(messages) = tf.as_ref().and_then(|f| f.messages.as_ref()) {
-                    let scope = header_get("authorization").unwrap_or_default();
-                    let (synthetic, is_bp) = self.stitcher.assign(&scope, messages);
-                    session_id = synthetic;
-                    breakpoint = is_bp;
-                    session_synthetic = !session_id.is_empty();
+                // Annotation-rate metric counts the IDENTITY layer only
+                // (§6 ruling) — "-compatible" downgrades stay unannotated.
+                if hfacts.identity.is_some() {
+                    self.turns_with_harness
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-            }
-            // §E ruling: synthetic sessions stay out of the hit-rate
-            // numerator (they are fallbacks, not observed identifiers).
-            if !session_id.is_empty() && !session_synthetic {
-                self.turns_with_session
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            let raw_request = self.cap.bound(&ctx.req_buf);
-            let raw_response = self.cap.bound(&ctx.resp_buf);
-            // Drain truncation marker (v0.3.6): raw drain capture stops at
-            // the cap while the stream itself ran on — the marker reports
-            // the TRUE original size (captured head + dropped overflow).
-            let raw_response = if ctx.drain_overflow > 0 {
-                format!(
-                    "{raw_response}[truncated:original_bytes={},captured_bytes={}]",
-                    ctx.resp_buf.len() + ctx.drain_overflow as usize,
-                    ctx.resp_buf.len()
-                )
-            } else {
-                raw_response
-            };
-            if unpack::looks_like_sse(&ctx.resp_content_type) {
-                // One traversal fills text/usage/tool_calls/error. A
-                // drained turn (v0.3.6) replays its incrementally-fed
-                // accumulator instead — complete final_output/usage even
-                // when the raw capture hit the cap.
-                let (final_output, usage, tool_calls, error, frame_errors) =
-                    match ctx.drain_acc.take() {
-                        Some(acc) => {
-                            let out = crate::engine::drain_finish(
-                                acc,
-                                matched.descriptor,
-                                &mut ctx.drain_tail,
-                            );
-                            (out.text, out.usage, out.tools, out.error, out.frame_errors)
-                        }
-                        None => unpack::reassemble_sse(protocol, &ctx.resp_buf),
-                    };
-                if frame_errors > 0 {
-                    let total = self.failed_frames.fetch_add(
-                        u64::from(frame_errors),
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    // Sampled: first occurrence + every 10th cumulative.
-                    if total == 0 || total % 10 == 0 {
-                        eprintln!(
-                            "ATG: SSE unpack frame_errors={frame_errors} cumulative={}",
-                            total + u64::from(frame_errors)
-                        );
+                let harness_candidates = hfacts
+                    .candidates
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>();
+                let harness_enrich = parsed_req
+                    .as_ref()
+                    .map(|req| atg_harness::enrich(&hfacts, req))
+                    .unwrap_or_default();
+                let mut breakpoint = false;
+                if session_id.is_empty() && stitch_eligible {
+                    if let Some(messages) = tf.as_ref().and_then(|f| f.messages.as_ref()) {
+                        let scope = header_get("authorization").unwrap_or_default();
+                        let (synthetic, is_bp) = self.stitcher.assign(&scope, messages);
+                        session_id = synthetic;
+                        breakpoint = is_bp;
+                        session_synthetic = !session_id.is_empty();
                     }
                 }
-                let user_input = tf
-                    .as_ref()
-                    .map(|f| f.user_input.clone())
-                    .unwrap_or_default();
-                let model_name = tf
-                    .as_ref()
-                    .map(|f| f.model_name.clone())
-                    .unwrap_or_default();
-                let user_id = tf.as_ref().map(|f| f.user_id.clone()).unwrap_or_default();
-                ctx.end_ns = now_ns();
-                self.push_record(atg_model::TurnRecord {
-                    protocol: protocol.to_string(),
-                    session_id,
-                    user_input,
-                    final_output,
-                    raw_request,
-                    raw_response,
-                    tool_calls,
-                    breakpoint,
-                    start_ns: ctx.start_ns,
-                    end_ns: ctx.end_ns,
-                    usage,
-                    model_name,
-                    user_id,
-                    harness,
-                    dialect: dialect.clone(),
-                    client_ua: client_ua.clone(),
-                    api_key_fp: api_key_fp.clone(),
-                    harness_candidates,
-                    harness_anomaly: hfacts.protocol_anomaly,
-                    harness_enrich,
-                    session_synthetic,
-                    completion_start_ns: ctx.first_output_ns,
-                    error: error.or(http_error),
-                    cancelled: client_cancelled,
-                    drain_timed_out: ctx.drain_timed_out,
-                });
-                return;
-            }
-            match unpack::unpack_nonstreaming(protocol, parsed_req.as_ref(), &ctx.resp_buf) {
-                Some(mut record) => {
-                    record.session_id = session_id;
-                    record.breakpoint = breakpoint;
-                    record.harness = harness;
-                    record.dialect = dialect;
-                    record.client_ua = client_ua;
-                    record.api_key_fp = api_key_fp;
-                    record.harness_candidates = harness_candidates;
-                    record.harness_anomaly = hfacts.protocol_anomaly;
-                    record.harness_enrich = harness_enrich;
-                    record.session_synthetic = session_synthetic;
-                    record.completion_start_ns = Some(ctx.start_ns);
-                    record.error = record.error.take().or(http_error);
-                    record.cancelled = client_cancelled;
-                    record.drain_timed_out = ctx.drain_timed_out;
-                    record.raw_request = raw_request;
-                    record.raw_response = raw_response;
-                    ctx.end_ns = now_ns();
-                    record.start_ns = ctx.start_ns;
-                    record.end_ns = ctx.end_ns;
-                    self.push_record(record);
+                // §E ruling: synthetic sessions stay out of the hit-rate
+                // numerator (they are fallbacks, not observed identifiers).
+                if !session_id.is_empty() && !session_synthetic {
+                    self.turns_with_session
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                None if http_error.is_some() || (ctx.relay_done && client_cancelled) => {
-                    // NIT-B: a proxy-level failure (no upstream response,
-                    // or an unparseable error body) previously produced NO
-                    // record at all — the errored turn vanished. Emit a
-                    // minimal record so the failure is observable. A
-                    // relayed turn whose non-SSE body never parsed (drain
-                    // truncation beyond the cap) is covered by the same
-                    // arm — as a cancelled turn, not a failure.
+                let raw_request = self.cap.bound(&ctx.req_buf);
+                let raw_response = self.cap.bound(&ctx.resp_buf);
+                // Drain truncation marker (v0.3.6): raw drain capture stops at
+                // the cap while the stream itself ran on — the marker reports
+                // the TRUE original size (captured head + dropped overflow).
+                let raw_response = if ctx.drain_overflow > 0 {
+                    format!(
+                        "{raw_response}[truncated:original_bytes={},captured_bytes={}]",
+                        // Counters: saturating form (lint-explicit; overflow
+                        // needs a >usize record which the capture cap excludes).
+                        ctx.resp_buf
+                            .len()
+                            .saturating_add(ctx.drain_overflow as usize),
+                        ctx.resp_buf.len()
+                    )
+                } else {
+                    raw_response
+                };
+                if unpack::looks_like_sse(&ctx.resp_content_type) {
+                    // One traversal fills text/usage/tool_calls/error. A
+                    // drained turn (v0.3.6) replays its incrementally-fed
+                    // accumulator instead — complete final_output/usage even
+                    // when the raw capture hit the cap.
+                    let (final_output, usage, tool_calls, error, frame_errors) =
+                        match ctx.drain_acc.take() {
+                            Some(acc) => {
+                                let out = crate::engine::drain_finish(
+                                    acc,
+                                    matched.descriptor,
+                                    &mut ctx.drain_tail,
+                                );
+                                (out.text, out.usage, out.tools, out.error, out.frame_errors)
+                            }
+                            None => unpack::reassemble_sse(protocol, &ctx.resp_buf),
+                        };
+                    if frame_errors > 0 {
+                        let total = self.failed_frames.fetch_add(
+                            u64::from(frame_errors),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        // Sampled: first occurrence + every 10th cumulative.
+                        if total == 0 || total.is_multiple_of(10) {
+                            eprintln!(
+                                "ATG: SSE unpack frame_errors={frame_errors} cumulative={}",
+                                total.saturating_add(u64::from(frame_errors))
+                            );
+                        }
+                    }
+                    let user_input = tf
+                        .as_ref()
+                        .map(|f| f.user_input.clone())
+                        .unwrap_or_default();
+                    let model_name = tf
+                        .as_ref()
+                        .map(|f| f.model_name.clone())
+                        .unwrap_or_default();
+                    let user_id = tf.as_ref().map(|f| f.user_id.clone()).unwrap_or_default();
                     ctx.end_ns = now_ns();
                     self.push_record(atg_model::TurnRecord {
                         protocol: protocol.to_string(),
                         session_id,
-                        user_input: tf
-                            .as_ref()
-                            .map(|f| f.user_input.clone())
-                            .unwrap_or_default(),
+                        user_input,
+                        final_output,
                         raw_request,
                         raw_response,
+                        tool_calls,
+                        breakpoint,
+                        start_ns: ctx.start_ns,
+                        end_ns: ctx.end_ns,
+                        usage,
+                        model_name,
+                        user_id,
                         harness,
+                        dialect: dialect.clone(),
+                        client_ua: client_ua.clone(),
+                        api_key_fp: api_key_fp.clone(),
                         harness_candidates,
                         harness_anomaly: hfacts.protocol_anomaly,
                         harness_enrich,
                         session_synthetic,
-                        error: http_error,
-                        start_ns: ctx.start_ns,
-                        end_ns: ctx.end_ns,
+                        completion_start_ns: ctx.first_output_ns,
+                        error: error.or(http_error),
                         cancelled: client_cancelled,
                         drain_timed_out: ctx.drain_timed_out,
-                        model_name: tf
-                            .as_ref()
-                            .map(|f| f.model_name.clone())
-                            .unwrap_or_default(),
-                        ..Default::default()
                     });
+                    return;
                 }
-                None => {}
-            }
+                match unpack::unpack_nonstreaming(protocol, parsed_req.as_ref(), &ctx.resp_buf) {
+                    Some(mut record) => {
+                        record.session_id = session_id;
+                        record.breakpoint = breakpoint;
+                        record.harness = harness;
+                        record.dialect = dialect;
+                        record.client_ua = client_ua;
+                        record.api_key_fp = api_key_fp;
+                        record.harness_candidates = harness_candidates;
+                        record.harness_anomaly = hfacts.protocol_anomaly;
+                        record.harness_enrich = harness_enrich;
+                        record.session_synthetic = session_synthetic;
+                        record.completion_start_ns = Some(ctx.start_ns);
+                        record.error = record.error.take().or(http_error);
+                        record.cancelled = client_cancelled;
+                        record.drain_timed_out = ctx.drain_timed_out;
+                        record.raw_request = raw_request;
+                        record.raw_response = raw_response;
+                        ctx.end_ns = now_ns();
+                        record.start_ns = ctx.start_ns;
+                        record.end_ns = ctx.end_ns;
+                        self.push_record(record);
+                    }
+                    None if http_error.is_some() || (ctx.relay_done && client_cancelled) => {
+                        // NIT-B: a proxy-level failure (no upstream response,
+                        // or an unparseable error body) previously produced NO
+                        // record at all — the errored turn vanished. Emit a
+                        // minimal record so the failure is observable. A
+                        // relayed turn whose non-SSE body never parsed (drain
+                        // truncation beyond the cap) is covered by the same
+                        // arm — as a cancelled turn, not a failure.
+                        ctx.end_ns = now_ns();
+                        self.push_record(atg_model::TurnRecord {
+                            protocol: protocol.to_string(),
+                            session_id,
+                            user_input: tf
+                                .as_ref()
+                                .map(|f| f.user_input.clone())
+                                .unwrap_or_default(),
+                            raw_request,
+                            raw_response,
+                            harness,
+                            harness_candidates,
+                            harness_anomaly: hfacts.protocol_anomaly,
+                            harness_enrich,
+                            session_synthetic,
+                            error: http_error,
+                            start_ns: ctx.start_ns,
+                            end_ns: ctx.end_ns,
+                            cancelled: client_cancelled,
+                            drain_timed_out: ctx.drain_timed_out,
+                            model_name: tf
+                                .as_ref()
+                                .map(|f| f.model_name.clone())
+                                .unwrap_or_default(),
+                            ..Default::default()
+                        });
+                    }
+                    None => {}
+                }
+            }));
         }
 
         fn fail_to_connect(
@@ -1220,6 +1270,9 @@ pub mod gateway_app {
                 std::process::exit(2);
             }
         };
+        // PANIC-AUDIT v0.3.8: process startup — a pingora bootstrap failure
+        // is fatal by design and must abort the process (class ii).
+        #[allow(clippy::unwrap_used)]
         let mut server = Server::new(Some(Opt::default())).unwrap();
         server.bootstrap();
         let gateway = Gateway {

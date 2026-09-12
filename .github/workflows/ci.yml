@@ -35,6 +35,14 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: clippy (panic-hardening gate, non-test code)
+        # v0.3.8: restriction lints over --lib --bins only — cfg(test) code
+        # is exempt by target selection, which is how the "non-test domain"
+        # scoping is realized. Legacy audited sites carry file-level
+        # PANIC-AUDIT v0.3.8 allows (see the PanicAudit issue); new code
+        # must not add to them.
+        run: cargo clippy --workspace --lib --bins -- -D clippy::indexing_slicing -D clippy::arithmetic_side_effects -D clippy::unwrap_used -D clippy::expect_used
+
       - name: test
         run: cargo test --workspace
 
