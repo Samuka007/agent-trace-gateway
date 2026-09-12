@@ -8,6 +8,11 @@
 //! with no conflicting UA. The modern JSON envelope and the bare CC header
 //! are DIALECT shapes only — hitting them without identity evidence yields
 //! the downgraded "claude-code-compatible" assertion, not the identity.
+// PANIC-AUDIT v0.3.8: serde_json Value key-index in the harness shape
+// matchers is panic-free for the audited shapes (miss → Null; shapes are
+// JSON objects) — the indexing_slicing lint is syntax-broad over
+// Value::index. Tracked in the PanicAudit issue.
+#![allow(clippy::indexing_slicing)]
 use atg_protocol::session::{
     claude_code_legacy_parts, metadata_envelope_transform, metadata_user_id_session,
 };

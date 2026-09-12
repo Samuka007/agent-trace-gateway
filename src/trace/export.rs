@@ -1,7 +1,14 @@
 //! OTLP/HTTP export of turn records (JSON encoding) to the configured
 //! endpoint. Fail-open by design: bounded queue, drop on overflow or endpoint
 //! failure, health counters observable — business traffic is never blocked.
+// PANIC-AUDIT v0.3.8: audited file — serde_json Value key-index (miss →
+// Null, never panics on objects) and provably-bounded slices/arithmetic on
+// locally-owned buffers (wire bodies capped by the capture layer). The
+// indexing/arithmetic lints are syntax-broad here; tracked in the
+// PanicAudit issue.
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use atg_model::TurnRecord;
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +28,9 @@ pub struct ExportHealth {
     pub exported: std::sync::atomic::AtomicU64,
     pub failed: std::sync::atomic::AtomicU64,
     pub dropped: std::sync::atomic::AtomicU64,
+    /// Batch flushes aborted by a panic inside the export task
+    /// (v0.3.8 seam: the task survives and keeps exporting).
+    pub panicked: std::sync::atomic::AtomicU64,
 }
 
 pub struct Exporter {
@@ -47,6 +57,10 @@ impl Exporter {
         // The gateway proxy runs on pingora's threads (no ambient tokio
         // runtime), so the exporter owns a dedicated current-thread runtime.
         std::thread::spawn(move || {
+            // PANIC-AUDIT v0.3.8: exporter thread startup — a runtime
+            // build failure is fatal by design and must abort the thread
+            // (class ii, process startup path).
+            #[allow(clippy::expect_used)]
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -94,7 +108,31 @@ async fn export_loop(
         }
         let batch = std::mem::take(&mut buf);
         last_flush = Instant::now();
-        flush_batch(&client, &endpoint, &auth_header, &batch, &health).await;
+        // v0.3.8 seam: a panic inside a flush must not kill the export
+        // task — the task dying here silently and permanently stops ALL
+        // exports while the gateway keeps serving. Degrade: count the
+        // batch as failed+panicked and continue with the next batch.
+        let flushed = std::panic::AssertUnwindSafe(flush_batch(
+            &client,
+            &endpoint,
+            &auth_header,
+            &batch,
+            &health,
+        ))
+        .catch_unwind()
+        .await;
+        if flushed.is_err() {
+            health
+                .failed
+                .fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            health
+                .panicked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "OTLP export loop: flush panicked — batch dropped ({} records), export continues",
+                batch.len()
+            );
+        }
     }
     if !buf.is_empty() {
         flush_batch(&client, &endpoint, &auth_header, &buf, &health).await;
@@ -429,12 +467,13 @@ fn random_bytes(n: usize) -> Vec<u8> {
 
 /// Test helper: current health counters.
 impl ExportHealth {
-    pub fn snapshot(&self) -> (u64, u64, u64) {
+    pub fn snapshot(&self) -> (u64, u64, u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;
         (
             self.exported.load(Relaxed),
             self.failed.load(Relaxed),
             self.dropped.load(Relaxed),
+            self.panicked.load(Relaxed),
         )
     }
 }

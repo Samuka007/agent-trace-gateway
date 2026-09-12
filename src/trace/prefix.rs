@@ -12,6 +12,12 @@
 //! Bounds: LRU capacity (env ATG_STITCH_CAPACITY, default 100_000) + TTL
 //! (env ATG_STITCH_TTL_MS, default 24h). Over/evicted requests degrade to
 //! independent single-turn records; no errors are produced.
+// PANIC-AUDIT v0.3.8: audited file — serde_json Value key-index (miss →
+// Null, never panics on objects) and provably-bounded slices/arithmetic on
+// locally-owned buffers (wire bodies capped by the capture layer). The
+// indexing/arithmetic lints are syntax-broad here; tracked in the
+// PanicAudit issue.
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -139,6 +145,10 @@ fn instance_salt() -> [u8; 8] {
             .unwrap_or_default(),
     );
     h.update((&ANCHOR as *const u8 as usize).to_be_bytes());
+    // PANIC-AUDIT v0.3.8: sha256 finalize yields exactly 32 bytes; [..8]
+    // is a provable fixed-length slice and try_into on 8 bytes is total
+    // (class iii, len contract).
+    #[allow(clippy::indexing_slicing, clippy::unwrap_used)]
     h.finalize()[..8].try_into().unwrap()
 }
 

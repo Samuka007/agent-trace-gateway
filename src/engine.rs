@@ -2,6 +2,12 @@
 //! and produces turn facts. This is the only place allowed to branch on
 //! wire-format knowledge; protocol details themselves live in the const
 //! descriptor tables.
+// PANIC-AUDIT v0.3.8: audited file — serde_json Value key-index (miss →
+// Null, never panics on objects) and provably-bounded slices/arithmetic on
+// locally-owned buffers (wire bodies capped by the capture layer). The
+// indexing/arithmetic lints are syntax-broad here; tracked in the
+// PanicAudit issue.
+#![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use atg_model::ToolCall;
 use atg_protocol::{resolve_path, ProtocolDescriptor, SseAction, SseRule, ToolCallStrategy};
 
@@ -189,6 +195,9 @@ pub fn apply_sse_rule(
                                         arguments: String::new(),
                                     },
                                 ));
+                                // PANIC-AUDIT v0.3.8: the entry was just
+                                // pushed above — last_mut() is provably Some.
+                                #[allow(clippy::unwrap_used)]
                                 acc.chat_tools.last_mut().unwrap()
                             }
                         };
@@ -381,6 +390,23 @@ pub fn nonstreaming(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // v0.3.8 panic hardening: the SSE entry points must be total over
+    // ARBITRARY bytes — remote bodies are untrusted. Any panic here is a
+    // failed request on the wire.
+    proptest! {
+        #[test]
+        fn sse_parsers_never_panics(body in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
+            let d = atg_protocol::ProtocolDescriptor::detect_by_name("openai.responses").unwrap();
+            let _ = stream_response(d, &body);
+            let _ = sse_data_frames(&body);
+            let mut acc = SseAccum::default();
+            let mut buf = Vec::new();
+            drain_feed(&mut acc, d, &mut buf, &body);
+            let _ = drain_finish(acc, d, &mut buf);
+        }
+    }
 
     /// Counter semantics (user probe): protocol-legal non-payload frames
     /// must not inflate frame_errors — comment keep-alives and the

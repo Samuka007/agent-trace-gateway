@@ -110,8 +110,8 @@ pub fn merge_usage(acc: &mut Option<TurnUsage>, next: TurnUsage) {
 pub fn usage_details_json(usage: &TurnUsage) -> String {
     let mut detail = serde_json::Map::new();
     let mut put = |key: &str, val: Option<u64>| {
-        if val.is_some_and(|v| v > 0) {
-            detail.insert(key.to_string(), serde_json::Value::from(val.unwrap()));
+        if let Some(v) = val.filter(|v| *v > 0) {
+            detail.insert(key.to_string(), serde_json::Value::from(v));
         }
     };
     put("input", usage.input_tokens);

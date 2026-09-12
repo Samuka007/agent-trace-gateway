@@ -2,6 +2,11 @@
 //! in the request body — `client_metadata` carrying x-codex-* keys (turn
 //! metadata / installation id). Its session value needs no dialect rule:
 //! client_metadata.session_id is already an openai.responses body mount.
+// PANIC-AUDIT v0.3.8: serde_json Value key-index in the harness shape
+// matchers is panic-free for the audited shapes (miss → Null; shapes are
+// JSON objects) — the indexing_slicing lint is syntax-broad over
+// Value::index. Tracked in the PanicAudit issue.
+#![allow(clippy::indexing_slicing)]
 use serde_json::Value;
 
 /// Identity body fingerprint: any x-codex-* key inside client_metadata.

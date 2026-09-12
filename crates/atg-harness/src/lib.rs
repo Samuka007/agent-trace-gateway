@@ -202,7 +202,13 @@ pub fn identify(
             protocol_anomaly: false,
         };
     }
-    let top = identity_hits.iter().map(|h| h.strength).max().unwrap();
+    // identity_hits is non-empty here (early return above); the default
+    // only satisfies the lint and is never taken.
+    let top = identity_hits
+        .iter()
+        .map(|h| h.strength)
+        .max()
+        .unwrap_or_default();
     let candidates: Vec<&'static str> = identity_hits
         .iter()
         .filter(|h| h.strength == top)

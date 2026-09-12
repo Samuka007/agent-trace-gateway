@@ -68,20 +68,31 @@ pub static DESCRIPTOR: crate::ProtocolDescriptor = crate::ProtocolDescriptor {
 /// Non-streaming message.tool_calls: choices[0].message.tool_calls[]
 /// entries carry function.name + function.arguments.
 fn nonstreaming_tools(resp: &serde_json::Value) -> Vec<atg_model::ToolCall> {
-    let Some(calls) = resp["choices"][0]["message"]["tool_calls"].as_array() else {
+    let Some(calls) = resp
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.as_array())
+    else {
         return Vec::new();
     };
     calls
         .iter()
-        .map(|c| atg_model::ToolCall {
-            name: c["function"]["name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            arguments: c["function"]["arguments"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+        .map(|c| {
+            let function = c.get("function");
+            atg_model::ToolCall {
+                name: function
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                arguments: function
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            }
         })
         .collect()
 }
