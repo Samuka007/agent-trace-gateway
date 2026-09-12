@@ -680,10 +680,10 @@ mod tests {
         }
     }
 
-    /// Property test (CI): detect_path is total over ARBITRARY &str —
-    /// empty, slash-only, single segment, deep nesting, multibyte UTF-8,
-    /// pathological length. windows() made the slicing structurally
-    /// bounds-safe; this pins it against future edits.
+    // Property test (CI): detect_path is total over ARBITRARY &str —
+    // empty, slash-only, single segment, deep nesting, multibyte UTF-8,
+    // pathological length. windows() made the slicing structurally
+    // bounds-safe; this pins it against future edits.
     proptest! {
         #[test]
         fn detect_path_never_panics(path in "[^\\n\\r]{0,4096}") {
