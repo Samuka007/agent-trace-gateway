@@ -9,7 +9,9 @@
 
 ### 计划中（台账，未排期）
 
-### 修复：TraceStore 无界增长（v0.3.9 hotfix，生产全量切换暴露）
+## [0.3.9] - 2026-09-12
+
+### 修复：TraceStore 无界增长（生产全量切换暴露）
 
 `TraceStore` 原为无上限 `Vec<TurnRecord>`：push 无预算、records 端点每次访问
 全量 clone——全量流量下每 turn 含捕获全文，长期运行线性涨内存必 OOM（生产实测
