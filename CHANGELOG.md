@@ -17,6 +17,28 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.7] - 2026-09-12
+
+### 修复：loose path detect 越界 panic（生产压测实锤）
+
+全量流量压测中发现：`detect_path` 宽松端点匹配的手工切片
+`segments[start..start+ep.len()]` 使用**包含上界**的循环范围——请求路径段数少于
+端点变体时（`/models` 1 段 vs `chat/completions` 2 段；`/` 0 段 vs 1 段端点）仍执行
+start=0 → 切片越界 panic。识别阶段 panic 即该请求零交付（fail-closed）：压测中每次
+杂路径探针 = 一个请求死亡（容器幸存，backend UP——但穿透率塌陷）。
+
+- **结构修复**：宽松匹配改 `segments.windows(ep.len()).enumerate()`——端点长于路径时
+  windows 自然空迭代，越界在结构上不可能；tail 锚定（空或单 LOOSE_SUBRESOURCES 段）
+  语义不变。
+- **fail-open 机制化**：网关两个识别调用点（request_filter 短路判定、logging）包
+  `catch_unwind`——识别 panic 降级为 None（未知协议透明转发）并打日志，不再断连。
+- **钉子**：短路径/根空路径不 panic 且不命中；等长与前缀 loose 命中不变；omp
+  `/responses` 命中不受影响（loose 变体，上游 2xx 门控不变）；windows 实现 vs 旧算法
+  参考实现等价钉（20 路径）；输入空间全扫（空/slash-only/10k 段/64KiB 单段/Unicode）；
+  proptest 任意 &str 总量性（进 CI）；E2E GET /models 与 / 打活网关必须被服务。
+- **AGENTS.md 新纪律**：per-request 代码禁裸索引切片/unwrap（用 windows/get/match），
+  新增 per-request 逻辑须过全输入空间测试。
+
 ## [0.3.6] - 2026-09-11
 
 ### ① 客户端断开处理策略开关（drain switch）
