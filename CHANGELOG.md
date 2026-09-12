@@ -17,6 +17,32 @@
 - **SseAction::Usage 死载荷**：v0.3.0 已做（变体删除——usage 采集改为帧驱动，顺带修复流式 anthropic usage 从未采集的缺口）
 - **req_buf 多次 parse 收敛**：v0.3.0 全量收敛（unpack::turn_facts 单入口：一次描述符查找 + 一次遍历，extract_messages &Value 化）
 
+## [0.3.8] - 2026-09-12
+
+### 修复：WS 帧解析远程可达 panic + panic 硬化批次（PanicAudit）
+
+PanicAudit 全库扫描实锤：`WsFrameParser::push` 的长度算术——64 位声明的帧长度
+进入未检查加法并在回绕后反向切片；任何 WS 升级连接、双向、远程可触发
+（release 模式 exit 101 复现）。
+
+- **WsFrameParser::push 重写**：声明长度按 u64 处理 + `checked_add` 线束总量 +
+  `MAX_WS_FRAME_PAYLOAD`（16 MiB，与捕获上限对齐）——超限帧拒绝（解析缓冲丢弃，
+  透明转发不受影响）；头解析 `first_chunk` 化，全文件零裸索引。
+- **proptest 进 CI**：`ws_push_never_panics`（任意字节 + u64::MAX 邻域声明长度 +
+  masked 变体 + 后续 push 状态安全）、`sse_parsers_never_panics`（SSE 全入口
+  任意字节总量性）。
+- **catch_unwind seam 四点**：WS client/server 帧 arm（panic → 解析状态重置 +
+  透明转发）、logging record 组装（panic → 降级为不记录，不断连）、exporter
+  batch 循环（此前 task panic 会静默永久停导出——现 panicked 计数 + health 端点
+  新增 `panicked` 字段 + 批次 continue）。
+- **CI clippy 门（防新增）**：`cargo clippy --workspace --lib --bins -- -D
+  clippy::indexing_slicing -D clippy::arithmetic_side_effects -D
+  clippy::unwrap_used -D clippy::expect_used`——非 test 域（`--lib --bins` 目标
+  选择）。存量 audited 位点带文件级 `PANIC-AUDIT v0.3.8` allow + 理由注释；算术
+  类重写（saturating/checked）不加 allow。
+- **遗留排队**：engine SSE 事件信封 serde(tag) 类型化、Value→强类型深改——独立
+  issue（PanicAudit 清单），按风险收益另批启动。
+
 ## [0.3.7] - 2026-09-12
 
 ### 修复：loose path detect 越界 panic（生产压测实锤）
