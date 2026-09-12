@@ -100,6 +100,9 @@ pub mod gateway_app {
         /// upstream stream that has not finished within it is abandoned
         /// (drain_timed_out marker, partial content recorded).
         pub drain_timeout: Duration,
+        /// ATG_MAX_WS_FRAME_PAYLOAD (bytes; 0 = unlimited, the default): the
+        /// optional single-frame refusal cap for the WS frame parser.
+        pub ws_max_frame_payload: usize,
         pub store: TraceStore,
         pub stitcher: crate::trace::prefix::PrefixStitcher,
         pub cap: crate::trace::capture::CaptureCap,
@@ -490,6 +493,19 @@ pub mod gateway_app {
             })
     }
 
+    /// ATG_MAX_WS_FRAME_PAYLOAD parse (bytes): absent → (0, false) — the
+    /// default is UNLIMITED; unparsable or 0 → fall back to 0 with the
+    /// startup-log flag; a positive value enables the refusal cap.
+    fn parse_ws_frame_cap(env: Option<&str>) -> (usize, bool) {
+        match env {
+            None => (0, false),
+            Some(v) => match v.trim().parse::<usize>() {
+                Ok(n) if n > 0 => (n, false),
+                _ => (0, true),
+            },
+        }
+    }
+
     /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
     /// defaults to http with the port present; scheme prefixes override; a
     /// missing port defaults to 80/443 by scheme. An optional base path is
@@ -614,8 +630,14 @@ pub mod gateway_app {
                 req_buf: Vec::new(),
                 resp_buf: Vec::new(),
                 resp_content_type: String::new(),
-                ws_client_parser: atg_protocol::openai::live::WsFrameParser::new(true),
-                ws_server_parser: atg_protocol::openai::live::WsFrameParser::new(false),
+                ws_client_parser: atg_protocol::openai::live::WsFrameParser::with_max_payload(
+                    true,
+                    self.ws_max_frame_payload,
+                ),
+                ws_server_parser: atg_protocol::openai::live::WsFrameParser::with_max_payload(
+                    false,
+                    self.ws_max_frame_payload,
+                ),
                 ws_turn: atg_protocol::openai::live::WsTurnState::default(),
                 start_ns: now_ns(),
                 end_ns: 0,
@@ -770,7 +792,11 @@ pub mod gateway_app {
                         eprintln!(
                             "ATG: ws client frame parse panicked — parse state reset, forwarding continues"
                         );
-                        ctx.ws_client_parser = atg_protocol::openai::live::WsFrameParser::new(true);
+                        ctx.ws_client_parser =
+                            atg_protocol::openai::live::WsFrameParser::with_max_payload(
+                                true,
+                                self.ws_max_frame_payload,
+                            );
                         ctx.ws_turn = atg_protocol::openai::live::WsTurnState::default();
                     }
                 }
@@ -827,7 +853,10 @@ pub mod gateway_app {
                             "ATG: ws server frame parse panicked — parse state reset, forwarding continues"
                         );
                         ctx.ws_server_parser =
-                            atg_protocol::openai::live::WsFrameParser::new(false);
+                            atg_protocol::openai::live::WsFrameParser::with_max_payload(
+                                false,
+                                self.ws_max_frame_payload,
+                            );
                         ctx.ws_turn = atg_protocol::openai::live::WsTurnState::default();
                     }
                 }
@@ -1270,6 +1299,11 @@ pub mod gateway_app {
                 std::process::exit(2);
             }
         };
+        let (ws_max_frame_payload, ws_cap_fallback) =
+            parse_ws_frame_cap(std::env::var("ATG_MAX_WS_FRAME_PAYLOAD").ok().as_deref());
+        if ws_cap_fallback {
+            eprintln!("ATG: ATG_MAX_WS_FRAME_PAYLOAD invalid — frame cap disabled (unlimited)");
+        }
         // PANIC-AUDIT v0.3.8: process startup — a pingora bootstrap failure
         // is fatal by design and must abort the process (class ii).
         #[allow(clippy::unwrap_used)]
@@ -1278,6 +1312,7 @@ pub mod gateway_app {
         let gateway = Gateway {
             upstream: upstream.to_string(),
             upstream_base,
+            ws_max_frame_payload,
             http,
             drain_on_cancel,
             drain_timeout: Duration::from_secs(drain_timeout),
@@ -1388,6 +1423,30 @@ pub mod gateway_app {
             assert!(sni_resolve_entry("1.2.3.4:443", None).is_none());
             // Plain http: no TLS SNI involved.
             assert!(sni_resolve_entry("http://1.2.3.4:8443", Some("api.example.com")).is_none());
+        }
+
+        /// ATG_MAX_WS_FRAME_PAYLOAD parse (v0.3.8 final ruling): absent or
+        /// unset → 0 = UNLIMITED (no frame refusal; memory grows with the
+        /// bytes actually received); unparsable or 0 → falls back to 0 with
+        /// the startup-log flag; a positive value enables the cap.
+        #[test]
+        fn parse_ws_frame_cap_defaults_to_unlimited() {
+            assert_eq!(
+                parse_ws_frame_cap(None),
+                (0, false),
+                "absent env = unlimited"
+            );
+            assert_eq!(parse_ws_frame_cap(Some("65536")), (65536, false));
+            assert_eq!(
+                parse_ws_frame_cap(Some("0")),
+                (0, true),
+                "explicit 0 falls back with the startup log"
+            );
+            assert_eq!(
+                parse_ws_frame_cap(Some("garbage")),
+                (0, true),
+                "unparsable falls back with the startup log"
+            );
         }
     }
 }

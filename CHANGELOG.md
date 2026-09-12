@@ -25,9 +25,13 @@ PanicAudit 全库扫描实锤：`WsFrameParser::push` 的长度算术——64 �
 进入未检查加法并在回绕后反向切片；任何 WS 升级连接、双向、远程可触发
 （release 模式 exit 101 复现）。
 
-- **WsFrameParser::push 重写**：声明长度按 u64 处理 + `checked_add` 线束总量 +
-  `MAX_WS_FRAME_PAYLOAD`（16 MiB，与捕获上限对齐）——超限帧拒绝（解析缓冲丢弃，
-  透明转发不受影响）；头解析 `first_chunk` 化，全文件零裸索引。
+- **WsFrameParser::push 重写**：声明长度按 u64 处理 + `checked_add` 线束总量
+  （防算术 panic）+ 头解析 `first_chunk` 化，全文件零裸索引。新增可选拒绝上限
+  `ATG_MAX_WS_FRAME_PAYLOAD`（字节）：**默认 0 = 不限制**——超长声明帧自然等待
+  后续字节，观测缓冲内存随实际接收字节增长（DoS 风险已评估并接受；需要限内存
+  时设非零值，与 `ATG_CAPTURE_MAX_BYTES` 一起调——帧 cap 超过捕获上限的部分
+  turn 记录会截断，观测丢失但转发无损）；env 解析失败或 0 → 回落不限 + 启动
+  日志一次。
 - **proptest 进 CI**：`ws_push_never_panics`（任意字节 + u64::MAX 邻域声明长度 +
   masked 变体 + 后续 push 状态安全）、`sse_parsers_never_panics`（SSE 全入口
   任意字节总量性）。

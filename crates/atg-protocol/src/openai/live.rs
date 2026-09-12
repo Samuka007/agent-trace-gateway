@@ -106,6 +106,11 @@ pub struct WsFrameParser {
     buf: Vec<u8>,
     #[allow(dead_code)]
     expect_masked: bool,
+    /// Optional single-frame payload cap in bytes — 0 (the default) means
+    /// UNLIMITED: a declared length is only waited on, memory grows with
+    /// the bytes actually received (DoS accepted by the operator). A
+    /// non-zero cap refuses frames declaring beyond it.
+    max_payload: usize,
 }
 
 impl WsFrameParser {
@@ -113,6 +118,18 @@ impl WsFrameParser {
         Self {
             buf: Vec::new(),
             expect_masked,
+            max_payload: 0,
+        }
+    }
+
+    /// Cap-enabled constructor: frames whose DECLARED payload exceeds
+    /// `max_payload` bytes are refused (parse buffer dropped; later bytes
+    /// restart a fresh parse). `max_payload` 0 = unlimited.
+    pub fn with_max_payload(expect_masked: bool, max_payload: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            expect_masked,
+            max_payload,
         }
     }
 
@@ -120,8 +137,9 @@ impl WsFrameParser {
     ///
     /// Panic-free by construction over ARBITRARY remote bytes (v0.3.8 WS
     /// hardening): the 64-bit declared frame length is remote-controlled —
-    /// checked arithmetic replaces the overflowing add, and frames whose
-    /// payload exceeds MAX_WS_FRAME_PAYLOAD are refused (parse buffer
+    /// checked arithmetic replaces the overflowing add (that guard is
+    /// against an arithmetic panic, not a size limit), and frames whose
+    /// payload exceeds the configured cap are refused (parse buffer
     /// dropped; later bytes restart a fresh parse — invalid frames are
     /// ignored by the turn state, the stream itself keeps flowing).
     /// A frame declaring an absurd length simply waits for bytes that
@@ -158,7 +176,7 @@ impl WsFrameParser {
                 self.buf.clear();
                 return out;
             };
-            if len > MAX_WS_FRAME_PAYLOAD as u64 {
+            if self.max_payload > 0 && len > self.max_payload as u64 {
                 // Remote-declared oversized frame: refuse. The frame's wire
                 // bytes cannot be skipped without trusting `len`, so the
                 // parse buffer is dropped — transparent forward is
@@ -191,11 +209,6 @@ impl WsFrameParser {
         out
     }
 }
-
-/// Hard cap on a single WS frame payload the parser will assemble
-/// (matches the default capture cap). Turn frames are small JSON —
-/// anything beyond this is hostile or broken.
-pub const MAX_WS_FRAME_PAYLOAD: usize = 16 << 20;
 
 #[cfg(test)]
 mod tests {
@@ -233,6 +246,35 @@ mod tests {
             // A follow-up push after any buffer state must stay safe too.
             let _ = p.push(b"\x81\x05hello");
         }
+    }
+
+    /// Cap semantics (v0.3.8 final ruling): cap 0 (the default) never
+    /// refuses — a fully-delivered frame of ANY declared size parses; a
+    /// non-zero cap refuses frames declaring beyond it and the parser
+    /// restarts clean on the next push.
+    #[test]
+    fn ws_cap_zero_accepts_and_nonzero_refuses() {
+        // A real 1 MiB text frame: parsed under an unlimited cap.
+        let payload = vec![b'x'; 1 << 20];
+        let mut frame = vec![0x81u8, 0x7f];
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let mut p = WsFrameParser::new(false);
+        assert_eq!(p.push(&frame), vec![payload.clone()], "cap 0 must accept");
+
+        // cap 1 MiB: a frame declaring beyond it is refused on the declared
+        // length alone (empty), and the parser restarts cleanly on the next
+        // push.
+        let mut capped = WsFrameParser::with_max_payload(false, 1 << 20);
+        let mut over = vec![0x81u8, 0x7f];
+        over.extend_from_slice(&((payload.len() + 1) as u64).to_be_bytes());
+        over.extend_from_slice(&payload[..64]);
+        assert!(capped.push(&over).is_empty(), "oversized frame refused");
+        assert_eq!(
+            capped.push(b"\x81\x05hello"),
+            vec![b"hello".to_vec()],
+            "the parser restarts on a clean slate after a refusal"
+        );
     }
 }
 
