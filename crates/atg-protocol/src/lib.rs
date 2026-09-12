@@ -233,8 +233,14 @@ impl ProtocolDescriptor {
                 if ep.is_empty() {
                     continue;
                 }
-                for start in 0..=segments.len().saturating_sub(ep.len()) {
-                    if segments[start..start + ep.len()] != ep[..] {
+                // windows() is structurally bounds-safe (v0.3.7 production
+                // incident: the hand-rolled inclusive range panicked on
+                // paths with fewer segments than the endpoint — /models vs
+                // chat/completions). A segment slice shorter than the
+                // endpoint yields an empty iterator: no match, no panic.
+                // ep.len() >= 1 above keeps windows() itself legal.
+                for (start, window) in segments.windows(ep.len()).enumerate() {
+                    if window != ep.as_slice() {
                         continue;
                     }
                     let tail = &segments[start + ep.len()..];
@@ -380,6 +386,7 @@ pub(crate) fn pck_namespace(v: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn value(json: &str) -> Value {
         serde_json::from_str(json).unwrap()
@@ -595,5 +602,160 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "f");
         assert_eq!(tools[0].arguments, "{}");
+    }
+
+    /// v0.3.7 production incident: a path with FEWER segments than a loose
+    /// endpoint variant panicked the inclusive slicing loop (`/models` → 1
+    /// segment vs `chat/completions` → `segments[0..2]` on a 1-element
+    /// slice; `/` → `segments[0..1]` on an empty slice). detect_path is
+    /// the first identification step for EVERY request — short paths must
+    /// be a clean no-match, never a panic.
+    #[test]
+    fn loose_detect_short_and_empty_paths_do_not_panic() {
+        // Fewer segments than an endpoint: clean no-match.
+        assert!(ProtocolDescriptor::detect_path("/models").is_none());
+        assert!(ProtocolDescriptor::detect_path("v1").is_none());
+        assert!(ProtocolDescriptor::detect_path("chat").is_none());
+        // Root / empty path (incident variant 1: end 1, len 0).
+        assert!(ProtocolDescriptor::detect_path("").is_none());
+        assert!(ProtocolDescriptor::detect_path("/").is_none());
+        assert!(ProtocolDescriptor::detect_path("//").is_none());
+    }
+
+    /// The bounds fix must not disturb match semantics.
+    #[test]
+    fn loose_detect_match_semantics_survive_bounds_fix() {
+        // Equal-length path loose-matches (no exact prefix: no leading /).
+        let m = ProtocolDescriptor::detect_path("responses").expect("equal-length loose hit");
+        assert!(m.loose);
+        assert_eq!(m.descriptor.name, "openai.responses");
+        // Prefixed path still loose-matches.
+        let m = ProtocolDescriptor::detect_path("/api/v1/responses").expect("prefixed loose hit");
+        assert!(m.loose);
+        // omp's /responses hit unaffected (loose variant of the /v1 route —
+        // upstream-gated by the caller; turn recording depends on it).
+        let m = ProtocolDescriptor::detect_path("/responses").expect("exact hit");
+        assert!(m.loose);
+        assert_eq!(m.descriptor.name, "openai.responses");
+        assert!(
+            !ProtocolDescriptor::detect_path("/v1/responses")
+                .unwrap()
+                .loose
+        );
+        assert!(
+            !ProtocolDescriptor::detect_path("/v1/messages")
+                .unwrap()
+                .loose
+        );
+    }
+
+    /// Fail-open sweep: detect_path runs on EVERY request path — it must
+    /// be total over the whole input space (empty, slash-only, single
+    /// segment, deep, unicode, pathological length). Any panic here turns
+    /// an identification miss into a failed request.
+    #[test]
+    fn loose_detect_total_over_path_input_space() {
+        let mut shapes: Vec<String> = vec![
+            String::new(),
+            "/".into(),
+            "//".into(),
+            "///responses".into(),
+            "/responses/".into(),
+            "/responses?x=1".into(),
+            "/models".into(),
+            "/v1".into(),
+            "/chat/completions".into(),
+            "/api/v1/responses".into(),
+            "responses".into(),
+            "/🦀/responses".into(),
+            "/响应/messages".into(),
+            "/v1/messages/🦀".into(),
+        ];
+        // Pathological: 10k segments and a 64 KiB single segment.
+        shapes.push(vec!["a"; 10_000].join("/"));
+        shapes.push(format!("/{}", "x".repeat(64 * 1024)));
+        for path in &shapes {
+            // The call itself must not panic; any result is legal.
+            let _ = ProtocolDescriptor::detect_path(path);
+        }
+    }
+
+    /// Property test (CI): detect_path is total over ARBITRARY &str —
+    /// empty, slash-only, single segment, deep nesting, multibyte UTF-8,
+    /// pathological length. windows() made the slicing structurally
+    /// bounds-safe; this pins it against future edits.
+    proptest! {
+        #[test]
+        fn detect_path_never_panics(path in "[^\\n\\r]{0,4096}") {
+            let _ = ProtocolDescriptor::detect_path(&path);
+            let _ = ProtocolDescriptor::detect(&path);
+        }
+
+        #[test]
+        fn detect_path_slash_heavy_never_panics(
+            segments in proptest::collection::vec("[a-z=]{0,8}", 0..64),
+        ) {
+            let path = segments.join("/");
+            let _ = ProtocolDescriptor::detect_path(&path);
+        }
+    }
+
+    /// windows() equivalence: the implementation must agree with the
+    /// pre-fix ALGORITHM (index loop over anchored windows, correctly
+    /// bounded) — the rewrite changes the mechanics, not the matched set.
+    #[test]
+    fn windows_detect_matches_reference_algorithm() {
+        fn reference(path: &str) -> Option<(&'static str, bool)> {
+            if let Some(d) = ProtocolDescriptor::detect(path) {
+                return Some((d.name, false));
+            }
+            let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            for d in DESCRIPTORS {
+                for endpoint in d.loose_endpoints {
+                    let ep: Vec<&str> = endpoint.split('/').filter(|s| !s.is_empty()).collect();
+                    if ep.is_empty() || segments.len() < ep.len() {
+                        continue;
+                    }
+                    for start in 0..=segments.len() - ep.len() {
+                        if segments[start..start + ep.len()] != ep[..] {
+                            continue;
+                        }
+                        let tail = &segments[start + ep.len()..];
+                        let anchored = tail.is_empty()
+                            || (tail.len() == 1 && LOOSE_SUBRESOURCES.contains(&tail[0]));
+                        if anchored {
+                            return Some((d.name, true));
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        for path in [
+            "",
+            "/",
+            "//",
+            "/models",
+            "v1",
+            "responses",
+            "/responses",
+            "/v1/responses",
+            "/compatible-mode/v1/responses",
+            "/api/v1/responses",
+            "/chat/completions",
+            "/v1/chat/completions",
+            "/api/chat/completions",
+            "/messages",
+            "/v1/messages",
+            "/api/v1/messages/subresource",
+            "/responses/subresource",
+            "/responses/other",
+            "/🦀/responses",
+            "/v1/responses/🦀",
+        ] {
+            let got = ProtocolDescriptor::detect_path(path).map(|m| (m.descriptor.name, m.loose));
+            assert_eq!(got, reference(path), "path {path:?}");
+        }
     }
 }

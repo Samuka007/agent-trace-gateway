@@ -467,6 +467,19 @@ pub mod gateway_app {
         )
     }
 
+    /// Fail-open identification (v0.3.7): path identification is the FIRST
+    /// step of every request — a panic there took the request down with
+    /// zero delivery (the loose-detect incident). This wrapper demotes any
+    /// panic to None: an unknown protocol is transparently forwarded, the
+    /// turn is simply not recorded. Fail-open as a mechanism, not a hope.
+    fn detect_path_fail_open(path: &str) -> Option<atg_protocol::PathMatch> {
+        std::panic::catch_unwind(|| atg_protocol::ProtocolDescriptor::detect_path(path))
+            .unwrap_or_else(|_| {
+                eprintln!("ATG: path identification panicked (path={path:?}) — failing open");
+                None
+            })
+    }
+
     /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
     /// defaults to http with the port present; scheme prefixes override; a
     /// missing port defaults to 80/443 by scheme. An optional base path is
@@ -717,7 +730,7 @@ pub mod gateway_app {
                 .is_some()
                 || session.req_header().method == http::Method::CONNECT;
             if self.drain_on_cancel && !is_ws_upgrade {
-                if let Some(matched) = atg_protocol::ProtocolDescriptor::detect_path(path) {
+                if let Some(matched) = detect_path_fail_open(path) {
                     self.relay(session, ctx, matched.descriptor).await;
                     return Ok(true);
                 }
@@ -793,7 +806,7 @@ pub mod gateway_app {
 
         async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
             let path = session.req_header().uri.path();
-            let Some(matched) = atg_protocol::ProtocolDescriptor::detect_path(path) else {
+            let Some(matched) = detect_path_fail_open(path) else {
                 return;
             };
             let protocol = matched.descriptor.name;

@@ -33,6 +33,18 @@ Both were found by E2E (otel-col wire inspection) and cross-path self-audit,
 not by unit-shape review. Prefer wire-level assertions in `tests/otlp_export.rs`
 for anything that crosses the export boundary.
 
+## Engineering discipline: the request path must be panic-free
+
+Code that runs PER REQUEST (filters, detection, engine) may never use bare
+index slicing or `unwrap`/`expect` on fallible conversions — one malformed
+input turns a miss into a dropped request (v0.3.7 production incident:
+`segments[start..start+ep.len()]` in loose path detection panicked on short
+paths and every probe request died with zero delivery). Use
+`windows()`/iterators, `get()`, and `match` instead; identification
+failures degrade to "unknown protocol, forward transparently"
+(`detect_path_fail_open`). New per-request code needs a total-input-space
+test (empty/deep/unicode/pathological shapes) before merge.
+
 Review log with signatures: see the session review report
 (`.tmp-atg-rust-review.md` in the working workspace) — §D/§E/§F contain the
 full BLOCK/AMBIGUITY history of the descriptor, P0-semantics, and three-layer
