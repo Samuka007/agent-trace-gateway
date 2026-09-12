@@ -9,6 +9,21 @@
 
 ### 计划中（台账，未排期）
 
+### 修复：TraceStore 无界增长（v0.3.9 hotfix，生产全量切换暴露）
+
+`TraceStore` 原为无上限 `Vec<TurnRecord>`：push 无预算、records 端点每次访问
+全量 clone——全量流量下每 turn 含捕获全文，长期运行线性涨内存必 OOM（生产实测
+1.3G/62G 线性涨，一次 60s 端点拉取即 369MB）。
+
+- **双预算上限**：条数（`ATG_STORE_MAX_RECORDS`，默认 1000）+ 估算字节
+  （`ATG_STORE_MAX_BYTES`，默认 256 MiB；按 raw_request + raw_response +
+  user_input + final_output 长度估）。超限丢最旧。
+- **丢弃透明**：丢最旧计数进 health 端点新字段 `store_dropped`。
+- **端点分页**：`/__atg/records?limit=N&offset=M` 从最新端开窗——端点访问不再
+  全量 clone（杜绝端点访问即内存翻倍）。
+- **设计原则**：本地 turn 副本是调试窗口不是权威存储（权威 = OTLP 导出后的
+  Langfuse）；丢弃语义可接受、透明可观测。
+
 ### 已做（待随下版归档）
 
 - **bench 进 CI**：v0.3.0 已做（ci.yml release 模式真执行，门 264KB ≤700µs）
