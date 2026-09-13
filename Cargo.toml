@@ -51,6 +51,10 @@ path = "src/lib.rs"
 [profile.dev]
 debug = 0
 
+# 本包可能被检出在父仓的 workspace 目录树内（.worktrees/）：
+# 声明自身为独立 workspace 根，避免被父 Cargo.toml 的 members 收编。
+[workspace]
+
 # codex 工作区对其 tungstenite 双层 fork 的 patch 不会随 git 依赖传播，
 # 引用 codex-core/codex-login 时必须在本工作区重申（依赖对齐 codex）。
 [patch.crates-io]

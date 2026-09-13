@@ -214,11 +214,17 @@ pub async fn request_device_code(issuer: &str, client_id: &str) -> Result<Device
         device_auth_id: String,
         #[serde(alias = "user_code", alias = "usercode")]
         user_code: String,
-        #[serde(default = "default_interval")]
+        #[serde(default, deserialize_with = "deserialize_interval")]
         interval: u64,
     }
-    fn default_interval() -> u64 {
-        5
+    // 镜像 codex device_code_auth.rs:47-53：真实服务端把 interval 发成
+    // 字符串（"5"），按 String 取值再 parse，不能声明裸 u64。
+    fn deserialize_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.trim().parse::<u64>().map_err(serde::de::Error::custom)
     }
     let uc: UserCodeResp =
         serde_json::from_str(&text).map_err(|e| OAuthError::Transient(e.to_string()))?;
