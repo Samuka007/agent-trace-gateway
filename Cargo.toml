@@ -26,6 +26,10 @@ tokio-stream = "0.1"
 parking_lot = "0.12.5"
 hex = "0.4.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "socks", "rustls"] }
+# 直接依赖 rustls 以便 main 里显式安装 CryptoProvider：依赖树同时含
+# ring（reqwest）与 aws-lc-rs（tokio-tungstenite 0.28 rustls 特性），
+# 不安装默认 provider 则首条 TLS 连接 panic（真实首跑踩中）。
+rustls = { version = "0.23", features = ["ring"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 # 与 codex 同源的身份库：UA 的 OS 段与终端段由同一批库生成，保真由构造保证

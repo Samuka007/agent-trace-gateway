@@ -277,10 +277,14 @@ impl ProxyApp {
             rewrite::codex_envelope_body(&body, &cm).unwrap_or(body)
         };
 
+        // 路径归一：下游兼容 /v1/responses（OpenAI 惯例）与 /responses
+        // （codex 后端原生形态）两种，统一剥掉 /v1 前缀——真实上游
+        // chatgpt.com/backend-api/codex/responses 无 /v1（首跑实测 404）。
+        let downstream_path = parts.uri.path().strip_prefix("/v1").unwrap_or(parts.uri.path());
         let url = format!(
             "{}{}",
             self.upstream.trim_end_matches('/'),
-            parts.uri.path()
+            downstream_path
         );
         let client = self.client_for(persona.proxy_url.as_deref()).await;
 

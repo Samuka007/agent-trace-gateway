@@ -62,6 +62,12 @@ fn open_store() -> Store {
 }
 
 fn main() {
+    // 依赖树同时含 ring（reqwest）与 aws-lc-rs（tokio-tungstenite 0.28）
+    // 两套 rustls CryptoProvider，rustls 拒绝自动裁决 → 进程启动即显式
+    // 选定 ring（与 reqwest 路径一致），任何 TLS 使用前必须完成安装。
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls CryptoProvider");
     let args: Vec<String> = std::env::args().collect();
     let sub = args.get(1).cloned().unwrap_or_else(|| "serve".into());
     let rt = tokio::runtime::Builder::new_multi_thread()
