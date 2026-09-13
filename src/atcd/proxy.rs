@@ -277,10 +277,22 @@ impl ProxyApp {
             rewrite::codex_envelope_body(&body, &cm).unwrap_or(body)
         };
 
-        // 路径归一：下游兼容 /v1/responses（OpenAI 惯例）与 /responses
-        // （codex 后端原生形态）两种，统一剥掉 /v1 前缀——真实上游
-        // chatgpt.com/backend-api/codex/responses 无 /v1（首跑实测 404）。
-        let downstream_path = parts.uri.path().strip_prefix("/v1").unwrap_or(parts.uri.path());
+        // 路径归一：三种真实下游形态统一剥到 /responses——
+        // codex CLI / omp codex provider: /codex/responses（OpenAI 官方
+        //   chatgpt 后端路径前缀，R11 实测捕获）
+        // OpenAI 惯例 / opencode: /v1/responses
+        // 真实上游 chatgpt.com/backend-api/codex/responses 不带这些前缀
+        // （omp 404 首跑实测 + curl 200 对照）。
+        let downstream_path = parts
+            .uri
+            .path()
+            .trim_start_matches("/v1")
+            .trim_start_matches("/codex");
+        let downstream_path = if downstream_path.starts_with("/responses") {
+            downstream_path
+        } else {
+            parts.uri.path()
+        };
         let url = format!(
             "{}{}",
             self.upstream.trim_end_matches('/'),
