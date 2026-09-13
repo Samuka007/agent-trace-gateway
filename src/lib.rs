@@ -11,6 +11,7 @@ pub mod gateway_app {
     use pingora::proxy::{http_proxy, FailToProxy, ProxyHttp, Session};
     use pingora::upstreams::peer::HttpPeer;
     use std::net::ToSocketAddrs;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::trace::store::TraceStore;
@@ -103,6 +104,10 @@ pub mod gateway_app {
         /// ATG_MAX_WS_FRAME_PAYLOAD (bytes; 0 = unlimited, the default): the
         /// optional single-frame refusal cap for the WS frame parser.
         pub ws_max_frame_payload: usize,
+        /// ATG_TRACE_MODE=off: capture and parsing skipped — records degrade
+        /// to timing/error/cancel shells, the body path is a near-pure
+        /// forward (low-cost tap, v0.3.11).
+        pub trace_off: bool,
         pub store: TraceStore,
         pub stitcher: crate::trace::prefix::PrefixStitcher,
         pub cap: crate::trace::capture::CaptureCap,
@@ -506,6 +511,15 @@ pub mod gateway_app {
         }
     }
 
+    /// ATG_TRACE_MODE parse: "off" (case/space tolerant) disables capture
+    /// and parsing — records degrade to timing/error/cancel shells and the
+    /// body path becomes a near-pure forward. Any other value (including
+    /// absent) = full tracing.
+    fn parse_trace_mode(env: Option<&str>) -> bool {
+        env.map(|v| v.trim().eq_ignore_ascii_case("off"))
+            .unwrap_or(false)
+    }
+
     /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
     /// defaults to http with the port present; scheme prefixes override; a
     /// missing port defaults to 80/443 by scheme. An optional base path is
@@ -816,7 +830,12 @@ pub mod gateway_app {
                     }
                 }
             } else if let Some(b) = body {
-                ctx.req_buf.extend_from_slice(b);
+                // Trace-mode off (v0.3.11): no request capture — the pump
+                // forwards the chunk upstream regardless (pingora sends the
+                // filter's untouched body).
+                if !self.trace_off {
+                    ctx.req_buf.extend_from_slice(b);
+                }
             }
             Ok(())
         }
@@ -879,7 +898,11 @@ pub mod gateway_app {
                 if ctx.resp_buf.is_empty() && !b.is_empty() {
                     ctx.first_output_ns = Some(now_ns());
                 }
-                ctx.resp_buf.extend_from_slice(b);
+                // Trace-mode off (v0.3.11): no response capture — timing
+                // observability (first_output) still rides this hook.
+                if !self.trace_off {
+                    ctx.resp_buf.extend_from_slice(b);
+                }
             }
             Ok(None)
         }
@@ -955,6 +978,26 @@ pub mod gateway_app {
             } else {
                 None
             };
+            // Trace-mode off (v0.3.11): minimal shell records — timing,
+            // error and cancel facts only. No request/response parsing, no
+            // harness/session extraction: that parse cost is exactly what
+            // the mode removes from the hot path.
+            if self.trace_off {
+                ctx.end_ns = now_ns();
+                self.turns_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.push_record(atg_model::TurnRecord {
+                    protocol: protocol.to_string(),
+                    error: http_error,
+                    cancelled: client_cancelled,
+                    drain_timed_out: ctx.drain_timed_out,
+                    start_ns: ctx.start_ns,
+                    end_ns: ctx.end_ns,
+                    completion_start_ns: ctx.first_output_ns,
+                    ..Default::default()
+                });
+                return;
+            }
             // Fail-open record assembly (v0.3.8): everything below is
             // observability — the response is already delivered, so a panic
             // here must degrade to "no turn recorded", never kill the
@@ -1267,6 +1310,7 @@ pub mod gateway_app {
     /// Start the gateway on `listen`, forwarding to `upstream`. Blocks.
     /// `upstream` accepts "host:port", "http://host:port" or "https://host:port".
     pub fn run(listen: &str, upstream: &str) {
+        const WORKER_THREADS: usize = 8;
         // ATG_TRACE_TAG (v0.3.10): the line:<source> trace tag. An empty
         // value falls back to the default — warn so a misconfiguration is
         // never silent (the resolution itself lives in atg-model, read
@@ -1331,15 +1375,28 @@ pub mod gateway_app {
         if ws_cap_fallback {
             eprintln!("ATG: ATG_MAX_WS_FRAME_PAYLOAD invalid — frame cap disabled (unlimited)");
         }
+        let trace_off = parse_trace_mode(std::env::var("ATG_TRACE_MODE").ok().as_deref());
         // PANIC-AUDIT v0.3.8: process startup — a pingora bootstrap failure
         // is fatal by design and must abort the process (class ii).
         #[allow(clippy::unwrap_used)]
         let mut server = Server::new(Some(Opt::default())).unwrap();
+        // Q1 (v0.3.11 perf): pingora defaults to ONE worker thread
+        // (ServerConf::default threads:1) — the whole proxy (accept plus
+        // every stream's duplex pumps) would serialize on a single core,
+        // stretching SSE chunk pacing under concurrency (prod hop-ladder:
+        // W p50 x1.8). Eight workers spread the pumps; verify with top -H.
+        match Arc::get_mut(&mut server.configuration) {
+            Some(conf) => conf.threads = WORKER_THREADS,
+            None => eprintln!(
+                "ATG: could not override worker threads — configuration shared; running single-threaded"
+            ),
+        }
         server.bootstrap();
         let gateway = Gateway {
             upstream: upstream.to_string(),
             upstream_base,
             ws_max_frame_payload,
+            trace_off,
             http,
             drain_on_cancel,
             drain_timeout: Duration::from_secs(drain_timeout),
@@ -1450,6 +1507,17 @@ pub mod gateway_app {
             assert!(sni_resolve_entry("1.2.3.4:443", None).is_none());
             // Plain http: no TLS SNI involved.
             assert!(sni_resolve_entry("http://1.2.3.4:8443", Some("api.example.com")).is_none());
+        }
+
+        /// ATG_TRACE_MODE parse nails (v0.3.11): "off" (case/space
+        /// tolerant) disables tracing; absent or anything else = full.
+        #[test]
+        fn parse_trace_mode_nails() {
+            assert!(!parse_trace_mode(None), "absent = full tracing");
+            assert!(!parse_trace_mode(Some("full")));
+            assert!(!parse_trace_mode(Some("")), "empty = full tracing");
+            assert!(parse_trace_mode(Some("off")));
+            assert!(parse_trace_mode(Some(" OFF ")), "case/space tolerant");
         }
 
         /// ATG_MAX_WS_FRAME_PAYLOAD parse (v0.3.8 final ruling): absent or
