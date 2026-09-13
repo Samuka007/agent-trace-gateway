@@ -10,6 +10,27 @@ use serde::Serialize;
 pub const LANGFUSE_TRACE_NAME: &str = "agent.turn";
 pub const LANGFUSE_TRACE_TAG: &str = "line:atg";
 
+/// The `line:<source>` trace tag, resolved ONCE from `ATG_TRACE_TAG`
+/// (empty/whitespace-only falls back to [`LANGFUSE_TRACE_TAG`] — a silent
+/// empty tag would break UI filtering). Multi-instance deployments set
+/// their own source tag (e.g. `line:atg-newapi`). The `harness:<name>` tag
+/// is a separate, orthogonal dimension and unaffected.
+pub fn langfuse_trace_tag() -> &'static str {
+    static TAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        resolve_trace_tag(std::env::var("ATG_TRACE_TAG").ok().as_deref())
+    });
+    TAG.as_str()
+}
+
+/// Pure resolution pinned by unit tests: None or empty/whitespace-only →
+/// the default tag.
+pub fn resolve_trace_tag(env: Option<&str>) -> String {
+    match env {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => LANGFUSE_TRACE_TAG.to_string(),
+    }
+}
+
 /// GENERATION-only trace shape (v0.4): the forward gateway is
 /// 1-request↔1-call — a root GENERATION observation per turn (the
 /// single-call-integration convention: the Langfuse OpenAI/LangChain SDK
@@ -228,6 +249,35 @@ pub struct ToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ATG_TRACE_TAG resolution nails (v0.3.10): absent env = zero change;
+    /// a configured source tag takes effect; empty/whitespace falls back.
+    #[test]
+    fn resolve_trace_tag_nails() {
+        assert_eq!(
+            resolve_trace_tag(None),
+            LANGFUSE_TRACE_TAG,
+            "env absent = zero change for existing deployments"
+        );
+        assert_eq!(
+            resolve_trace_tag(Some("line:atg-newapi")),
+            "line:atg-newapi",
+            "configured source tag takes effect"
+        );
+        assert_eq!(
+            resolve_trace_tag(Some("")),
+            LANGFUSE_TRACE_TAG,
+            "empty string falls back (no silent empty tag)"
+        );
+        assert_eq!(
+            resolve_trace_tag(Some("   ")),
+            LANGFUSE_TRACE_TAG,
+            "whitespace-only falls back"
+        );
+        // harness tags are an orthogonal dimension — resolution never
+        // touches them (they are built in export.rs from r.harness).
+        assert!(resolve_trace_tag(Some("line:atg-newapi")).starts_with("line:"));
+    }
 
     #[test]
     fn empty_usage_is_not_exported() {

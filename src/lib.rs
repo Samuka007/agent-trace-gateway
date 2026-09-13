@@ -1267,6 +1267,18 @@ pub mod gateway_app {
     /// Start the gateway on `listen`, forwarding to `upstream`. Blocks.
     /// `upstream` accepts "host:port", "http://host:port" or "https://host:port".
     pub fn run(listen: &str, upstream: &str) {
+        // ATG_TRACE_TAG (v0.3.10): the line:<source> trace tag. An empty
+        // value falls back to the default — warn so a misconfiguration is
+        // never silent (the resolution itself lives in atg-model, read
+        // once).
+        if let Some(v) = std::env::var("ATG_TRACE_TAG").ok().as_deref() {
+            if v.trim().is_empty() {
+                eprintln!(
+                    "ATG: ATG_TRACE_TAG is empty — falling back to the default '{}'",
+                    atg_model::LANGFUSE_TRACE_TAG
+                );
+            }
+        }
         // Drain switch (v0.3.6): per-upstream client-disconnect policy.
         // ATG_DRAIN_ON_CANCEL: truthy (1/true/yes/on) = keep consuming the
         // upstream stream after the client disconnects; default = abort.

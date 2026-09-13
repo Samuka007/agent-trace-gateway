@@ -20,7 +20,7 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 use atg_model::{
     usage_details_json, ATTR_COMPLETION_START_TIME, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT,
     ATTR_OBSERVATION_OUTPUT, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID,
-    GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME, LANGFUSE_TRACE_TAG, OBSERVATION_TYPE_GENERATION,
+    GENERATION_SPAN_NAME, LANGFUSE_TRACE_NAME, OBSERVATION_TYPE_GENERATION,
 };
 
 #[derive(Default)]
@@ -239,8 +239,10 @@ fn build_otlp_json(batch: &[TurnRecord]) -> String {
             // langfuse.trace.metadata.{harness,…}.
             let harness_tag = (!r.harness.is_empty()).then(|| format!("harness:{}", r.harness));
             let tags: Vec<&str> = match &harness_tag {
-                Some(t) => vec![LANGFUSE_TRACE_TAG, t.as_str()],
-                None => vec![LANGFUSE_TRACE_TAG],
+                // line:<source> rides the resolved ATG_TRACE_TAG; the
+                // harness tag is the orthogonal agent-attribution dimension.
+                Some(t) => vec![atg_model::langfuse_trace_tag(), t.as_str()],
+                None => vec![atg_model::langfuse_trace_tag()],
             };
             let mut trace_extra: Vec<serde_json::Value> = Vec::new();
             if !r.harness.is_empty() {
@@ -577,6 +579,27 @@ mod tests {
             .and_then(|v| v["arrayValue"]["values"].as_array())
             .unwrap_or_else(|| panic!("tags must be an OTLP array: {span}"));
         assert_eq!(tags[0]["stringValue"], "line:atg");
+        // v0.3.10 combination pin: line:<source> (ATG_TRACE_TAG) and
+        // harness:<name> are orthogonal dimensions — both ride the same
+        // span when a harness is attributed.
+        let mut r = record("sess-tags");
+        r.harness = "omp".to_string();
+        let payload: serde_json::Value = serde_json::from_str(&build_otlp_json(&[r])).unwrap();
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+        let tags = span_attr(&spans[0], "langfuse.trace.tags")
+            .and_then(|v| v["arrayValue"]["values"].as_array())
+            .unwrap_or_else(|| panic!("tags must be an OTLP array"));
+        assert_eq!(tags.len(), 2, "line + harness both present: {tags:?}");
+        assert!(
+            tags.iter().any(|t| t["stringValue"] == "line:atg"),
+            "line:<source> rides ATG_TRACE_TAG resolution (default here)"
+        );
+        assert!(
+            tags.iter().any(|t| t["stringValue"] == "harness:omp"),
+            "harness dimension unchanged by tag resolution"
+        );
     }
 
     /// G1 (empty-session variant): session attributes are omitted entirely.

@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### 特性：ATG_TRACE_TAG — line:<source> 来源标签可配置（多实例区分）
+
+多实例部署（atg + atg-newapi）需要区分 trace 来源：`ATG_TRACE_TAG` 覆盖
+`line:<source>` 标签（默认 `line:atg`——env 未设 = 现网零变化）。值在启动时解析
+一次（LazyLock，非逐 trace 读 env）；空串/纯空白回落默认并打一次启动警告（静默
+空标签会破坏 Langfuse UI 筛选）。`harness:<name>` 标签是正交的归因维度，不受
+影响——两个维度同 span 共存（组合钉子）。Langfuse 侧按 line:<source> ×
+harness:<name> 组合筛选。
+
 ### 计划中（台账，未排期）
 
 ## [0.3.9] - 2026-09-12
