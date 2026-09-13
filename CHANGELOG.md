@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-09-12
+
 ### 特性：ATG_TRACE_TAG — line:<source> 来源标签可配置（多实例区分）
 
 多实例部署（atg + atg-newapi）需要区分 trace 来源：`ATG_TRACE_TAG` 覆盖
