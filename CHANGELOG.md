@@ -9,6 +9,22 @@
 
 ## [0.3.10] - 2026-09-12
 
+## [0.3.11] - 2026-09-13
+
+### 修复：单 worker 吞吐塌陷（性能热修）+ ATG_TRACE_MODE 直通档
+
+生产逐跳梯子实锤：完成率在 +ATG 处 -44.6%，TTFB p50 不变而流时长 W p50 ×1.8，
+校准 2.7ms/chunk——根因是 pingora `ServerConf::default()` 的 `threads: 1`：全部流的
+双向泵在单 worker 串行，per-chunk 开销（~5-15µs）被单核排队放大。
+
+- **Q1**：`run()` 覆写 `conf.threads = 8`（`Arc::get_mut` 于 Server::new 后直改；
+  失败降级打日志）。预期 W p50 回 ~2.6s、完成率对齐 +sub2api 级；复测锚点
+  带标记流量 ≥280 rps + `top -H` 多线程分布。
+- **S1 `ATG_TRACE_MODE=off`（低成本直通档）**：跳过 req_buf/resp_buf 累积与全部
+  解析/reassembly/harness-session 提取——记录降级为时延/error/cancel 壳
+  （transparent forward 不变）。"off" 大小写/空白容差；其余值（含缺省）= full。
+  钉子：parse 五例 + E2E（off 网关全 turn 透传 + 壳记录）。
+
 ### 特性：ATG_TRACE_TAG — line:<source> 来源标签可配置（多实例区分）
 
 多实例部署（atg + atg-newapi）需要区分 trace 来源：`ATG_TRACE_TAG` 覆盖
