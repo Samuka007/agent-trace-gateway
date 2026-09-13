@@ -131,8 +131,13 @@ impl std::fmt::Display for OAuthError {
     }
 }
 
-fn post_form(url: &str, form: String) -> reqwest::RequestBuilder {
-    reqwest::Client::new()
+fn post_form(url: &str, form: String, proxy_url: Option<&str>) -> reqwest::RequestBuilder {
+    let mut cb = reqwest::Client::builder();
+    if let Some(p) = proxy_url {
+        cb = cb.proxy(reqwest::Proxy::all(p).expect("bad proxy url"));
+    }
+    cb.build()
+        .expect("client")
         .post(url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(form)
@@ -145,6 +150,7 @@ pub async fn exchange_code(
     redirect_uri: &str,
     code_verifier: &str,
     code: &str,
+    proxy_url: Option<&str>,
 ) -> Result<ExchangedTokens, OAuthError> {
     let token_endpoint = format!("{}/oauth/token", issuer.trim_end_matches('/'));
     let form = format!(
@@ -154,7 +160,7 @@ pub async fn exchange_code(
         urlencoding::encode(client_id),
         urlencoding::encode(code_verifier),
     );
-    let resp = post_form(&token_endpoint, form)
+    let resp = post_form(&token_endpoint, form, proxy_url)
         .send()
         .await
         .map_err(|e| OAuthError::Transient(e.to_string()))?;
@@ -193,11 +199,21 @@ pub struct DeviceCode {
 }
 
 /// 逐字镜像 codex login/src/device_code_auth.rs 的 request_user_code。
-pub async fn request_device_code(issuer: &str, client_id: &str) -> Result<DeviceCode, OAuthError> {
+pub async fn request_device_code(
+    issuer: &str,
+    client_id: &str,
+    proxy_url: Option<&str>,
+) -> Result<DeviceCode, OAuthError> {
     let base = issuer.trim_end_matches('/');
     let url = format!("{base}/api/accounts/deviceauth/usercode");
     let body = serde_json::json!({ "client_id": client_id }).to_string();
-    let resp = reqwest::Client::new()
+    let mut cb = reqwest::Client::builder();
+    if let Some(p) = proxy_url {
+        cb = cb.proxy(reqwest::Proxy::all(p).expect("bad proxy url"));
+    }
+    let resp = cb
+        .build()
+        .expect("client")
         .post(url)
         .header("Content-Type", "application/json")
         .body(body)
@@ -247,6 +263,7 @@ pub struct DeviceExchange {
 pub async fn poll_device_code(
     issuer: &str,
     device: &DeviceCode,
+    proxy_url: Option<&str>,
 ) -> Result<DeviceExchange, OAuthError> {
     let base = issuer.trim_end_matches('/');
     let url = format!("{base}/api/accounts/deviceauth/token");

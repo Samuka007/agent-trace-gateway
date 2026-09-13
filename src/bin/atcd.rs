@@ -257,12 +257,12 @@ async fn login(args: &[String]) -> i32 {
     let version_pin = opt_value(args, "--version-pin");
 
     let tokens = if device {
-        match login_device().await {
+        match login_device(proxy_url.as_deref()).await {
             Ok(t) => t,
             Err(code) => return code,
         }
     } else {
-        match login_paste(issuer.as_str()).await {
+        match login_paste(issuer.as_str(), proxy_url.as_deref()).await {
             Ok(t) => t,
             Err(code) => return code,
         }
@@ -313,9 +313,9 @@ async fn login(args: &[String]) -> i32 {
 /// device 流程：codex 原生远程登录路径（browser 与交换端可在不同网络）。
 /// wire 镜像 device_code_auth.rs：usercode → 轮询 → 以服务端回调
 /// redirect_uri 交换（无 localhost 依赖）。
-async fn login_device() -> Result<oauth::ExchangedTokens, i32> {
+async fn login_device(proxy_url: Option<&str>) -> Result<oauth::ExchangedTokens, i32> {
     let issuer = oauth::ISSUER;
-    let device = oauth::request_device_code(issuer, CODEX_CLIENT_ID)
+    let device = oauth::request_device_code(issuer, CODEX_CLIENT_ID, proxy_url)
         .await
         .map_err(|e| {
             eprintln!("device code request failed: {e}");
@@ -325,8 +325,7 @@ async fn login_device() -> Result<oauth::ExchangedTokens, i32> {
         "1. 在任意设备浏览器打开: {}\n2. 输入代码: {}\n（等待授权中，最长 15 分钟……）",
         device.verification_url, device.user_code
     );
-    let ex = oauth::poll_device_code(issuer, &device)
-        .await
+    let ex = oauth::poll_device_code(issuer, &device, proxy_url.as_deref()).await
         .map_err(|e| {
             eprintln!("device login failed: {e}");
             1i32
@@ -337,6 +336,7 @@ async fn login_device() -> Result<oauth::ExchangedTokens, i32> {
         &oauth::device_redirect_uri(issuer),
         &ex.code_verifier,
         &ex.authorization_code,
+        proxy_url.as_deref(),
     )
     .await
     .map_err(|e| {
@@ -346,7 +346,7 @@ async fn login_device() -> Result<oauth::ExchangedTokens, i32> {
 }
 
 /// 粘贴回调模式：浏览器在任意设备；回调页打不开属预期，粘贴地址栏 URL。
-async fn login_paste(issuer: &str) -> Result<oauth::ExchangedTokens, i32> {
+async fn login_paste(issuer: &str, proxy_url: Option<&str>) -> Result<oauth::ExchangedTokens, i32> {
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
     let url = oauth::build_authorize_url(
@@ -372,6 +372,7 @@ async fn login_paste(issuer: &str) -> Result<oauth::ExchangedTokens, i32> {
         oauth::REDIRECT_URI,
         &pkce.code_verifier,
         &code,
+        proxy_url.as_deref(),
     )
     .await
     .map_err(|e| {
