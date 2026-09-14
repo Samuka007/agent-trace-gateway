@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-09-14
+
 ### 变更：`ATG_WORKER_THREADS` 成为正式配置项，默认回到单 worker（ATG#1）
 
 - v0.3.11 的热修把 `conf.threads` 硬编码为 8。现改为**环境变量**
