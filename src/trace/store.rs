@@ -24,6 +24,10 @@ struct StoreInner {
     deque: std::collections::VecDeque<TurnRecord>,
     estimated_bytes: usize,
     dropped: AtomicU64,
+    /// Cumulative lock wait / hold in nanoseconds (ATG#5 attribution: the
+    /// per-request cost this serial section adds under N workers).
+    lock_wait_ns: AtomicU64,
+    lock_hold_ns: AtomicU64,
     max_records: usize,
     max_bytes: usize,
 }
@@ -56,6 +60,8 @@ impl TraceStore {
                 deque: std::collections::VecDeque::new(),
                 estimated_bytes: 0,
                 dropped: AtomicU64::new(0),
+                lock_wait_ns: AtomicU64::new(0),
+                lock_hold_ns: AtomicU64::new(0),
                 max_records: max_records.max(1),
                 max_bytes: max_bytes.max(1),
             })),
@@ -63,7 +69,12 @@ impl TraceStore {
     }
 
     pub fn push(&self, record: TurnRecord) {
+        let wait_start = std::time::Instant::now();
         let mut inner = self.records.lock();
+        inner
+            .lock_wait_ns
+            .fetch_add(wait_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let hold_start = std::time::Instant::now();
         let size = estimate(&record);
         // Enforce both budgets: drop the OLDEST until the new record fits.
         while inner.deque.len() >= inner.max_records
@@ -79,6 +90,9 @@ impl TraceStore {
         }
         inner.estimated_bytes = inner.estimated_bytes.saturating_add(size);
         inner.deque.push_back(record);
+        inner
+            .lock_hold_ns
+            .fetch_add(hold_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     /// Bounded snapshot: at most `limit` newest records, skipping `offset`
@@ -105,6 +119,15 @@ impl TraceStore {
     /// Records dropped by the budgets since startup.
     pub fn dropped(&self) -> u64 {
         self.records.lock().dropped.load(Ordering::Relaxed)
+    }
+
+    /// (wait_ns, hold_ns) accumulated on the store lock since startup.
+    pub fn lock_ns_totals(&self) -> (u64, u64) {
+        let inner = self.records.lock();
+        (
+            inner.lock_wait_ns.load(Ordering::Relaxed),
+            inner.lock_hold_ns.load(Ordering::Relaxed),
+        )
     }
 }
 

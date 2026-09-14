@@ -7,6 +7,16 @@ name = "agent-trace-gateway"
 version = "0.3.11"
 edition = "2021"
 
+[features]
+# Bench-only (ATG issue #3): compile in the capture-off passthrough mode
+# (`ATG_TRACE_MODE=off` — skip capture/parsing, records degrade to
+# timing/error/cancel shells). The mode is a functional-debug isolation
+# knob, NOT a deployment configuration: numbers measured with capture
+# disabled describe a configuration that is never deployed, so production
+# builds MUST NOT enable this. A default build does not read ATG_TRACE_MODE
+# at all (see gateway_app::trace_off_from_env).
+bench-trace-mode = []
+
 [dependencies]
 atg-model = { path = "crates/atg-model" }
 atg-protocol = { path = "crates/atg-protocol" }

@@ -36,6 +36,7 @@
 |---|---|
 | `bin/gateway.rs` | 入口。环境变量配置（见下） |
 | `lib.rs` | Pingora `ProxyHttp` 薄 filter：转发钩子 + `/__atg/*` 控制端点 + `logging` 阶段做解包收尾 |
+| `metrics.rs` | 零依赖定桶直方图 + Prometheus 文本渲染（`/__atg/metrics`，v0.3.12） |
 | `trace/unpack.rs` | 协议识别（Anthropic Messages / OpenAI Responses / OpenAI chat completions）、非流式解包、SSE 重组、tool call 提取 |
 | `trace/session.rs` | 显式会话 ID 提取：body 优先于 header，按协议走不同字段路径（移植自 sub2api session.go 的 9 来源优先级） |
 | `trace/prefix.rs` | 前缀指纹拼接：只存滚动 SHA256 指纹链（每轮 32 字节），不存历史原文；LRU 上限 10 万会话 / TTL 24h |
@@ -78,6 +79,10 @@ ATG_UPSTREAM=127.0.0.1:8080 ./target/release/gateway
 # 可选：OTLP 导出到本地 Langfuse（URL userinfo 自动转为 Basic Auth）
 ATG_OTLP_ENDPOINT='http://pk:sk@127.0.0.1:13000/api/public/otel/v1/traces' \
 ./target/release/gateway
+
+# bench 变体（仅功能 debug 隔离用；其数字不得进入任何性能结论）：
+# 只有该编译特性下才存在 ATG_TRACE_MODE 直通档
+cargo build --release --bin gateway --features bench-trace-mode
 ```
 
 接入客户端：把任意 OpenAI-compatible / Anthropic 客户端的 baseURL 指到 `http://127.0.0.1:6180` 即可，客户端零改动。
@@ -107,8 +112,19 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 
 | 端点 | 内容 |
 |---|---|
-| `GET /__atg/health` | `{exported, failed, dropped}` 导出健康计数 |
+| `GET /__atg/health` | 自证 + 健康计数（JSON）：`version` / `variant`(`prod`\|`bench`) / `trace_mode`(`full`\|`off`)、导出计数与队列深度、排队面（`inflight` / `inflight_high_water` / `awaiting_upstream` / `worker_threads`）、串联表状态（`stitch_entries` / `stitch_capacity` / `stitch_expired_total` / `stitch_evicted_total`）、锁归因（`stitch_wait_ns_total` / `stitch_hold_ns_total` / `store_wait_ns_total` / `store_hold_ns_total`）、turns 计数 |
+| `GET /__atg/metrics` | Prometheus 文本（v0.3.12）：`atg_info` 自证标签（version/variant/trace_mode/trace_tag）、排队/背压 gauge、OTLP 导出计数与队列、四段耗时直方图 |
 | `GET /__atg/records` | 进程内已收集 turn 记录 JSON 快照（调试用，内存有界） |
+
+**观测面判读（v0.3.12）**：`atg_requests_inflight` = 网关内请求数（`new_ctx`→`logging`
+括号）；`atg_requests_awaiting_upstream` = 其中尚未见到上游响应头的（网关排队 + 上游
+首字节等待）；`atg_stage_time_to_first_byte_seconds` = ATG 内首字节，即记录里
+`completion_start_ns − start_ns` 的聚合；`atg_stage_wait_upstream_seconds` = 请求起点到
+上游响应头（含上游排队）。每请求成本为定值原子操作（无锁、无分配）；压测对照按
+±5% TTFB 门验证。`atg_stitch_entries` = 前缀串联表当前链数——**它是串联锁内 O(表) 清扫
+成本的规模因子**（ATG#5），部署侧用它判断该串行点在本实例负载下是否构成瓶颈。
+`atg_stitch_wait_ns_total` / `atg_store_wait_ns_total`（及对应 `_hold_`）为**累计纳秒**：
+除以 `turns_total` 即得每请求的锁等待/持有时长，跨线程数对比可量化"多线程代价被锁吃掉多少"。
 
 ### API Key 指纹（client_key_fp）
 
@@ -133,6 +149,11 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 | `ATG_DRAIN_ON_CANCEL` | 关 | 客户端断开时继续消费上游流到自然结束（sub2api 类"断开也计费"的上游；trace 拿完整 final_output + usage）。默认关闭 = 断开即中止上游，不白烧 token。两种模式 turn 均记 `cancelled=true`（非 fail 口径） |
 | `ATG_DRAIN_TIMEOUT_SECS` | 60 | drain 窗口：上游流超时未结束则放弃（`drain_timed_out` 标记），按已捕获部分记录 |
 
+`ATG_TRACE_MODE`（capture-off 直通档）**不是运行时配置**：它只存在于
+`bench-trace-mode` 编译特性下（默认构建完全不读取该变量，`variant=prod`）。
+理由：该档跳过的正是本仓库的用途，其数字描述的是一个永不部署的配置，
+只能用于功能 debug 隔离。
+
 ## 设计边界（刻意不做）
 
 - 不做多后端路由/账号池/failover（对 sub2api 透明转发）；
@@ -151,6 +172,7 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 ## 测试与回归
 
 - `tests/`：行为测试（TDD 主战场）——协议解包、SSE/WS 重组、会话串联、内容保真、体积上限、fail-open、OTLP 导出；
+- bench 变体测试（`tests/trace_mode.rs`）只在 `cargo test --features bench-trace-mode` 下编译运行；默认档的"env 被忽略"不变量由 `tests/trace_mode_env_ignored.rs` 守；
 - `xtask/harness/`：回归 harness（协议 fixture 上游 + 测试驱动客户端）；
 - `xtask/harness/fixtures/`：真实抓包样本（去凭据，版本库卫生要求）；运行时轨迹按 D4 原样记录，两者互不影响。
 

@@ -1,5 +1,6 @@
 // agent-trace-gateway library: protocol interpretation + gateway app.
 pub mod engine;
+pub mod metrics;
 pub mod trace;
 
 pub mod gateway_app {
@@ -125,12 +126,275 @@ pub mod gateway_app {
         pub loose_path_matches: std::sync::atomic::AtomicU64,
         pub turns_with_session: std::sync::atomic::AtomicU64,
         pub turns_with_harness: std::sync::atomic::AtomicU64,
+        /// Effective pingora worker-thread count at startup (self-attestation
+        /// for health/metrics; see run()).
+        pub worker_threads: usize,
+        /// Observability gauges (v0.3.12, ATG issue #2). `inflight` counts the
+        /// requests inside the gateway — pingora's per-request `new_ctx` and
+        /// `logging` hooks are the guaranteed brackets. `awaiting_upstream`
+        /// counts the subset that has not yet seen upstream response headers:
+        /// requests sitting in the gateway's queue/runtime AND waiting on the
+        /// upstream's first byte ("where did it wait", the number the hop
+        /// ladder cannot attribute). `inflight_high_water` is the monotonic
+        /// max of `inflight`.
+        pub inflight: std::sync::atomic::AtomicU64,
+        pub inflight_high_water: std::sync::atomic::AtomicU64,
+        pub awaiting_upstream: std::sync::atomic::AtomicU64,
+        /// Per-stage latency histograms (v0.3.12): ctx start -> upstream
+        /// response headers (`wait_upstream`), ctx start -> first downstream
+        /// body byte (`time_to_first_byte`, the ATG-internal TTFB the matrix
+        /// reads from records, aggregated), upstream headers -> body end
+        /// (`delivery`), body end -> record finalized (`finalize`, the
+        /// decode/capture/encode tail). Fixed-bucket relaxed atomics: no
+        /// allocation, no locks, a handful of relaxed operations per request.
+        pub stage_wait_upstream: crate::metrics::Histogram,
+        pub stage_time_to_first_byte: crate::metrics::Histogram,
+        pub stage_delivery: crate::metrics::Histogram,
+        pub stage_finalize: crate::metrics::Histogram,
     }
 
     impl Gateway {
         fn push_record(&self, record: atg_model::TurnRecord) {
             self.store.push(record.clone());
             self.exporter.submit(&record);
+        }
+
+        /// Request entry (pingora `new_ctx`, exactly once per request):
+        /// inflight/awaiting gauges plus the high-water mark.
+        fn enter_request(&self) {
+            use std::sync::atomic::Ordering::Relaxed;
+            let in_flight = self.inflight.fetch_add(1, Relaxed).saturating_add(1);
+            self.awaiting_upstream.fetch_add(1, Relaxed);
+            self.inflight_high_water.fetch_max(in_flight, Relaxed);
+        }
+
+        /// Upstream response headers observed: the request leaves the
+        /// "awaiting upstream first byte" set. Latched on `upstream_head_ns`
+        /// so the decrement happens exactly once (the latch is the stage
+        /// boundary too); the never-arrived arm lives in `exit_request`.
+        fn mark_upstream_head(&self, ctx: &mut Ctx) {
+            if ctx.upstream_head_ns.is_none() {
+                ctx.upstream_head_ns = Some(now_ns());
+                let _ = self.awaiting_upstream.fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |v| Some(v.saturating_sub(1)),
+                );
+            }
+        }
+
+        /// Request end (pingora `logging`, called exactly once per request):
+        /// both gauges release, and identified protocol paths record one
+        /// observation per stage. Self-probes (/__atg/*) and unknown paths
+        /// keep the gauges balanced but stay out of the stage histograms —
+        /// they are not LLM turns and would skew the latency picture.
+        fn exit_request(&self, ctx: &Ctx, identified: bool) {
+            use std::sync::atomic::Ordering::Relaxed;
+            let _ = self
+                .inflight
+                .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1)));
+            if ctx.upstream_head_ns.is_none() {
+                // Upstream headers never arrived (connect failure, client
+                // abort during upload, ...): release the awaiting slot here.
+                let _ = self
+                    .awaiting_upstream
+                    .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1)));
+            }
+            if !identified {
+                return;
+            }
+            let end = now_ns();
+            if let Some(head) = ctx.upstream_head_ns {
+                self.stage_wait_upstream
+                    .observe(head.saturating_sub(ctx.start_ns));
+            }
+            if let Some(first) = ctx.first_output_ns {
+                self.stage_time_to_first_byte
+                    .observe(first.saturating_sub(ctx.start_ns));
+            }
+            if let (Some(head), Some(body_end)) = (ctx.upstream_head_ns, ctx.body_end_ns) {
+                self.stage_delivery.observe(body_end.saturating_sub(head));
+            }
+            if let Some(body_end) = ctx.body_end_ns {
+                self.stage_finalize.observe(end.saturating_sub(body_end));
+            }
+        }
+
+        /// Prometheus text exposition (v0.3.12, ATG issue #2). One block per
+        /// family; instance attribution rides `atg_info`'s labels (several
+        /// ATG instances run side by side — the scrape target names the
+        /// instance, the labels attest what was scraped).
+        fn render_metrics(&self) -> String {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
+            let (store_wait_ns, store_hold_ns) = self.store.lock_ns_totals();
+            let mut out = String::with_capacity(4096);
+            out.push_str("# HELP atg_info Build and runtime identity of this gateway instance.\n");
+            out.push_str("# TYPE atg_info gauge\n");
+            out.push_str("atg_info{version=\"");
+            out.push_str(&crate::metrics::escape_label_value(env!(
+                "CARGO_PKG_VERSION"
+            )));
+            out.push_str("\",variant=\"");
+            out.push_str(variant_label());
+            out.push_str("\",trace_mode=\"");
+            out.push_str(trace_mode_label(self.trace_off));
+            out.push_str("\",trace_tag=\"");
+            out.push_str(&crate::metrics::escape_label_value(
+                atg_model::langfuse_trace_tag(),
+            ));
+            out.push_str("\"} 1\n");
+            let gauges: [(&str, &str, u64); 8] = [
+                (
+                    "atg_requests_inflight",
+                    "Requests currently inside the gateway (accepted, not yet logged).",
+                    self.inflight.load(Relaxed),
+                ),
+                (
+                    "atg_requests_awaiting_upstream",
+                    "In-flight requests that have not yet seen upstream response headers (gateway queue plus upstream first-byte wait).",
+                    self.awaiting_upstream.load(Relaxed),
+                ),
+                (
+                    "atg_requests_inflight_high_water",
+                    "Monotonic maximum of atg_requests_inflight since startup.",
+                    self.inflight_high_water.load(Relaxed),
+                ),
+                (
+                    "atg_worker_threads",
+                    "Effective pingora worker-thread count at startup.",
+                    self.worker_threads as u64,
+                ),
+                (
+                    "atg_export_queue_depth",
+                    "Turn records buffered in the OTLP export queue.",
+                    self.exporter.queue_depth() as u64,
+                ),
+                (
+                    "atg_export_queue_capacity",
+                    "OTLP export queue capacity (0 = export disabled).",
+                    self.exporter.queue_capacity() as u64,
+                ),
+                (
+                    "atg_stitch_entries",
+                    "Prefix-stitch chains currently held (drives the stitcher's O(table) sweep cost — ATG#5).",
+                    self.stitcher.entries() as u64,
+                ),
+                (
+                    "atg_stitch_capacity",
+                    "Configured prefix-stitch LRU capacity.",
+                    self.stitcher.capacity() as u64,
+                ),
+            ];
+            for (name, help, value) in gauges {
+                crate::metrics::render_gauge(&mut out, name, help, value);
+            }
+            let counters: [(&str, &str, u64); 16] = [
+                (
+                    "atg_turns_total",
+                    "Requests that produced a traced turn record.",
+                    self.turns_total.load(Relaxed),
+                ),
+                (
+                    "atg_turns_with_session_total",
+                    "Turns carrying an observed (non-synthetic) session id.",
+                    self.turns_with_session.load(Relaxed),
+                ),
+                (
+                    "atg_turns_with_harness_total",
+                    "Turns attributed to a known harness identity.",
+                    self.turns_with_harness.load(Relaxed),
+                ),
+                (
+                    "atg_loose_path_matches_total",
+                    "Requests matching a protocol path loosely (endpoint-variant detection).",
+                    self.loose_path_matches.load(Relaxed),
+                ),
+                (
+                    "atg_failed_frames_total",
+                    "SSE frames that failed JSON parse during unpack (fail-open).",
+                    self.failed_frames.load(Relaxed),
+                ),
+                (
+                    "atg_store_dropped_total",
+                    "Turn records evicted by the bounded in-process store.",
+                    self.store.dropped(),
+                ),
+                (
+                    "atg_exported_total",
+                    "Turn records accepted by the OTLP endpoint.",
+                    exported,
+                ),
+                (
+                    "atg_export_failed_total",
+                    "Turn records whose OTLP export attempt failed.",
+                    failed,
+                ),
+                (
+                    "atg_export_dropped_total",
+                    "Turn records dropped because the export queue was full.",
+                    dropped,
+                ),
+                (
+                    "atg_export_panicked_batches_total",
+                    "Export batches aborted by a panic inside the export task.",
+                    panicked,
+                ),
+                (
+                    "atg_stitch_expired_total",
+                    "Prefix-stitch chains dropped by TTL expiry.",
+                    self.stitcher.expired_total(),
+                ),
+                (
+                    "atg_stitch_evicted_total",
+                    "Prefix-stitch chains dropped by the capacity LRU.",
+                    self.stitcher.evicted_total(),
+                ),
+                (
+                    "atg_stitch_wait_ns_total",
+                    "Cumulative nanoseconds blocked on the prefix-stitch lock (contention).",
+                    self.stitcher.lock_wait_ns_total(),
+                ),
+                (
+                    "atg_stitch_hold_ns_total",
+                    "Cumulative nanoseconds held inside the prefix-stitch lock (critical section).",
+                    self.stitcher.lock_hold_ns_total(),
+                ),
+                (
+                    "atg_store_wait_ns_total",
+                    "Cumulative nanoseconds blocked on the trace-store lock (contention).",
+                    store_wait_ns,
+                ),
+                (
+                    "atg_store_hold_ns_total",
+                    "Cumulative nanoseconds held inside the trace-store lock (per-request push).",
+                    store_hold_ns,
+                ),
+            ];
+            for (name, help, value) in counters {
+                crate::metrics::render_counter(&mut out, name, help, value);
+            }
+            self.stage_wait_upstream.render(
+                &mut out,
+                "atg_stage_wait_upstream_seconds",
+                "Request start to upstream response headers (gateway queueing plus upstream first-byte latency).",
+            );
+            self.stage_time_to_first_byte.render(
+                &mut out,
+                "atg_stage_time_to_first_byte_seconds",
+                "Request start to the first response body byte relayed downstream (ATG-internal TTFB).",
+            );
+            self.stage_delivery.render(
+                &mut out,
+                "atg_stage_delivery_seconds",
+                "Upstream response headers to response body end (stream duration as seen by ATG).",
+            );
+            self.stage_finalize.render(
+                &mut out,
+                "atg_stage_finalize_seconds",
+                "Response body end to record finalized (decode/capture/encode tail).",
+            );
+            out
         }
 
         /// Enter the drain window (v0.3.6): seed the incremental SSE
@@ -248,6 +512,11 @@ pub mod gateway_app {
             };
 
             // --- response head ---
+            // Upstream first byte is in (v0.3.12 observability): the
+            // awaiting_upstream gauge releases and the wait stage closes —
+            // the pump path latches the same boundary in
+            // upstream_response_filter.
+            self.mark_upstream_head(ctx);
             ctx.resp_status = resp.status().as_u16();
             if let Some(v) = resp.headers().get(http::header::CONTENT_TYPE) {
                 ctx.resp_content_type = v.to_str().unwrap_or("").to_string();
@@ -415,6 +684,11 @@ pub mod gateway_app {
             if !ctx.client_dead && !upstream_failed {
                 let _ = session.write_response_body(None, true).await;
             }
+            // Relay end: close the delivery stage (pump parity — the pump
+            // path latches this in response_body_filter's end arm).
+            if ctx.body_end_ns.is_none() {
+                ctx.body_end_ns = Some(now_ns());
+            }
             ctx.relay_done = true;
         }
     }
@@ -511,13 +785,60 @@ pub mod gateway_app {
         }
     }
 
-    /// ATG_TRACE_MODE parse: "off" (case/space tolerant) disables capture
-    /// and parsing — records degrade to timing/error/cancel shells and the
-    /// body path becomes a near-pure forward. Any other value (including
-    /// absent) = full tracing.
+    /// Effective capture mode (v0.3.12, ATG issue #3): capture-off is a
+    /// BENCH-ONLY capability. This is the production arm — compiled without
+    /// the `bench-trace-mode` feature and it does NOT read `ATG_TRACE_MODE`
+    /// at all: no env access, no parse, the variable's name does not occur
+    /// on the production code path (grep-verifiable). Capture-off numbers
+    /// describe a configuration that is never deployed; making the knob
+    /// unrepresentable in production is the fix for that.
+    #[cfg(not(feature = "bench-trace-mode"))]
+    fn trace_off_from_env() -> bool {
+        false
+    }
+
+    /// Effective capture mode, bench arm (`cargo build --features
+    /// bench-trace-mode`): `ATG_TRACE_MODE=off` (case/space tolerant)
+    /// disables capture and parsing — records degrade to timing/error/cancel
+    /// shells and the body path becomes a near-pure forward (functional
+    /// debug isolation only; never cite its numbers). Any other value
+    /// (including absent) = full tracing.
+    #[cfg(feature = "bench-trace-mode")]
+    fn trace_off_from_env() -> bool {
+        parse_trace_mode(std::env::var("ATG_TRACE_MODE").ok().as_deref())
+    }
+
+    /// `ATG_TRACE_MODE` parse — compiled only into bench builds (the default
+    /// build has no call site, so this function does not exist there).
+    #[cfg(feature = "bench-trace-mode")]
     fn parse_trace_mode(env: Option<&str>) -> bool {
         env.map(|v| v.trim().eq_ignore_ascii_case("off"))
             .unwrap_or(false)
+    }
+
+    /// Effective capture mode as self-attested by health, metrics and the
+    /// startup line. The production build can only ever report `full`.
+    fn trace_mode_label(trace_off: bool) -> &'static str {
+        if trace_off {
+            "off"
+        } else {
+            "full"
+        }
+    }
+
+    /// Build variant (v0.3.12, ATG issue #2): `bench` iff the bench feature
+    /// is compiled in, `prod` otherwise. Compile-time by construction — a
+    /// bench binary cannot claim to be production, whatever its environment
+    /// says.
+    #[cfg(feature = "bench-trace-mode")]
+    fn variant_label() -> &'static str {
+        "bench"
+    }
+
+    /// Build variant, production arm.
+    #[cfg(not(feature = "bench-trace-mode"))]
+    fn variant_label() -> &'static str {
+        "prod"
     }
 
     /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
@@ -601,6 +922,15 @@ pub mod gateway_app {
         /// first WS server frame of the turn) — the truthful
         /// completion-start moment, reset per turn.
         pub first_output_ns: Option<u64>,
+        /// Upstream response headers observed (pump: upstream_response_filter;
+        /// relay: right after the upstream response arrives) — the boundary
+        /// between "waiting" and "streaming" for the stage histograms and the
+        /// awaiting_upstream gauge latch.
+        pub upstream_head_ns: Option<u64>,
+        /// Response body end observed (pump: response_body_filter end; relay:
+        /// end of the relay pump) — closes the delivery stage and starts the
+        /// finalize stage.
+        pub body_end_ns: Option<u64>,
         /// Upstream response status (0 = no upstream response arrived —
         /// proxy-level failure); captured at upstream_response_filter.
         pub resp_status: u16,
@@ -640,6 +970,10 @@ pub mod gateway_app {
         type CTX = Ctx;
 
         fn new_ctx(&self) -> Self::CTX {
+            // v0.3.12 observability: pingora calls new_ctx exactly once per
+            // request, and logging exactly once at its end — the bracket the
+            // inflight/awaiting gauges rely on.
+            self.enter_request();
             Ctx {
                 req_buf: Vec::new(),
                 resp_buf: Vec::new(),
@@ -656,6 +990,8 @@ pub mod gateway_app {
                 start_ns: now_ns(),
                 end_ns: 0,
                 first_output_ns: None,
+                upstream_head_ns: None,
+                body_end_ns: None,
                 resp_status: 0,
                 response_complete: false,
                 client_dead: false,
@@ -711,6 +1047,20 @@ pub mod gateway_app {
 
         // Control endpoint: dump collected turn records as JSON.
         async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+            if session.req_header().uri.path() == "/__atg/metrics" {
+                // Prometheus text exposition (v0.3.12, ATG issue #2). Plain
+                // text, no dependencies; safe to scrape every few seconds
+                // (reads relaxed atomics only).
+                let body = self.render_metrics();
+                let mut resp = ResponseHeader::build(200, None)?;
+                resp.insert_header("content-type", "text/plain; version=0.0.4; charset=utf-8")?;
+                resp.insert_header("content-length", body.len().to_string())?;
+                session.write_response_header(Box::new(resp), false).await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
+                return Ok(true);
+            }
             if session.req_header().uri.path() == "/__atg/records" {
                 // Pagination (v0.3.9): ?limit=N&offset=M windows the NEWEST
                 // end — endpoint access no longer clones the whole store
@@ -739,6 +1089,7 @@ pub mod gateway_app {
             }
             if session.req_header().uri.path() == "/__atg/health" {
                 let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
+                let (store_wait_ns, store_hold_ns) = self.store.lock_ns_totals();
                 let failed_frames = self
                     .failed_frames
                     .load(std::sync::atomic::Ordering::Relaxed);
@@ -753,16 +1104,52 @@ pub mod gateway_app {
                     .turns_with_harness
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let body = serde_json::json!({
+                    // Self-attestation (v0.3.12, ATG issue #2): a measurement
+                    // or incident record names the binary, the build variant
+                    // and the effective capture mode it ran against.
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "variant": variant_label(),
+                    "trace_mode": trace_mode_label(self.trace_off),
                     "exported": exported,
                     "failed": failed,
                     "dropped": dropped,
                     "panicked": panicked,
                     "store_dropped": self.store.dropped(),
+                    "export_queue_depth": self.exporter.queue_depth(),
+                    // Prefix-stitch state (ATG#5 entry ticket): the table size
+                    // is what scales the stitcher's O(table) sweep cost, so a
+                    // deployment must be able to read it without a debugger —
+                    // it decides whether that serial point is a real
+                    // bottleneck at this instance's load.
+                    "stitch_entries": self.stitcher.entries(),
+                    "stitch_capacity": self.stitcher.capacity(),
+                    "stitch_expired_total": self.stitcher.expired_total(),
+                    "stitch_evicted_total": self.stitcher.evicted_total(),
+                    // Lock attribution (ATG#5): cumulative nanoseconds spent
+                    // waiting for / holding the two per-request locks. Divide
+                    // by requests_total for the per-request share, and compare
+                    // across thread counts to see how much of the
+                    // multi-threading cost these serial sections eat.
+                    "stitch_wait_ns_total": self.stitcher.lock_wait_ns_total(),
+                    "stitch_hold_ns_total": self.stitcher.lock_hold_ns_total(),
+                    "store_wait_ns_total": store_wait_ns,
+                    "store_hold_ns_total": store_hold_ns,
                     "failed_frames": failed_frames,
                     "turns_total": turns_total,
                     "loose_path_matches": loose_path_matches,
                     "turns_with_session": turns_with_session,
-                    "turns_with_harness": turns_with_harness
+                    "turns_with_harness": turns_with_harness,
+                    // Queue/backpressure (v0.3.12): requests inside the
+                    // gateway, the subset still waiting on the upstream, the
+                    // monotonic max, and the effective worker-thread count.
+                    "inflight": self.inflight.load(std::sync::atomic::Ordering::Relaxed),
+                    "inflight_high_water": self
+                        .inflight_high_water
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "awaiting_upstream": self
+                        .awaiting_upstream
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "worker_threads": self.worker_threads
                 })
                 .to_string();
                 let mut resp = ResponseHeader::build(200, None)?;
@@ -846,6 +1233,8 @@ pub mod gateway_app {
             resp: &mut pingora::http::ResponseHeader,
             ctx: &mut Self::CTX,
         ) -> Result<()> {
+            // Stage boundary (v0.3.12): upstream headers in.
+            self.mark_upstream_head(ctx);
             ctx.resp_status = resp.status.as_u16();
             if let Some(v) = resp.headers.get(http::header::CONTENT_TYPE) {
                 ctx.resp_content_type = v.to_str().unwrap_or("").to_string();
@@ -862,6 +1251,10 @@ pub mod gateway_app {
         ) -> Result<Option<std::time::Duration>> {
             if end {
                 ctx.response_complete = true;
+                // Stage boundary (v0.3.12): response body end.
+                if ctx.body_end_ns.is_none() {
+                    ctx.body_end_ns = Some(now_ns());
+                }
             }
             if session.was_upgraded() {
                 if let Some(b) = body {
@@ -909,7 +1302,14 @@ pub mod gateway_app {
 
         async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Self::CTX) {
             let path = session.req_header().uri.path();
-            let Some(matched) = detect_path_fail_open(path) else {
+            let matched = detect_path_fail_open(path);
+            // v0.3.12 observability: the gauges release for EVERY request
+            // (the new_ctx bracket, pingora guarantees this pair); the stage
+            // histograms take observations only for identified protocol
+            // paths — self-probes (/__atg/*) and unknown paths would skew
+            // the LLM-turn latency picture.
+            self.exit_request(ctx, matched.is_some());
+            let Some(matched) = matched else {
                 return;
             };
             let protocol = matched.descriptor.name;
@@ -1375,7 +1775,7 @@ pub mod gateway_app {
         if ws_cap_fallback {
             eprintln!("ATG: ATG_MAX_WS_FRAME_PAYLOAD invalid — frame cap disabled (unlimited)");
         }
-        let trace_off = parse_trace_mode(std::env::var("ATG_TRACE_MODE").ok().as_deref());
+        let trace_off = trace_off_from_env();
         // PANIC-AUDIT v0.3.8: process startup — a pingora bootstrap failure
         // is fatal by design and must abort the process (class ii).
         #[allow(clippy::unwrap_used)]
@@ -1385,12 +1785,37 @@ pub mod gateway_app {
         // every stream's duplex pumps) would serialize on a single core,
         // stretching SSE chunk pacing under concurrency (prod hop-ladder:
         // W p50 x1.8). Eight workers spread the pumps; verify with top -H.
-        match Arc::get_mut(&mut server.configuration) {
-            Some(conf) => conf.threads = WORKER_THREADS,
-            None => eprintln!(
-                "ATG: could not override worker threads — configuration shared; running single-threaded"
-            ),
-        }
+        let worker_threads = match Arc::get_mut(&mut server.configuration) {
+            Some(conf) => {
+                conf.threads = WORKER_THREADS;
+                WORKER_THREADS
+            }
+            None => {
+                eprintln!(
+                    "ATG: could not override worker threads — configuration shared; running single-threaded"
+                );
+                // pingora's ServerConf default is threads: 1 — report the
+                // configuration that actually runs.
+                1
+            }
+        };
+        // Self-attestation line (v0.3.12, ATG issues #2/#3): one line at
+        // startup that names the binary (version), the build variant, the
+        // EFFECTIVE capture mode, the runtime shape and the forwarding
+        // target — a deployment proves its configuration from logs alone.
+        // `trace_mode` reports what the binary does, not what the env says:
+        // in a production build ATG_TRACE_MODE is not read, so a
+        // misconfigured deployment shows `full` here
+        // (and in /__atg/health, /__atg/metrics).
+        eprintln!(
+            "ATG: version={} variant={} trace_mode={} worker_threads={} drain_on_cancel={} upstream={}",
+            env!("CARGO_PKG_VERSION"),
+            variant_label(),
+            trace_mode_label(trace_off),
+            worker_threads,
+            drain_on_cancel,
+            upstream
+        );
         server.bootstrap();
         let gateway = Gateway {
             upstream: upstream.to_string(),
@@ -1405,6 +1830,14 @@ pub mod gateway_app {
             loose_path_matches: std::sync::atomic::AtomicU64::new(0),
             turns_with_session: std::sync::atomic::AtomicU64::new(0),
             turns_with_harness: std::sync::atomic::AtomicU64::new(0),
+            worker_threads,
+            inflight: std::sync::atomic::AtomicU64::new(0),
+            inflight_high_water: std::sync::atomic::AtomicU64::new(0),
+            awaiting_upstream: std::sync::atomic::AtomicU64::new(0),
+            stage_wait_upstream: crate::metrics::Histogram::new(),
+            stage_time_to_first_byte: crate::metrics::Histogram::new(),
+            stage_delivery: crate::metrics::Histogram::new(),
+            stage_finalize: crate::metrics::Histogram::new(),
             store: TraceStore::new(),
             stitcher: crate::trace::prefix::PrefixStitcher::new(),
             cap: crate::trace::capture::CaptureCap::new(),
@@ -1509,8 +1942,11 @@ pub mod gateway_app {
             assert!(sni_resolve_entry("http://1.2.3.4:8443", Some("api.example.com")).is_none());
         }
 
-        /// ATG_TRACE_MODE parse nails (v0.3.11): "off" (case/space
-        /// tolerant) disables tracing; absent or anything else = full.
+        /// ATG_TRACE_MODE parse nails (v0.3.11; bench-build only since
+        /// v0.3.12 — the parser is compiled out of production builds):
+        /// "off" (case/space tolerant) disables tracing; absent or anything
+        /// else = full.
+        #[cfg(feature = "bench-trace-mode")]
         #[test]
         fn parse_trace_mode_nails() {
             assert!(!parse_trace_mode(None), "absent = full tracing");
@@ -1518,6 +1954,34 @@ pub mod gateway_app {
             assert!(!parse_trace_mode(Some("")), "empty = full tracing");
             assert!(parse_trace_mode(Some("off")));
             assert!(parse_trace_mode(Some(" OFF ")), "case/space tolerant");
+        }
+
+        /// Build-variant attestation nails (v0.3.12, ATG issue #2): the
+        /// label is a compile-time property of the binary and must match the
+        /// compiled feature — health, metrics and the startup line all quote
+        /// it, and measurement records cite it.
+        #[test]
+        fn variant_label_matches_compiled_feature() {
+            #[cfg(feature = "bench-trace-mode")]
+            assert_eq!(variant_label(), "bench");
+            #[cfg(not(feature = "bench-trace-mode"))]
+            assert_eq!(variant_label(), "prod");
+        }
+
+        /// Capture-mode self-attestation (v0.3.12, ATG issue #3): the label
+        /// reports the effective mode, and the production build ignores the
+        /// environment entirely — the bench arm is the only reader of
+        /// ATG_TRACE_MODE. (The cross-process invariant lives in
+        /// tests/trace_mode_env_ignored.rs.)
+        #[test]
+        fn trace_mode_labels_and_prod_env_ignored() {
+            assert_eq!(trace_mode_label(false), "full");
+            assert_eq!(trace_mode_label(true), "off");
+            #[cfg(not(feature = "bench-trace-mode"))]
+            assert!(
+                !trace_off_from_env(),
+                "production build must not read ATG_TRACE_MODE"
+            );
         }
 
         /// ATG_MAX_WS_FRAME_PAYLOAD parse (v0.3.8 final ruling): absent or

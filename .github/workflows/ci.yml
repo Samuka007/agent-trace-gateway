@@ -46,6 +46,13 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      - name: test (bench-trace-mode variant)
+        # The capture-off passthrough exists only in this feature build (ATG
+        # issue #3); its tests are `#![cfg(feature = "bench-trace-mode")]`, so
+        # the default `cargo test` above compiles them out. Nothing here feeds
+        # the image/release jobs — those build with default features.
+        run: cargo test --features bench-trace-mode --test trace_mode
+
       - name: bench gate (release)
         # F5: the SSE performance gate executes in CI — 264KB reassembly
         # must stay <= 700µs (v0.3.0 ruling; ~2x margin over the measured

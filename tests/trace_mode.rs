@@ -2,7 +2,12 @@
 // off, the gateway is a near-pure forward: the response body still passes
 // through to the client untouched, and the record degrades to a
 // timing/protocol shell (no parsing, no raw capture, no error marker).
+// BENCH-ONLY since v0.3.12 (ATG issue #3): the mode is compiled in only
+// under `--features bench-trace-mode`; the production build ignores the
+// variable (see tests/trace_mode_env_ignored.rs).
 // [Requirement: 低成本直通档；Scenario: trace off 透明转发 + 壳记录]
+#![cfg(feature = "bench-trace-mode")]
+
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
@@ -66,6 +71,14 @@ async fn records() -> Vec<serde_json::Value> {
     serde_json::from_slice(&resp.collect().await.unwrap().to_bytes()).expect("json")
 }
 
+async fn health() -> serde_json::Value {
+    let req = Request::get(format!("http://127.0.0.1:{GW_PORT}/__atg/health"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = client().request(req).await.expect("health");
+    serde_json::from_slice(&resp.collect().await.unwrap().to_bytes()).expect("json")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trace_mode_off_is_transparent_with_shell_records() {
     tokio::spawn(mini_upstream());
@@ -119,4 +132,12 @@ async fn trace_mode_off_is_transparent_with_shell_records() {
         rec["start_ns"].as_u64().unwrap_or(0) > 0,
         "timing observability is kept in off mode: {rec:?}"
     );
+
+    // Self-attestation, bench arm (v0.3.12, ATG issues #2/#3): the bench
+    // build names itself and reports the EFFECTIVE mode — a functional-debug
+    // record can never be mistaken for a production one.
+    let h = health().await;
+    assert_eq!(h["variant"], "bench", "{h}");
+    assert_eq!(h["trace_mode"], "off", "{h}");
+    assert_eq!(h["version"], env!("CARGO_PKG_VERSION"), "{h}");
 }

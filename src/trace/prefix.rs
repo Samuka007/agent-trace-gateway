@@ -33,6 +33,16 @@ pub struct PrefixStitcher {
     capacity: usize,
     ttl: Duration,
     next_nonce: AtomicU64,
+    /// Chains dropped by TTL expiry / by the capacity LRU since startup
+    /// (observability: the table size drives the O(table) sweep cost that
+    /// the per-request path pays — ATG#5).
+    expired: AtomicU64,
+    evicted: AtomicU64,
+    /// Cumulative time spent WAITING for `states` and HOLDING it, in
+    /// nanoseconds (ATG#5 attribution: how much of the per-request cost
+    /// under N workers is this serial section — wait is caused by hold).
+    lock_wait_ns: AtomicU64,
+    lock_hold_ns: AtomicU64,
     /// Per-instance salt: keeps the synthetic id namespace scoped to this
     /// process so a restarted gateway never silently continues an old chain.
     salt: [u8; 8],
@@ -68,21 +78,83 @@ impl PrefixStitcher {
             capacity,
             ttl,
             next_nonce: AtomicU64::new(0),
+            expired: AtomicU64::new(0),
+            evicted: AtomicU64::new(0),
+            lock_wait_ns: AtomicU64::new(0),
+            lock_hold_ns: AtomicU64::new(0),
             salt: instance_salt(),
         }
+    }
+
+    /// Chains currently held. This is the number that scales the sweep cost
+    /// (see ATG#5); scrape-time only — the lock is held for one `len()`.
+    pub fn entries(&self) -> usize {
+        self.states.lock().len()
+    }
+
+    /// Configured LRU capacity (ATG_STITCH_CAPACITY, default 100_000).
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Chains dropped by TTL expiry since startup.
+    pub fn expired_total(&self) -> u64 {
+        self.expired.load(Ordering::Relaxed)
+    }
+
+    /// Chains dropped by the capacity LRU since startup.
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative nanoseconds blocked on the stitcher lock (contention).
+    pub fn lock_wait_ns_total(&self) -> u64 {
+        self.lock_wait_ns.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative nanoseconds inside the stitcher lock (critical section).
+    pub fn lock_hold_ns_total(&self) -> u64 {
+        self.lock_hold_ns.load(Ordering::Relaxed)
     }
 
     /// Classify one credential-scoped request into a synthetic session.
     /// Returns (session_id, breakpoint).
     pub fn assign(&self, scope: &str, messages: &[serde_json::Value]) -> (String, bool) {
+        // Fingerprint work (one SHA-256 per message) stays OUTSIDE the
+        // critical section.
         let head = head_key(messages);
         let fps: Vec<[u8; 32]> = messages.iter().map(message_fingerprint).collect();
-        let mut states = self.states.lock();
         let now = Instant::now();
+        let wait_start = Instant::now();
+        let mut states = self.states.lock();
+        self.lock_wait_ns
+            .fetch_add(wait_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let hold_start = Instant::now();
+        let out = self.assign_locked(scope, head, &mut states, fps, now);
+        drop(states);
+        self.lock_hold_ns
+            .fetch_add(hold_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        out
+    }
+
+    /// The critical section proper (see `assign` for the metering wrapper).
+    fn assign_locked(
+        &self,
+        scope: &str,
+        head: String,
+        states: &mut HashMap<(String, String), ChainState>,
+        fps: Vec<[u8; 32]>,
+        now: Instant,
+    ) -> (String, bool) {
+        let key = (scope.to_string(), head);
         // TTL purge.
         let ttl = self.ttl;
+        let before = states.len();
         states.retain(|_, st| now.duration_since(st.last_used) < ttl);
-        let key = (scope.to_string(), head);
+        self.expired.fetch_add(
+            before.saturating_sub(states.len()) as u64,
+            Ordering::Relaxed,
+        );
         if let Some(entry) = states.get_mut(&key) {
             entry.last_used = now;
             if fps.len() >= entry.chain.len() && fps[..entry.chain.len()] == entry.chain[..] {
@@ -104,6 +176,7 @@ impl PrefixStitcher {
                 .map(|(k, _)| k.clone());
             if let Some(k) = lru_key {
                 states.remove(&k);
+                self.evicted.fetch_add(1, Ordering::Relaxed);
             }
         }
         let session_id = self.new_session_id(&fps_concat(&fps));
