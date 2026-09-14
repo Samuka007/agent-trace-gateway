@@ -275,7 +275,13 @@ pub async fn poll_device_code(
             "user_code": device.user_code,
         })
         .to_string();
-        let resp = reqwest::Client::new()
+        let mut cb = reqwest::Client::builder();
+        if let Some(p) = proxy_url {
+            cb = cb.proxy(reqwest::Proxy::all(p).expect("bad proxy url"));
+        }
+        let resp = cb
+            .build()
+            .expect("client")
             .post(&url)
             .header("Content-Type", "application/json")
             .body(body)

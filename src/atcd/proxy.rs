@@ -293,11 +293,7 @@ impl ProxyApp {
         } else {
             parts.uri.path()
         };
-        let url = format!(
-            "{}{}",
-            self.upstream.trim_end_matches('/'),
-            downstream_path
-        );
+        let url = format!("{}{}", self.upstream.trim_end_matches('/'), downstream_path);
         let client = self.client_for(persona.proxy_url.as_deref()).await;
 
         let mut resp = match client

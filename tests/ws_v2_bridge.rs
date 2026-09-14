@@ -174,6 +174,8 @@ async fn start_ws_stack(persona_proxy: Option<String>) -> Stack {
             min_turn_gap: Duration::ZERO,
             jitter: Duration::ZERO,
             concurrency_per_account: 4,
+            // D8 节律字段取默认（本集成测试不关心）
+            ..Default::default()
         })),
         placement: Arc::new(LruPlacement {
             max_sessions_per_account: 12,

@@ -17,6 +17,8 @@
 //!   ATCD_UPSTREAM    默认 https://chatgpt.com/backend-api/codex
 //!   ATCD_DB          默认 ./atcd.db
 //!   ATCD_MIN_TURN_GAP_MS / ATCD_JITTER_MS / ATCD_CONCURRENCY_PER_ACCOUNT
+//!   ATCD_NURTURE_LEVEL（0 养号优先~1 需求优先，默认 0.5）/ ATCD_BURST_TURNS
+//!   ATCD_BURST_MIN_GAP_MS / ATCD_QUIET_MS / ATCD_QUIET_JITTER_MS（D8 节律）
 //!   ATCD_MAX_SESSIONS_PER_ACCOUNT   默认 12
 //!   ATCD_QUOTA_CEILING_PERCENT      默认 85（5h 窗口用量天花板，临期号不接新会话）
 //!   ATCD_VERSION_PIN / ATCD_OS_TYPE / ATCD_OS_VERSION / ATCD_ARCH / ATCD_TERMINAL
@@ -325,7 +327,8 @@ async fn login_device(proxy_url: Option<&str>) -> Result<oauth::ExchangedTokens,
         "1. 在任意设备浏览器打开: {}\n2. 输入代码: {}\n（等待授权中，最长 15 分钟……）",
         device.verification_url, device.user_code
     );
-    let ex = oauth::poll_device_code(issuer, &device, proxy_url.as_deref()).await
+    let ex = oauth::poll_device_code(issuer, &device, proxy_url)
+        .await
         .map_err(|e| {
             eprintln!("device login failed: {e}");
             1i32
@@ -336,7 +339,7 @@ async fn login_device(proxy_url: Option<&str>) -> Result<oauth::ExchangedTokens,
         &oauth::device_redirect_uri(issuer),
         &ex.code_verifier,
         &ex.authorization_code,
-        proxy_url.as_deref(),
+        proxy_url,
     )
     .await
     .map_err(|e| {
@@ -372,7 +375,7 @@ async fn login_paste(issuer: &str, proxy_url: Option<&str>) -> Result<oauth::Exc
         oauth::REDIRECT_URI,
         &pkce.code_verifier,
         &code,
-        proxy_url.as_deref(),
+        proxy_url,
     )
     .await
     .map_err(|e| {
@@ -391,6 +394,12 @@ async fn serve() -> i32 {
         min_turn_gap: Duration::from_millis(env_num("ATCD_MIN_TURN_GAP_MS", 1200u64)),
         jitter: Duration::from_millis(env_num("ATCD_JITTER_MS", 900u64)),
         concurrency_per_account: env_num("ATCD_CONCURRENCY_PER_ACCOUNT", 2usize),
+        // D8 养号节律（docs/atcd-design.md §13）
+        nurture_level: env_num("ATCD_NURTURE_LEVEL", 0.5f64),
+        burst_turns: env_num("ATCD_BURST_TURNS", 3u32),
+        burst_min_gap: Duration::from_millis(env_num("ATCD_BURST_MIN_GAP_MS", 250u64)),
+        quiet: Duration::from_millis(env_num("ATCD_QUIET_MS", 8000u64)),
+        quiet_jitter: Duration::from_millis(env_num("ATCD_QUIET_JITTER_MS", 3000u64)),
     };
     let placement = Arc::new(LruPlacement {
         max_sessions_per_account: env_num("ATCD_MAX_SESSIONS_PER_ACCOUNT", 12i64),
