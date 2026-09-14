@@ -49,6 +49,19 @@ async fn health_attests_build_and_releases_gauges() {
     assert_eq!(resp.status(), 200);
     let _ = resp.collect().await.unwrap();
 
+    // A stitch-eligible turn (anthropic, two messages) must show up in the
+    // prefix-stitch state: the table size is what scales the stitcher's
+    // O(table) sweep cost, and health is where an operator reads it (ATG#5).
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(
+            r#"{"model":"m","messages":[{"role":"system","content":"sys-stitch"},{"role":"user","content":"user-stitch"}]}"#,
+        )))
+        .unwrap();
+    let resp = client().request(req).await.expect("request served");
+    assert_eq!(resp.status(), 200);
+    let _ = resp.collect().await.unwrap();
+
     // The record is finalized inside logging() — its visibility proves the
     // turn already left the inflight/awaiting sets.
     let mut recs = Vec::new();
@@ -89,6 +102,24 @@ async fn health_attests_build_and_releases_gauges() {
     assert!(
         h["turns_total"].as_u64().unwrap_or(0) >= 1,
         "the turn must be counted: {h}"
+    );
+    // Prefix-stitch state (ATG#5): one live chain, the default capacity, and
+    // no drops yet — the numbers an operator compares against the load.
+    assert!(
+        h["stitch_entries"].as_u64().unwrap_or(0) >= 1,
+        "a stitched conversation must appear in the table: {h}"
+    );
+    assert_eq!(h["stitch_capacity"], 100000, "default capacity: {h}");
+    assert_eq!(h["stitch_expired_total"], 0, "no TTL expiry in-test: {h}");
+    assert_eq!(h["stitch_evicted_total"], 0, "no capacity eviction: {h}");
+    // Lock attribution (ATG#5): both serial sections were entered and timed.
+    assert!(
+        h["stitch_hold_ns_total"].as_u64().unwrap_or(0) > 0,
+        "the stitcher critical section must have been timed: {h}"
+    );
+    assert!(
+        h["store_hold_ns_total"].as_u64().unwrap_or(0) > 0,
+        "every turn pushes into the store (timed): {h}"
     );
     // Export is disabled in the test stack: the queue probe reports its
     // shape without inventing occupancy.

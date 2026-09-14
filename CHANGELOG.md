@@ -13,6 +13,14 @@
   `trace_mode`(`full`|`off`)，以及排队面 `inflight` / `inflight_high_water` /
   `awaiting_upstream` / `worker_threads` 与 OTLP 导出队列深度
   `export_queue_depth`。
+- `/__atg/health` 与 `/__atg/metrics` 暴露前缀串联表状态：`stitch_entries`
+  （当前链数，串联锁内 O(表) 清扫成本的规模因子）、`stitch_capacity`、
+  `stitch_expired_total`（TTL 淘汰）、`stitch_evicted_total`（容量 LRU 淘汰）——
+  供 ATG#5 判断该串行点在真实实例负载下是否构成瓶颈。
+- 锁归因计数（累计纳秒）：`stitch_wait_ns_total` / `stitch_hold_ns_total`（前缀
+  串联锁）与 `store_wait_ns_total` / `store_hold_ns_total`（记录存储锁）——除以
+  `turns_total` 得每请求锁等待/持有，跨线程数对比即可量化"多线程代价被锁吃掉多少"
+  （ATG#5 归因口径）。
 - 新增 `GET /__atg/metrics`（Prometheus 文本，零依赖定桶直方图）：`atg_info`
   自证标签（version/variant/trace_mode/trace_tag）、排队/背压 gauge、导出与
   turns 计数、四段耗时直方图（wait_upstream / time_to_first_byte / delivery /

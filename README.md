@@ -112,7 +112,7 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 
 | 端点 | 内容 |
 |---|---|
-| `GET /__atg/health` | 自证 + 健康计数（JSON）：`version` / `variant`(`prod`\|`bench`) / `trace_mode`(`full`\|`off`)、导出计数与队列深度、排队面（`inflight` / `inflight_high_water` / `awaiting_upstream` / `worker_threads`）、turns 计数 |
+| `GET /__atg/health` | 自证 + 健康计数（JSON）：`version` / `variant`(`prod`\|`bench`) / `trace_mode`(`full`\|`off`)、导出计数与队列深度、排队面（`inflight` / `inflight_high_water` / `awaiting_upstream` / `worker_threads`）、串联表状态（`stitch_entries` / `stitch_capacity` / `stitch_expired_total` / `stitch_evicted_total`）、锁归因（`stitch_wait_ns_total` / `stitch_hold_ns_total` / `store_wait_ns_total` / `store_hold_ns_total`）、turns 计数 |
 | `GET /__atg/metrics` | Prometheus 文本（v0.3.12）：`atg_info` 自证标签（version/variant/trace_mode/trace_tag）、排队/背压 gauge、OTLP 导出计数与队列、四段耗时直方图 |
 | `GET /__atg/records` | 进程内已收集 turn 记录 JSON 快照（调试用，内存有界） |
 
@@ -121,7 +121,10 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 首字节等待）；`atg_stage_time_to_first_byte_seconds` = ATG 内首字节，即记录里
 `completion_start_ns − start_ns` 的聚合；`atg_stage_wait_upstream_seconds` = 请求起点到
 上游响应头（含上游排队）。每请求成本为定值原子操作（无锁、无分配）；压测对照按
-±5% TTFB 门验证。
+±5% TTFB 门验证。`atg_stitch_entries` = 前缀串联表当前链数——**它是串联锁内 O(表) 清扫
+成本的规模因子**（ATG#5），部署侧用它判断该串行点在本实例负载下是否构成瓶颈。
+`atg_stitch_wait_ns_total` / `atg_store_wait_ns_total`（及对应 `_hold_`）为**累计纳秒**：
+除以 `turns_total` 即得每请求的锁等待/持有时长，跨线程数对比可量化"多线程代价被锁吃掉多少"。
 
 ### API Key 指纹（client_key_fp）
 

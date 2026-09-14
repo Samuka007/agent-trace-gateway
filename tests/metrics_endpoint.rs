@@ -68,6 +68,18 @@ async fn metrics_surface_attests_and_counts_traffic() {
     }
     // Turns record from logging() — the same hook that feeds the gauges and
     // the stage histograms, so a visible turn means the observation happened.
+    // One of the turns is stitch-eligible (anthropic, two messages) so the
+    // prefix-stitch families have something to report (ATG#5).
+    let req = Request::post(format!("http://127.0.0.1:{gw}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(
+            r#"{"model":"m","messages":[{"role":"system","content":"sys-stitch"},{"role":"user","content":"user-stitch"}]}"#,
+        )))
+        .unwrap();
+    let resp = client().request(req).await.expect("request served");
+    assert_eq!(resp.status(), 200);
+    let _ = resp.collect().await.unwrap();
+
     let mut recorded = 0;
     for _ in 0..20 {
         let req = Request::get(format!("http://127.0.0.1:{gw}/__atg/records"))
@@ -114,6 +126,16 @@ async fn metrics_surface_attests_and_counts_traffic() {
 
     // Counters follow the traffic.
     assert!(scalar(&body, "atg_turns_total") >= 3, "{body}");
+
+    // Prefix-stitch state (ATG#5): the stitched conversation registered, the
+    // capacity is the configured bound, and nothing has been dropped.
+    assert!(scalar(&body, "atg_stitch_entries") >= 1, "{body}");
+    assert_eq!(scalar(&body, "atg_stitch_capacity"), 100000, "{body}");
+    assert_eq!(scalar(&body, "atg_stitch_expired_total"), 0, "{body}");
+    assert_eq!(scalar(&body, "atg_stitch_evicted_total"), 0, "{body}");
+    // Lock attribution (ATG#5): the timed critical sections are exposed.
+    assert!(scalar(&body, "atg_stitch_hold_ns_total") > 0, "{body}");
+    assert!(scalar(&body, "atg_store_hold_ns_total") > 0, "{body}");
 
     // Per-stage timing (ATG issue #2): every served turn observes the four
     // stages, and the bucket series are cumulative with +Inf = count.

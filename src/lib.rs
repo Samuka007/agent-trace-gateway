@@ -227,6 +227,7 @@ pub mod gateway_app {
         fn render_metrics(&self) -> String {
             use std::sync::atomic::Ordering::Relaxed;
             let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
+            let (store_wait_ns, store_hold_ns) = self.store.lock_ns_totals();
             let mut out = String::with_capacity(4096);
             out.push_str("# HELP atg_info Build and runtime identity of this gateway instance.\n");
             out.push_str("# TYPE atg_info gauge\n");
@@ -243,7 +244,7 @@ pub mod gateway_app {
                 atg_model::langfuse_trace_tag(),
             ));
             out.push_str("\"} 1\n");
-            let gauges: [(&str, &str, u64); 6] = [
+            let gauges: [(&str, &str, u64); 8] = [
                 (
                     "atg_requests_inflight",
                     "Requests currently inside the gateway (accepted, not yet logged).",
@@ -274,11 +275,21 @@ pub mod gateway_app {
                     "OTLP export queue capacity (0 = export disabled).",
                     self.exporter.queue_capacity() as u64,
                 ),
+                (
+                    "atg_stitch_entries",
+                    "Prefix-stitch chains currently held (drives the stitcher's O(table) sweep cost — ATG#5).",
+                    self.stitcher.entries() as u64,
+                ),
+                (
+                    "atg_stitch_capacity",
+                    "Configured prefix-stitch LRU capacity.",
+                    self.stitcher.capacity() as u64,
+                ),
             ];
             for (name, help, value) in gauges {
                 crate::metrics::render_gauge(&mut out, name, help, value);
             }
-            let counters: [(&str, &str, u64); 10] = [
+            let counters: [(&str, &str, u64); 16] = [
                 (
                     "atg_turns_total",
                     "Requests that produced a traced turn record.",
@@ -328,6 +339,36 @@ pub mod gateway_app {
                     "atg_export_panicked_batches_total",
                     "Export batches aborted by a panic inside the export task.",
                     panicked,
+                ),
+                (
+                    "atg_stitch_expired_total",
+                    "Prefix-stitch chains dropped by TTL expiry.",
+                    self.stitcher.expired_total(),
+                ),
+                (
+                    "atg_stitch_evicted_total",
+                    "Prefix-stitch chains dropped by the capacity LRU.",
+                    self.stitcher.evicted_total(),
+                ),
+                (
+                    "atg_stitch_wait_ns_total",
+                    "Cumulative nanoseconds blocked on the prefix-stitch lock (contention).",
+                    self.stitcher.lock_wait_ns_total(),
+                ),
+                (
+                    "atg_stitch_hold_ns_total",
+                    "Cumulative nanoseconds held inside the prefix-stitch lock (critical section).",
+                    self.stitcher.lock_hold_ns_total(),
+                ),
+                (
+                    "atg_store_wait_ns_total",
+                    "Cumulative nanoseconds blocked on the trace-store lock (contention).",
+                    store_wait_ns,
+                ),
+                (
+                    "atg_store_hold_ns_total",
+                    "Cumulative nanoseconds held inside the trace-store lock (per-request push).",
+                    store_hold_ns,
                 ),
             ];
             for (name, help, value) in counters {
@@ -1048,6 +1089,7 @@ pub mod gateway_app {
             }
             if session.req_header().uri.path() == "/__atg/health" {
                 let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
+                let (store_wait_ns, store_hold_ns) = self.store.lock_ns_totals();
                 let failed_frames = self
                     .failed_frames
                     .load(std::sync::atomic::Ordering::Relaxed);
@@ -1074,6 +1116,24 @@ pub mod gateway_app {
                     "panicked": panicked,
                     "store_dropped": self.store.dropped(),
                     "export_queue_depth": self.exporter.queue_depth(),
+                    // Prefix-stitch state (ATG#5 entry ticket): the table size
+                    // is what scales the stitcher's O(table) sweep cost, so a
+                    // deployment must be able to read it without a debugger —
+                    // it decides whether that serial point is a real
+                    // bottleneck at this instance's load.
+                    "stitch_entries": self.stitcher.entries(),
+                    "stitch_capacity": self.stitcher.capacity(),
+                    "stitch_expired_total": self.stitcher.expired_total(),
+                    "stitch_evicted_total": self.stitcher.evicted_total(),
+                    // Lock attribution (ATG#5): cumulative nanoseconds spent
+                    // waiting for / holding the two per-request locks. Divide
+                    // by requests_total for the per-request share, and compare
+                    // across thread counts to see how much of the
+                    // multi-threading cost these serial sections eat.
+                    "stitch_wait_ns_total": self.stitcher.lock_wait_ns_total(),
+                    "stitch_hold_ns_total": self.stitcher.lock_hold_ns_total(),
+                    "store_wait_ns_total": store_wait_ns,
+                    "store_hold_ns_total": store_hold_ns,
                     "failed_frames": failed_frames,
                     "turns_total": turns_total,
                     "loose_path_matches": loose_path_matches,
