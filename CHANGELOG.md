@@ -7,6 +7,30 @@
 
 ## [Unreleased]
 
+### 新增：健康自证 + 排队/耗时观测面（ATG#2）
+
+- `/__atg/health` 新增自证字段 `version` / `variant`(`prod`|`bench`) /
+  `trace_mode`(`full`|`off`)，以及排队面 `inflight` / `inflight_high_water` /
+  `awaiting_upstream` / `worker_threads` 与 OTLP 导出队列深度
+  `export_queue_depth`。
+- 新增 `GET /__atg/metrics`（Prometheus 文本，零依赖定桶直方图）：`atg_info`
+  自证标签（version/variant/trace_mode/trace_tag）、排队/背压 gauge、导出与
+  turns 计数、四段耗时直方图（wait_upstream / time_to_first_byte / delivery /
+  finalize；桶 1ms–60s）。每请求成本为定值 relaxed 原子操作（无锁、无分配）。
+- 启动自证行：`ATG: version=… variant=… trace_mode=… worker_threads=…
+  drain_on_cancel=… upstream=…`。
+
+### 变更：capture-off 直通档降为编译期 bench 特性（ATG#3）
+
+- `ATG_TRACE_MODE` 只在 `--features bench-trace-mode` 构建中存在；默认构建
+  **不读取**该变量（cfg 双变体：生产路径无解析代码，`grep` 可证），
+  自证为 `variant=prod` / `trace_mode=full`。
+- 默认档不变量测试 `tests/trace_mode_env_ignored.rs`（env=off 仍全量捕获/解析）；
+  bench 档测试 `tests/trace_mode.rs` 以 `#![cfg(feature = "bench-trace-mode")]`
+  门控并断言自证字段。
+- CI/`deploy/Dockerfile` 保持默认 features（全仓无 `--all-features`）；CI 另加
+  `cargo test --features bench-trace-mode --test trace_mode` 保 bench 档不腐。
+
 ## [0.3.10] - 2026-09-12
 
 ## [0.3.11] - 2026-09-13

@@ -86,6 +86,24 @@ impl Exporter {
             }
         }
     }
+
+    /// Records currently buffered in the export queue (occupancy of the
+    /// bounded channel; ATG issue #2 priority 4 — export backpressure was
+    /// only visible as a drop counter). 0 when export is disabled.
+    pub fn queue_depth(&self) -> usize {
+        match &self.tx {
+            Some(tx) => QUEUE_CAPACITY.saturating_sub(tx.capacity()),
+            None => 0,
+        }
+    }
+
+    /// Configured export queue capacity (0 when export is disabled).
+    pub fn queue_capacity(&self) -> usize {
+        match &self.tx {
+            Some(_) => QUEUE_CAPACITY,
+            None => 0,
+        }
+    }
 }
 
 async fn export_loop(

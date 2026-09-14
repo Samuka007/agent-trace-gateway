@@ -6,6 +6,11 @@
 //! consuming the upstream stream after the client disconnects — for
 //! upstreams that bill the completion regardless; default off = abort),
 //! ATG_DRAIN_TIMEOUT_SECS (drain window; default 60).
+//!
+//! ATG_TRACE_MODE (capture-off passthrough) is NOT a runtime configuration:
+//! it exists only in `--features bench-trace-mode` builds (functional-debug
+//! isolation; its numbers are never performance evidence). The default build
+//! does not read the variable — see `gateway_app::trace_off_from_env`.
 fn main() {
     // `atg key-fp <key>`: recompute the trace fingerprint of an API key —
     // EXACTLY the runtime code path (ops verifiable recomputation: run it,

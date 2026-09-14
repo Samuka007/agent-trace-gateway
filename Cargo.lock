@@ -35,6 +35,7 @@ dependencies = [
  "hyper-util",
  "parking_lot",
  "pingora",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",
