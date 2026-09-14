@@ -6,10 +6,10 @@
 //!   人类是「一段专注里连点几下，然后离开」，不是恒定速率。
 //! - 需求时钟（排队）：请求在 `wait_turn` 等待；档位 `nurture_level` 决定
 //!   沉寂余量的放弃比例（0=等满沉寂，1=立即放弃）。
-//! - 地板不可让步：`min_turn_gap` 与 `burst_min_gap` 永远执行——亚秒级
+//! - 最小间隔不可让步：`min_turn_gap` 与 `burst_min_gap` 永远执行——亚秒级
 //!   规律性是最强的机器信号，档位只调节歇息余量。
 //!
-//! 等待计入用户体验，所以地板默认值保守（毫秒~秒级），参数随真实流量迭代。
+//! 等待计入用户体验，所以默认值保守（毫秒~秒级），参数随真实流量迭代。
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 pub struct PacingConfig {
-    /// 休整间隔地板（人类地板，档位不可让步）。
+    /// 休整的最小间隔（下限，档位不可让步）。
     pub min_turn_gap: Duration,
     /// 休整抖动上限（人的间隔从不精确）。
     pub jitter: Duration,
@@ -30,7 +30,7 @@ pub struct PacingConfig {
     pub nurture_level: f64,
     /// D8 突发额度：一次天然休整后的连发上限（"专注操作里的连点"）。
     pub burst_turns: u32,
-    /// D8 突发内间隔地板（不可让步）。
+    /// D8 突发内的最小间隔（不可让步）。
     pub burst_min_gap: Duration,
     /// D8 燃尽后沉寂基数。
     pub quiet: Duration,
@@ -66,7 +66,7 @@ struct Inner {
 /// 本次放行属于哪类（测试可观测；生产不依赖）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Grant {
-    /// 天然休整（且重臂突发额度）。
+    /// 天然休整（且恢复突发额度）。
     Rested,
     /// 突发额度内连发。
     Burst,
@@ -139,7 +139,7 @@ impl PacingGate {
         let rest_ok = last.is_none_or(|l| now.duration_since(l) >= self.cfg.min_turn_gap + jitter);
         let quiet_ok = quiet_until.is_none_or(|q| now >= q);
         if rest_ok && quiet_ok {
-            // 天然休整：放行并重臂（用户休息后回来，又能快速连发）。
+            // 天然休整：放行并恢复突发额度（用户休息后回来，又能快速连发）。
             inner
                 .burst_left
                 .insert(account_id.to_string(), self.cfg.burst_turns);
@@ -160,8 +160,8 @@ impl PacingGate {
             return (Duration::ZERO, Grant::Burst);
         }
 
-        // 沉寂：地板（gap 余量）全额等待，档位只萎缩「超出地板的沉寂余量」。
-        // level=0 → 等满 quiet；level=1 → 只剩地板（见 D8 §13.3-1）。
+        // 沉寂：最小间隔（gap 余量）全额等待，档位只缩短「超出它的沉寂余量」。
+        // level=0 → 等满 quiet；level=1 → 只剩最小间隔（见 D8 §13.3-1）。
         let gap_target = last.map(|l| l + self.cfg.min_turn_gap + jitter);
         let level = self.cfg.nurture_level.clamp(0.0, 1.0);
         let gap_remaining = gap_target
@@ -221,7 +221,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         gate.wait_turn("a").await;
         assert!(t0.elapsed() < Duration::from_millis(40), "首回合不应等待");
-        assert_eq!(burst_left(&gate, "a"), 3, "首回合应重臂");
+        assert_eq!(burst_left(&gate, "a"), 3, "首回合应蓄满额度");
     }
 
     #[tokio::test]
@@ -257,7 +257,7 @@ mod tests {
     async fn burst_then_quiet_at_level_zero() {
         let quiet_ms = 400u64;
         let gate = PacingGate::new(cfg(1000, 2, quiet_ms, 0.0));
-        gate.wait_turn("a").await; // Rested（首回合，重臂 2）
+        gate.wait_turn("a").await; // Rested（首回合，额度=2）
 
         let t0 = std::time::Instant::now();
         tokio::time::sleep(Duration::from_millis(15)).await;
@@ -273,15 +273,15 @@ mod tests {
         assert_eq!(burst_left(&gate, "a"), 0);
 
         let t1 = std::time::Instant::now();
-        gate.wait_turn("a").await; // 沉寂：档位 0 → 等满（地板 1000ms 主导，quiet 被吸收）
+        gate.wait_turn("a").await; // 沉寂：档位 0 → 等满（最小间隔 1000ms 主导，quiet 被吸收）
         assert!(
             t1.elapsed() >= Duration::from_millis(700),
-            "档位 0 应等满地板的沉寂（实测 {:?}）",
+            "档位 0 应等满沉寂、由最小间隔主导（实测 {:?}）",
             t1.elapsed()
         );
     }
 
-    /// D8：档位 1 时沉寂立即放弃（只剩地板）。
+    /// D8：档位 1 时沉寂立即放弃（只剩最小间隔）。
     #[tokio::test]
     async fn level_one_abandons_quiet() {
         let gate = PacingGate::new(cfg(1000, 2, 5000, 1.0));
@@ -292,11 +292,11 @@ mod tests {
         gate.wait_turn("a").await; // 燃尽，quiet=5000ms
 
         let t0 = std::time::Instant::now();
-        gate.wait_turn("a").await; // 档位 1 → 沉寂立即放弃，但地板保留
+        gate.wait_turn("a").await; // 档位 1 → 沉寂立即放弃，但最小间隔保留
         let elapsed = t0.elapsed();
         assert!(
             elapsed >= Duration::from_millis(700),
-            "档位 1 仍应保留地板（实测 {:?}）",
+            "档位 1 仍应保留最小间隔（实测 {:?}）",
             elapsed
         );
         assert!(
@@ -306,18 +306,18 @@ mod tests {
         );
     }
 
-    /// D8：档位 0.5 时半放弃沉寂余量（地板全额保留）。
+    /// D8：档位 0.5 时半放弃沉寂余量（最小间隔全额保留）。
     #[tokio::test]
     async fn half_level_halves_extra() {
         let gate = PacingGate::new(cfg(100, 1, 1000, 0.5));
-        gate.wait_turn("a").await; // 重臂 1
+        gate.wait_turn("a").await; // 额度=1
         tokio::time::sleep(Duration::from_millis(15)).await;
         gate.wait_turn("a").await; // 燃尽，quiet=1000ms
 
         let t0 = std::time::Instant::now();
         gate.wait_turn("a").await;
         let elapsed = t0.elapsed();
-        // 期望 ≈ 地板 85ms + 沉寂余量 900×0.5=450ms ≈ 535ms
+        // 期望 ≈ 最小间隔 85ms + 沉寂余量 900×0.5=450ms ≈ 535ms
         assert!(
             elapsed >= Duration::from_millis(350) && elapsed < Duration::from_millis(750),
             "档位 0.5 应半放弃沉寂余量（实测 {:?}）",
@@ -325,20 +325,20 @@ mod tests {
         );
     }
 
-    /// D8：天然休整后突发额度重臂。
+    /// D8：天然休整后突发额度恢复。
     #[tokio::test]
-    async fn rest_rearms_burst() {
+    async fn rest_refills_burst() {
         let gate = PacingGate::new(cfg(50, 2, 100, 1.0));
-        gate.wait_turn("a").await; // 重臂
+        gate.wait_turn("a").await; // 恢复额度
         tokio::time::sleep(Duration::from_millis(15)).await;
         gate.wait_turn("a").await; // Burst → 1
         tokio::time::sleep(Duration::from_millis(15)).await;
         gate.wait_turn("a").await; // Burst → 0，入沉寂
         assert_eq!(burst_left(&gate, "a"), 0);
 
-        // 等过 沉寂+间隔 地板 → 下一次天然休整应重臂
+        // 等过 沉寂+最小间隔 → 下一次天然休整应恢复额度
         tokio::time::sleep(Duration::from_millis(150)).await;
         gate.wait_turn("a").await;
-        assert_eq!(burst_left(&gate, "a"), 2, "休整后应重臂");
+        assert_eq!(burst_left(&gate, "a"), 2, "休整后应恢复额度");
     }
 }
