@@ -772,6 +772,36 @@ pub mod gateway_app {
             })
     }
 
+    /// Default pingora worker-thread count.
+    ///
+    /// This is pingora's own `ServerConf::default().threads` and the
+    /// behaviour of every release up to and including v0.3.11's predecessor:
+    /// ONE worker runs the accept loop and every stream's duplex pumps.
+    ///
+    /// Raising it is NOT a free win and must not be a silent upgrade
+    /// (ATG#1 Specification 5): an 8-worker build measured faster at the ATG
+    /// hop in isolation while client-observed TTFB p50 in a multi-hop
+    /// deployment regressed by roughly an order of magnitude, so the
+    /// multi-worker shape is an explicit opt-in —
+    /// `ATG_WORKER_THREADS=<n>` — with the effective value self-attested by
+    /// the startup line and `/__atg/health`.
+    const DEFAULT_WORKER_THREADS: usize = 1;
+
+    /// ATG_WORKER_THREADS parse: absent → `DEFAULT_WORKER_THREADS`;
+    /// a positive integer is honoured; unparsable, empty or 0 → the default
+    /// plus a `true` fallback flag so the caller can say so once at startup
+    /// (a silently ignored knob is how a whole measurement matrix once ran a
+    /// thread count nobody asked for).
+    fn parse_worker_threads(env: Option<&str>) -> (usize, bool) {
+        match env {
+            None => (DEFAULT_WORKER_THREADS, false),
+            Some(v) => match v.trim().parse::<usize>() {
+                Ok(n) if n > 0 => (n, false),
+                _ => (DEFAULT_WORKER_THREADS, true),
+            },
+        }
+    }
+
     /// ATG_MAX_WS_FRAME_PAYLOAD parse (bytes): absent → (0, false) — the
     /// default is UNLIMITED; unparsable or 0 → fall back to 0 with the
     /// startup-log flag; a positive value enables the refusal cap.
@@ -1710,7 +1740,6 @@ pub mod gateway_app {
     /// Start the gateway on `listen`, forwarding to `upstream`. Blocks.
     /// `upstream` accepts "host:port", "http://host:port" or "https://host:port".
     pub fn run(listen: &str, upstream: &str) {
-        const WORKER_THREADS: usize = 8;
         // ATG_TRACE_TAG (v0.3.10): the line:<source> trace tag. An empty
         // value falls back to the default — warn so a misconfiguration is
         // never silent (the resolution itself lives in atg-model, read
@@ -1776,19 +1805,29 @@ pub mod gateway_app {
             eprintln!("ATG: ATG_MAX_WS_FRAME_PAYLOAD invalid — frame cap disabled (unlimited)");
         }
         let trace_off = trace_off_from_env();
+        // Worker-pool size (ATG#1). Read once at startup; the effective
+        // value is self-attested below and in /__atg/health so a deployment
+        // (or a measurement arm) can prove which shape it ran.
+        let (worker_threads, worker_threads_fallback) =
+            parse_worker_threads(std::env::var("ATG_WORKER_THREADS").ok().as_deref());
+        if worker_threads_fallback {
+            eprintln!(
+                "ATG: ATG_WORKER_THREADS invalid — using the default {DEFAULT_WORKER_THREADS} \
+                 worker thread(s); set a positive integer to override"
+            );
+        }
         // PANIC-AUDIT v0.3.8: process startup — a pingora bootstrap failure
         // is fatal by design and must abort the process (class ii).
         #[allow(clippy::unwrap_used)]
         let mut server = Server::new(Some(Opt::default())).unwrap();
-        // Q1 (v0.3.11 perf): pingora defaults to ONE worker thread
-        // (ServerConf::default threads:1) — the whole proxy (accept plus
-        // every stream's duplex pumps) would serialize on a single core,
-        // stretching SSE chunk pacing under concurrency (prod hop-ladder:
-        // W p50 x1.8). Eight workers spread the pumps; verify with top -H.
+        // pingora's ServerConf default is threads: 1 — the whole proxy
+        // (accept plus every stream's duplex pumps) runs on one core. The
+        // v0.3.11 hot-fix force-set 8; that is now the opt-in value of
+        // ATG_WORKER_THREADS, not the default (ATG#1 Specification 5).
         let worker_threads = match Arc::get_mut(&mut server.configuration) {
             Some(conf) => {
-                conf.threads = WORKER_THREADS;
-                WORKER_THREADS
+                conf.threads = worker_threads;
+                worker_threads
             }
             None => {
                 eprintln!(
@@ -2006,6 +2045,29 @@ pub mod gateway_app {
                 (0, true),
                 "unparsable falls back with the startup log"
             );
+        }
+
+        /// ATG_WORKER_THREADS parse (ATG#1 Specification 5): absent = the
+        /// pre-change single-worker behaviour; a positive integer is
+        /// honoured; empty/0/garbage fall back to the default WITH the flag
+        /// (a knob that is silently ignored is how a measurement matrix once
+        /// ran a thread count nobody requested).
+        #[test]
+        fn parse_worker_threads_nails() {
+            assert_eq!(
+                parse_worker_threads(None),
+                (1, false),
+                "absent env = the pre-change single-worker behaviour"
+            );
+            assert_eq!(parse_worker_threads(Some("8")), (8, false));
+            assert_eq!(parse_worker_threads(Some(" 3 ")), (3, false), "trimmed");
+            for bad in ["", "0", "garbage", "-1", "1.5"] {
+                assert_eq!(
+                    parse_worker_threads(Some(bad)),
+                    (1, true),
+                    "{bad:?} must fall back to the default and say so"
+                );
+            }
         }
     }
 }
