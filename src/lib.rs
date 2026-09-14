@@ -1310,7 +1310,13 @@ pub mod gateway_app {
     /// Start the gateway on `listen`, forwarding to `upstream`. Blocks.
     /// `upstream` accepts "host:port", "http://host:port" or "https://host:port".
     pub fn run(listen: &str, upstream: &str) {
-        const WORKER_THREADS: usize = 8;
+        // Q1 (v0.3.11 perf): worker-thread count. Configurable for the
+        // multi-proxy-stack A/B (v0.3.12 investigation); default 8.
+        let worker_threads: usize = std::env::var("ATG_WORKER_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(8);
         // ATG_TRACE_TAG (v0.3.10): the line:<source> trace tag. An empty
         // value falls back to the default — warn so a misconfiguration is
         // never silent (the resolution itself lives in atg-model, read
@@ -1386,11 +1392,18 @@ pub mod gateway_app {
         // stretching SSE chunk pacing under concurrency (prod hop-ladder:
         // W p50 x1.8). Eight workers spread the pumps; verify with top -H.
         match Arc::get_mut(&mut server.configuration) {
-            Some(conf) => conf.threads = WORKER_THREADS,
+            Some(conf) => conf.threads = worker_threads,
             None => eprintln!(
                 "ATG: could not override worker threads — configuration shared; running single-threaded"
             ),
         }
+        // Deployment self-check (v0.3.12 matrix): the effective knobs are
+        // logged once at startup so a container's config is provable from
+        // its logs alone.
+        eprintln!(
+            "ATG: worker_threads={worker_threads} trace_mode={} drain_on_cancel={drain_on_cancel}",
+            if trace_off { "off" } else { "full" }
+        );
         server.bootstrap();
         let gateway = Gateway {
             upstream: upstream.to_string(),
