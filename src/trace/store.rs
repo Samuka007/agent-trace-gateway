@@ -71,10 +71,9 @@ impl TraceStore {
     pub fn push(&self, record: TurnRecord) {
         let wait_start = std::time::Instant::now();
         let mut inner = self.records.lock();
-        inner.lock_wait_ns.fetch_add(
-            wait_start.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        inner
+            .lock_wait_ns
+            .fetch_add(wait_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let hold_start = std::time::Instant::now();
         let size = estimate(&record);
         // Enforce both budgets: drop the OLDEST until the new record fits.
@@ -91,10 +90,9 @@ impl TraceStore {
         }
         inner.estimated_bytes = inner.estimated_bytes.saturating_add(size);
         inner.deque.push_back(record);
-        inner.lock_hold_ns.fetch_add(
-            hold_start.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        inner
+            .lock_hold_ns
+            .fetch_add(hold_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     /// Bounded snapshot: at most `limit` newest records, skipping `offset`
