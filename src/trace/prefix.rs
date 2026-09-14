@@ -127,17 +127,13 @@ impl PrefixStitcher {
         let now = Instant::now();
         let wait_start = Instant::now();
         let mut states = self.states.lock();
-        self.lock_wait_ns.fetch_add(
-            wait_start.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        self.lock_wait_ns
+            .fetch_add(wait_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let hold_start = Instant::now();
         let out = self.assign_locked(scope, head, &mut states, fps, now);
         drop(states);
-        self.lock_hold_ns.fetch_add(
-            hold_start.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        self.lock_hold_ns
+            .fetch_add(hold_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         out
     }
 
