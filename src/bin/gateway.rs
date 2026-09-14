@@ -5,6 +5,10 @@
 //! "atg-apikey-fp-salt-v1"), ATG_SNI, ATG_DRAIN_ON_CANCEL (v0.3.6: keep
 //! consuming the upstream stream after the client disconnects — for
 //! upstreams that bill the completion regardless; default off = abort),
+//! ATG_WORKER_THREADS (pingora worker threads; default 1 = pingora's own
+//! default and the pre-v0.3.12 behaviour. Raising it is a measured opt-in,
+//! not a free win: ATG#1 records an 8-worker build regressing multi-hop
+//! client TTFB p50 by ~10x while being faster at the ATG hop alone).
 //! ATG_DRAIN_TIMEOUT_SECS (drain window; default 60).
 //!
 //! ATG_TRACE_MODE (capture-off passthrough) is NOT a runtime configuration:

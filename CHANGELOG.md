@@ -7,6 +7,21 @@
 
 ## [Unreleased]
 
+### 变更：`ATG_WORKER_THREADS` 成为正式配置项，默认回到单 worker（ATG#1）
+
+- v0.3.11 的热修把 `conf.threads` 硬编码为 8。现改为**环境变量**
+  `ATG_WORKER_THREADS`，并**默认 1**——即 pingora 自身默认、也是 v0.3.10 及
+  更早的行为（升级不应是静默的行为变更）。
+- 设 `n > 1` 即启用多 worker（跳级口径实测 t1→t8 吞吐 6.3×）；非正整数或不可
+  解析的值回落默认并打**一次启动警告**（静默忽略的旋钮正是"整轮矩阵跑错线程数
+  却仍打印完整结果"的成因）。
+- 生效值自证：启动行 `ATG: … worker_threads=N …` 与
+  `/__atg/health.worker_threads` / `atg_worker_threads` 均报**实际生效**值。
+- 新增 `tests/worker_threads_env.rs`：不仅断言自证值等于请求值，还用
+  `/proc/self/task` 数出**真实的 pingora worker 线程数**并断言相等——自证值若
+  与被改坏的读取同源则无法自证，线程计数可以。该测试在"env 被静默忽略"
+  的实现上失败（这正是要防的失效模式）。
+
 ### 性能：前缀串联的 TTL 清扫摊还（ATG#5）
 
 - `PrefixStitcher::assign` 原先**每请求**在进程级锁内做一次 `retain` 全表 TTL

@@ -87,7 +87,10 @@ async fn health_attests_build_and_releases_gauges() {
     // gauges. The health request counts itself (it is inside the gateway
     // while it renders), so a drained gateway reports at most 1; the turn
     // must not still be counted (2+ would mean the bracket leaked).
-    assert_eq!(h["worker_threads"], 8, "{h}");
+    // No ATG_WORKER_THREADS in this stack's environment => the default, which
+    // is the pre-ATG#1 single-worker behaviour (the 8-worker shape is the
+    // explicit opt-in; ATG#1 Specification 5).
+    assert_eq!(h["worker_threads"], 1, "{h}");
     let inflight = h["inflight"].as_u64().expect("inflight is a number");
     assert!(inflight <= 1, "inflight must release with the request: {h}");
     assert!(
