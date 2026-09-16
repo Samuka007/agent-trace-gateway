@@ -156,7 +156,10 @@ pub mod gateway_app {
     impl Gateway {
         fn push_record(&self, record: atg_model::TurnRecord) {
             self.store.push(record.clone());
-            self.exporter.submit(&record);
+            // ATG #13 S2: the export queue takes the record by `Arc` — the
+            // exchange used to deep-copy the whole turn (raw_request /
+            // raw_response can reach 839 KB / 333 KB) on the request path.
+            self.exporter.submit(Arc::new(record));
         }
 
         /// Request entry (pingora `new_ctx`, exactly once per request):
@@ -244,7 +247,7 @@ pub mod gateway_app {
                 atg_model::langfuse_trace_tag(),
             ));
             out.push_str("\"} 1\n");
-            let gauges: [(&str, &str, u64); 8] = [
+            let gauges: [(&str, &str, u64); 11] = [
                 (
                     "atg_requests_inflight",
                     "Requests currently inside the gateway (accepted, not yet logged).",
@@ -274,6 +277,21 @@ pub mod gateway_app {
                     "atg_export_queue_capacity",
                     "OTLP export queue capacity (0 = export disabled).",
                     self.exporter.queue_capacity() as u64,
+                ),
+                (
+                    "atg_export_inflight",
+                    "OTLP export batches currently in the flush pool (gauge; bounded by ATG_EXPORT_MAX_INFLIGHT).",
+                    self.exporter.health.inflight(),
+                ),
+                (
+                    "atg_export_max_inflight",
+                    "Effective flush-pool width (ATG_EXPORT_MAX_INFLIGHT; 0 = export disabled).",
+                    self.exporter.max_inflight() as u64,
+                ),
+                (
+                    "atg_export_workers",
+                    "Effective export-runtime worker threads (ATG_EXPORT_WORKERS; 0 = export disabled).",
+                    self.exporter.workers() as u64,
                 ),
                 (
                     "atg_stitch_entries",
@@ -1146,6 +1164,15 @@ pub mod gateway_app {
                     "panicked": panicked,
                     "store_dropped": self.store.dropped(),
                     "export_queue_depth": self.exporter.queue_depth(),
+                    // Export flush pool (ATG #13): the gauge the drop
+                    // accounting is read against (a batch in flight is
+                    // neither exported nor dropped yet), plus the two knob
+                    // values this instance actually ran with — a throughput
+                    // number is only attributable to a setting if the
+                    // instance self-attests it.
+                    "export_inflight": self.exporter.health.inflight(),
+                    "export_max_inflight": self.exporter.max_inflight(),
+                    "export_workers": self.exporter.workers(),
                     // Prefix-stitch state (ATG#5 entry ticket): the table size
                     // is what scales the stitcher's O(table) sweep cost, so a
                     // deployment must be able to read it without a debugger —
