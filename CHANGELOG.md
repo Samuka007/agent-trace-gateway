@@ -7,6 +7,44 @@
 
 ## [Unreleased]
 
+### 性能：导出改为有界并发冲刷池 + 直写序列化（ATG#13）
+
+**待 bench 验证**：本节的收益口径（229 → ≥820 turns/s）尚未在 bench 主机复测，
+A1 红环与 A3 并发度扇扫归 PM 协调；本节只记录已落地的架构与仓内已验证的判据。
+
+- 症状（#12 已定量）：导出上限 229 turns/s = 请求路径上限（841 turns/s）的
+  27%；bench fake 384/s 下丢 1855/9600 = 19.3%。主瓶颈是单线程
+  「攒批 → 序列化（37.6 ms/批）→ POST」链路。
+- 架构：攒批仍单点（µs/条），昂贵的一半（序列化 + POST）搬进导出子系统自有的
+  多线程 runtime 的**有界冲刷池**（`JoinSet` + `Semaphore`）。permits 满时攒批器
+  停在 `acquire` → 回压回落到 1024 队列：**丢件点与 fail-open 语义不变**，
+  内存上界 = 在途批数 × 批载荷。
+- 序列化直写（S1）：不再构造约 1200 个 `serde_json::Value` 节点再整树序列化
+  丢弃，改为 `serde_json::to_writer` 直写缓冲。**输出字节逐位不变**，由新的
+  `writer_matches_pinned_value_tree_byte_for_byte` 守：同批输入、同 id 流，与
+  v0.3.12 钉定实现逐字节比对，覆盖壳 span（四个内容字段全空）、转义（引号/
+  反斜杠/LF/CR/TAB/C0/DEL）、多字节 UTF-8（CJK/emoji/组合符）、usage 四态、
+  tool_calls 空与非空、error、breakpoint、harness 元数据、完成时间戳、
+  32 条整批、200 KB 大载荷。
+- 无深拷贝（S2）：`submit()` 由 `&TurnRecord` 深拷贝改为取 `Arc<TurnRecord>`
+  （队列元素类型随之改变，调用点 `Gateway::push_record` 只多一次 `Arc::new`）。
+  `TurnRecord` 的 `raw_request` 实测可达 839 KB，且过去每次 submit 都在请求
+  路径上复制一份。`submit()` 仍是 O(1) 非阻塞；`TrySendError::{Full,Closed}`
+  均计 `dropped`（语义与旧 `Err(_)` 一致）。
+- 关停排干（S4）：channel 关闭后排干缓冲、经同一有界路径发尾批，再 join 全部
+  在途批（旧实现的「尾批同步 flush」会丢掉当时在途的整批）。
+- panic 隔离（保留 v0.3.8 不变量）：每批是独立 `JoinSet` 任务；批内 panic 由
+  `FlushBooking` 的 `Drop` 在栈展开时记账（`failed += 批大小`、`panicked += 1`）
+  并继续导出，单批 panic 不会停掉导出子系统。
+- 新旋钮：`ATG_EXPORT_MAX_INFLIGHT`（默认 8）、`ATG_EXPORT_WORKERS`（默认 4），
+  生效值自证于 `/__atg/health` 与 `/__atg/metrics`；新 gauge
+  `atg_export_inflight`（JSON 键 `export_inflight`，沿用既有命名映射）两格式可见。
+  批量 32 与 500 ms 不动（#12 已判死：sink 成本对字节线性，抬批量仅 +4.8%）。
+- 新增测试：`tests/export_pool.rs`（在途峰值 = permits 上界、批确实并行、
+  2000 条@~1000/s 零丢弃守恒、关停尾批不丢、gauge 归零）与
+  `tests/export_pool_surface.rs`（两格式的 gauge/旋钮可见性 + 五个既有计数器
+  不回归）。
+
 ## [0.3.12] - 2026-09-14
 
 ### 变更：`ATG_WORKER_THREADS` 成为正式配置项，默认回到单 worker（ATG#1）

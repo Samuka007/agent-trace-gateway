@@ -142,6 +142,8 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 | `ATG_LISTEN` | `127.0.0.1:6180` | 监听地址 |
 | `ATG_UPSTREAM` | （必填） | 上游 `host:port` / `http(s)://host:port` |
 | `ATG_OTLP_ENDPOINT` | 无（不导出） | OTLP/HTTP 导出端点；URL userinfo 自动转 Basic Auth |
+| `ATG_EXPORT_MAX_INFLIGHT` | `8` | 导出冲刷池的在途批数上限（Semaphore permits）。这是**内存上界**，不是队列大小旋钮：在途批数 × 批载荷（实测 15.7 MB/批 ⇒ 8 批 ≈ 126 MB 有界）；permits 满时攒批器停在 `acquire`、队列自然回压，**丢件点仍是 1024 队列**（`dropped`）。非正整数/不可解析回落默认 |
+| `ATG_EXPORT_WORKERS` | `4` | 导出子系统自有 tokio runtime 的 worker 线程数（序列化并行度，与 pingora `ATG_WORKER_THREADS` 无关）。生效值由 `/__atg/health.export_workers` 与 `atg_export_workers` 自证 |
 | `ATG_SNI` | 上游 host | HTTP/HTTPS 上游 SNI / Host 头覆盖 |
 | `ATG_CAPTURE_MAX_BYTES` | 16 MiB | 单条轨迹内容捕获上限 |
 | `ATG_STITCH_CAPACITY` | 100_000 | 前缀拼接 LRU 容量 |
