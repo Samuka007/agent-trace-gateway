@@ -143,6 +143,29 @@ compose 以 `gateway --config /etc/atg/atg.toml` 启动，`./atg/` 目录以只�
 - **复算**：`gateway key-fp --config /etc/atg/atg.toml <api-key>`（与运行时同一代码路径、同一 salt 来源，输出即 trace 里的 client_key_fp）
 - 无凭据请求（内部探针）→ 字段缺省，不报错
 
+### Header 证据面（hdr.*）
+
+每条 trace 携带**除黑名单外的全部请求 header** 原值证据（issue #32）——归因争议时可直接回答"客户端到底带了哪些 header、值是什么、session id 由谁供的"。
+
+- **黑名单（安全边界，命中即丢弃）**：
+  - 凭据载体：`authorization`、`proxy-authorization`、`x-api-key`、`api-key`、`x-goog-api-key`；
+  - cookie：`cookie`、`set-cookie`；
+  - 逐跳传输头（README 约定剥离的传输噪声）：`connection`、`keep-alive`、
+    `proxy-connection`、`te`、`trailer`、`transfer-encoding`、`upgrade`；
+  - 名字含 `authorization` / `cookie` / `secret` / `password` / `credential` /
+    `signature` / `token` / `bearer` / `api-key` / `apikey` / `access-key` /
+    `private-key` 的 header（防客户端自造凭据头；代价是名字含 token 的限流头被误伤）。
+- **属性**：`langfuse.trace.metadata.hdr.<header-name>`，仅在 header 存在且未被丢弃时写入。
+- **截断**：值按**字符**截前 256（与 `client_ua` 同一函数，按 codepoint 边界，不切坏 UTF-8）。
+- **边界**：单 turn 最多 32 条、名字+值总字节 ≤ 4096、名字长度 ≤ 64；超出的条目丢弃并计入
+  `/__atg/health` 的 `hdr_evidence_dropped` 与 `atg_hdr_evidence_dropped_total`
+  （**黑名单命中不算丢弃**，那是策略而非溢出）。
+- **永不收录**：见黑名单——凭据只有 `client_key_fp` 一个 trace 侧代表。
+  `/__atg/records` 与 OTLP payload 的 wire 测试以哨兵值断言明文不出现。
+- **会话来源**：`langfuse.trace.metadata.session_source` =
+  `body:<path>`（协议 body 源）/ `body:harness`（harness 形状规则）/
+  `header:<name>` / `harness-header:<name>` / `stitcher`；无 session 时不写。
+
 ## 配置
 
 v0.4.0 起，**TOML 配置文件是唯一的配置面**：`gateway --config <path>`。所有

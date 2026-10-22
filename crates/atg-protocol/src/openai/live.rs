@@ -276,6 +276,33 @@ mod tests {
             "the parser restarts on a clean slate after a refusal"
         );
     }
+
+    /// WS session provenance (issue #32): the live accumulator only mounts
+    /// the session under client_metadata.session_id, and the record must name
+    /// that source; no session ⇒ no provenance (never invented).
+    #[test]
+    fn ws_turn_reports_session_source() {
+        let start = DESCRIPTOR
+            .turn_markers
+            .as_ref()
+            .map(|m| m.start)
+            .unwrap_or_default();
+        let mut turn = WsTurnState::default();
+        turn.apply_client_frame(
+            format!(r#"{{"type":"{start}","client_metadata":{{"session_id":"ws-sess-1"}}}}"#)
+                .as_bytes(),
+        );
+        let record = turn.take_record();
+        assert_eq!(record.session_id, "ws-sess-1");
+        assert_eq!(record.session_source, "body:client_metadata.session_id");
+        assert!(
+            WsTurnState::default()
+                .take_record()
+                .session_source
+                .is_empty(),
+            "no session id ⇒ no provenance marker"
+        );
+    }
 }
 
 /// One in-progress WS turn.
@@ -360,9 +387,18 @@ impl WsTurnState {
     }
 
     pub fn take_record(&mut self) -> TurnRecord {
+        let session_id = std::mem::take(&mut self.session_id);
+        // The live accumulator mounts the WS session only under
+        // client_metadata.session_id (sub2api injection convention) — say so
+        // on the trace instead of leaving provenance blank.
+        let session_source = if session_id.is_empty() {
+            String::new()
+        } else {
+            "body:client_metadata.session_id".to_string()
+        };
         TurnRecord {
             protocol: DESCRIPTOR.name.to_string(),
-            session_id: std::mem::take(&mut self.session_id),
+            session_id,
             user_input: self.input.take().unwrap_or_default(),
             final_output: std::mem::take(&mut self.output),
             raw_request: std::mem::take(&mut self.raw_request),
@@ -380,6 +416,10 @@ impl WsTurnState {
             harness: String::new(),
             dialect: String::new(),
             client_ua: String::new(),
+            // The gateway's WS arm fills the evidence after take_record (the
+            // upgrade request's headers live on the session, not here).
+            hdr_evidence: Vec::new(),
+            session_source,
             api_key_fp: String::new(),
             cancelled: false,
             drain_timed_out: false,

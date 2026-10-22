@@ -57,6 +57,9 @@ pub fn parse_body(request_body: &[u8]) -> Option<serde_json::Value> {
 /// the already-parsed body (the logging hook's single entry — C14).
 pub struct TurnFacts {
     pub session_id: Option<String>,
+    /// Where `session_id` came from (`body:<path>`, `header:<name>`,
+    /// `body:harness`, `harness-header:<name>`); empty without a session.
+    pub session_source: String,
     pub user_input: String,
     pub model_name: String,
     pub user_id: String,
@@ -77,13 +80,23 @@ pub fn turn_facts(
     facts: &atg_harness::HarnessFacts,
 ) -> Option<TurnFacts> {
     let d = atg_protocol::ProtocolDescriptor::detect_by_name(protocol)?;
-    let session_id = d
-        .session_from_body(req)
-        .or_else(|| atg_harness::session_from_body(facts, req))
-        .or_else(|| d.session_from_headers(header_get))
-        .or_else(|| atg_harness::session_from_headers(facts, header_get));
+    let (session_id, session_source) =
+        if let Some((sid, path)) = d.session_from_body_with_source(req) {
+            (Some(sid), format!("body:{}", path.join(".")))
+        } else if let Some(sid) = atg_harness::session_from_body(facts, req) {
+            (Some(sid), "body:harness".to_string())
+        } else if let Some((sid, name)) = d.session_from_headers_with_source(header_get) {
+            (Some(sid), format!("header:{name}"))
+        } else if let Some((sid, name)) =
+            atg_harness::session_from_headers_with_source(facts, header_get)
+        {
+            (Some(sid), format!("harness-header:{name}"))
+        } else {
+            (None, String::new())
+        };
     Some(TurnFacts {
         session_id,
+        session_source,
         user_input: d.user_input(req).unwrap_or_default(),
         model_name: req["model"].as_str().unwrap_or_default().to_string(),
         user_id: d.end_user(req).unwrap_or_default(),
