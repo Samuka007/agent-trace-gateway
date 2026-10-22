@@ -5,6 +5,50 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] (unreleased)
+
+### 破坏性变更
+
+- **`ATG_*` 环境变量全部退役**：TOML 配置文件（`atg.toml`）成为唯一配置面。
+  进程对 `ATG_*` 变量**静默忽略**（无告警、无失败）；旧部署的 env 残留不会改变
+  行为，但也不再生效。迁移：把 env 值换算成完整 `atg.toml`，启动命令改
+  `gateway --config <path>`（README「配置」章有完整 18 键示例与
+  `deploy/compose/atg.toml` 模板）。
+- **`gateway key-fp` 需要 `--config`**：`gateway key-fp --config <path>
+  <api-key>`——与运行时同一代码路径、读同一配置文件的 `api_key.salt`。
+- **`stitch.capacity` / `stitch.ttl_ms` 不再接受 `0`**（原 env 旋钮放行 0）：
+  值域校验收紧为 ≥ 1，非法值启动即失败（exit 2）。
+- **`export.workers` 成为结构键**：与 `server.listen`、`server.worker_threads`、
+  `trace.mode` 一样只在启动时定型；reload 时文件值若变化，运行值保持并列
+  入 `restart_required`（见下），不会静默忽略。
+- **未知配置键拒绝**、`version = 1` 必填、完整文件契约（无隐式默认）：任何
+  配置错误统一一行 stderr
+  `agent-trace-gateway: config error: <detail> (file: <path>)` 并 exit 2。
+
+### 新增
+
+- **热重载**：`SIGHUP` 事务性重读配置文件——解析 + 全量校验通过才换
+  snapshot；失败时旧配置继续服务并计入 `reload_failures`。热键
+  （`server.upstream`、`server.sni`、`drain.*`、`capture.max_bytes`、
+  `store.*`、`stitch.*`、`api_key.salt`、`export.otlp_endpoint`、
+  `export.max_inflight`、`trace.tag`、`server.max_ws_frame_payload`）
+  即时生效，流式请求零中断；结构键列入 `restart_required`。
+- **`GET /__atg/config`**：只读配置视图——`config`（path/sha256/generation/
+  loaded_at_ms/restart_required/reload_failures）+ `effective`（18 键生效值，
+  `api_key.salt` 恒为 `"***"`）+ `structural`（结构键的运行中值）。salt 的
+  Debug/Serialize 视图全局脱敏，日志与导出面同样不泄漏。
+- **`gateway config check <path>`**：离线预检——解析 + 全量校验，打印文件
+  指纹与生效值（salt 脱敏）后以 0 退出；任何配置错误走统一的一行 stderr
+  形式并以 2 退出。部署流水线可在重启前用它证明"这份文件启动得起来"。
+- **`/__atg/health` 配置自证字段**：`config_path` / `config_sha256` /
+  `config_generation` / `config_loaded_at_ms` / `config_restart_required` /
+  `config_reload_failures`；启动自证行追加文件路径与 digest。
+- **测试与验收**：全套集成测试迁移到完整文件配置 fixture（无 env 注入）；
+  新增 `config_reload.rs`（流式零中断 / 上游热换 / 非法保旧 / 结构键 / 脱敏 /
+  max_inflight 热调）、`config_sighup.rs`（真二进制 SIGHUP 链路）、
+  `legacy_env_ignored.rs`（env 静默忽略不变量）、`readme_config_example.rs`
+  （README 示例可被 `config::load` 解析的守护）。
+
 ## [0.3.13] - 2026-09-17
 
 ### 性能：导出改为有界并发冲刷池 + 直写序列化（ATG#13）

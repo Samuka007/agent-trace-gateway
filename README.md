@@ -27,21 +27,21 @@
                                          OTel Collector ─▶ Langfuse
 ```
 
-- **数据面**：Pingora 反向代理。透明转发 HTTP/1.1、HTTP/2（h2c）、WebSocket 升级。只重写 Host 头（支持 `ATG_SNI` 覆盖），不改报文语义，不脱敏。
+- **数据面**：Pingora 反向代理。透明转发 HTTP/1.1、HTTP/2（h2c）、WebSocket 升级。只重写 Host 头（支持 `server.sni` 覆盖），不改报文语义，不脱敏。
 - **控制面**：旁路解包。按协议解包请求/响应，重组 SSE 流与 WS 帧，做会话串联，导出 OTLP。导出失败只计数、不重试、fail-open——业务流量永不因导出失败被阻断（AGENTS.md 硬约束）。
 
 ### 模块结构（`src/`）
 
 | 模块 | 职责 |
 |---|---|
-| `bin/gateway.rs` | 入口。环境变量配置（见下） |
+| `bin/gateway.rs` | 入口。`--config <path>` 装载完整 TOML 配置文件（见「配置」章）；`key-fp --config` 复算 API key 指纹 |
 | `lib.rs` | Pingora `ProxyHttp` 薄 filter：转发钩子 + `/__atg/*` 控制端点 + `logging` 阶段做解包收尾 |
 | `metrics.rs` | 零依赖定桶直方图 + Prometheus 文本渲染（`/__atg/metrics`，v0.3.12） |
 | `trace/unpack.rs` | 协议识别（Anthropic Messages / OpenAI Responses / OpenAI chat completions）、非流式解包、SSE 重组、tool call 提取 |
 | `trace/session.rs` | 显式会话 ID 提取：body 优先于 header，按协议走不同字段路径（移植自 sub2api session.go 的 9 来源优先级） |
 | `trace/prefix.rs` | 前缀指纹拼接：只存滚动 SHA256 指纹链（每轮 32 字节），不存历史原文；LRU 上限 10 万会话 / TTL 24h |
 | `trace/ws.rs` | WebSocket 帧解析（升级后字节是裸流，需自行按 RFC6455 解码去掩码） |
-| `trace/capture.rs` | 内容大小上限（默认 16 MiB，`ATG_CAPTURE_MAX_BYTES`）+ 确定性截断标记 |
+| `trace/capture.rs` | 内容大小上限（默认 16 MiB，`capture.max_bytes`）+ 确定性截断标记 |
 | `trace/store.rs` | 进程内 turn 记录存储，`/__atg/records` 快照 |
 | `trace/export.rs` | 专用 tokio runtime + 有界队列（1024）+ 500ms 批量 OTLP/HTTP 导出；endpoint URL userinfo 支持 Basic Auth |
 
@@ -60,7 +60,7 @@ Caddy（TLS 边缘）→ agent-trace-gateway 容器 → sub2api 容器 → 模�
                           └─ OTLP → OTel Collector → Langfuse
 ```
 
-- Caddy 终结客户端 TLS，模型路由指向网关容器；网关 `ATG_UPSTREAM` 填 sub2api 容器名:端口（compose 内网 DNS）；
+- Caddy 终结客户端 TLS，模型路由指向网关容器；网关配置 `server.upstream` 填 sub2api 容器名:端口（compose 内网 DNS）；
 - 容器 `restart: unless-stopped` 自动拉起；持续不健康时人工切 Caddy 路由回直指 sub2api 即回滚；
 - **单实例部署**：前缀拼接器是进程内有状态设计，多实例会分裂拼接状态；多实例演进的前置条件是 sticky routing 或共享状态（当前列为非目标）；
 - 网关只持有转发所需最小信息：不读 sub2api 数据库、不调其内部 API，鉴权仍由 sub2api 执行。
@@ -73,17 +73,15 @@ Caddy（TLS 边缘）→ agent-trace-gateway 容器 → sub2api 容器 → 模�
 # 构建（release，含容器内所需的全部测试）
 cargo build --release --bin gateway
 
-# 运行：监听 6180，转发到 sub2api
-ATG_UPSTREAM=127.0.0.1:8080 ./target/release/gateway
-
-# 可选：OTLP 导出到本地 Langfuse（URL userinfo 自动转为 Basic Auth）
-ATG_OTLP_ENDPOINT='http://pk:sk@127.0.0.1:13000/api/public/otel/v1/traces' \
-./target/release/gateway
+# 运行：--config 提供完整配置文件（模板见下「配置」章）
+./target/release/gateway --config /etc/atg/atg.toml
 
 # bench 变体（仅功能 debug 隔离用；其数字不得进入任何性能结论）：
-# 只有该编译特性下才存在 ATG_TRACE_MODE 直通档
+# 只有该编译特性下才接受 trace.mode = "off" 直通档
 cargo build --release --bin gateway --features bench-trace-mode
 ```
+
+接入客户端：把任意 OpenAI-compatible / Anthropic 客户端的 baseURL 指到 `http://127.0.0.1:6180` 即可，客户端零改动。
 
 接入客户端：把任意 OpenAI-compatible / Anthropic 客户端的 baseURL 指到 `http://127.0.0.1:6180` 即可，客户端零改动。
 
@@ -104,15 +102,19 @@ providers:
 
 ```bash
 cd deploy/compose
-ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/public/otel/v1/traces' \
-  docker compose up -d agent-trace-gateway
+# 先编辑 ./atg/atg.toml：upstream 指向 sub2api 容器、salt 填真实密钥、
+# otlp_endpoint 按需填 Langfuse 采集端（userinfo 自动转 Basic Auth）
+docker compose up -d agent-trace-gateway
 ```
+
+compose 以 `gateway --config /etc/atg/atg.toml` 启动，`./atg/` 目录以只读卷挂载到 `/etc/atg/`（目录挂载：单文件 bind mount 下用 `mv` 换文件会换 inode，容器内看不到新内容）。改配置后 `docker kill -s HUP <container>` 即热重载。
 
 ### 控制端点
 
 | 端点 | 内容 |
 |---|---|
-| `GET /__atg/health` | 自证 + 健康计数（JSON）：`version` / `variant`(`prod`\|`bench`) / `trace_mode`(`full`\|`off`)、导出计数与队列深度、排队面（`inflight` / `inflight_high_water` / `awaiting_upstream` / `worker_threads`）、串联表状态（`stitch_entries` / `stitch_capacity` / `stitch_expired_total` / `stitch_evicted_total`）、锁归因（`stitch_wait_ns_total` / `stitch_hold_ns_total` / `store_wait_ns_total` / `store_hold_ns_total`）、turns 计数 |
+| `GET /__atg/health` | 自证 + 健康计数（JSON）：`version` / `variant`(`prod`\|`bench`) / `trace_mode`(`full`\|`off`)、导出计数与队列深度、排队面（`inflight` / `inflight_high_water` / `awaiting_upstream` / `worker_threads`）、串联表状态（`stitch_entries` / `stitch_capacity` / `stitch_expired_total` / `stitch_evicted_total`）、锁归因（`stitch_wait_ns_total` / `stitch_hold_ns_total` / `store_wait_ns_total` / `store_hold_ns_total`）、turns 计数、配置自证（`config_path` / `config_sha256` / `config_generation` / `config_loaded_at_ms` / `config_restart_required` / `config_reload_failures`） |
+| `GET /__atg/config` | 只读配置视图（v0.4.0）：`config`（文件路径、sha256、generation、restart_required、reload_failures）+ `effective`（18 键生效值，`api_key.salt` 恒为 `"***"`）+ `structural`（四个结构键的**运行中**值 vs 文件值） |
 | `GET /__atg/metrics` | Prometheus 文本（v0.3.12）：`atg_info` 自证标签（version/variant/trace_mode/trace_tag）、排队/背压 gauge、OTLP 导出计数与队列、四段耗时直方图 |
 | `GET /__atg/records` | 进程内已收集 turn 记录 JSON 快照（调试用，内存有界） |
 
@@ -126,36 +128,134 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 `atg_stitch_wait_ns_total` / `atg_store_wait_ns_total`（及对应 `_hold_`）为**累计纳秒**：
 除以 `turns_total` 即得每请求的锁等待/持有时长，跨线程数对比可量化"多线程代价被锁吃掉多少"。
 
+**排障入口（v0.4.0 增补）**：配置面自证直接读 `/__atg/config`——`config_sha256`
+核对"进程跑的是哪份文件"（比对 `sha256sum atg.toml`）、`config_generation` 核对
+"经历了几次成功重载"、`config_reload_failures > 0` 说明有过热重载失败（旧配置
+仍在服务）、`restart_required` 非空说明文件里有结构键改动在等重启；
+`/__atg/health` 的 `config_*` 同名字段供告警直接消费。
+
 ### API Key 指纹（client_key_fp）
 
 请求的 API 凭据以盐化指纹落 trace metadata（`langfuse.trace.metadata.client_key_fp`）——同 key 同指纹（跨协议），明文永不离开网关。
 
 - **公式（可复算）**：`sha256(salt || key)` 的 UTF-8 字节流，取结果前 16 个 hex 字符
-- **salt**：环境变量 `ATG_APIKEY_SALT`（compose 可见）；未设置时默认 `atg-apikey-fp-salt-v1`
-- **复算**：`gateway key-fp <api-key>`（与运行时同一代码路径，输出即 trace 里的 client_key_fp）
+- **salt**：配置文件键 `api_key.salt`（密钥；在 `/__atg/config`、日志、记录中恒显示为 `"***"`）
+- **复算**：`gateway key-fp --config /etc/atg/atg.toml <api-key>`（与运行时同一代码路径、同一 salt 来源，输出即 trace 里的 client_key_fp）
 - 无凭据请求（内部探针）→ 字段缺省，不报错
 
-## 配置项
+## 配置
 
-| 环境变量 | 默认 | 说明 |
-|---|---|---|
-| `ATG_LISTEN` | `127.0.0.1:6180` | 监听地址 |
-| `ATG_UPSTREAM` | （必填） | 上游 `host:port` / `http(s)://host:port` |
-| `ATG_OTLP_ENDPOINT` | 无（不导出） | OTLP/HTTP 导出端点；URL userinfo 自动转 Basic Auth |
-| `ATG_EXPORT_MAX_INFLIGHT` | `8` | 导出冲刷池的在途批数上限（Semaphore permits）。这是**内存上界**，不是队列大小旋钮：在途批数 × 批载荷（实测 15.7 MB/批 ⇒ 8 批 ≈ 126 MB 有界）；permits 满时攒批器停在 `acquire`、队列自然回压，**丢件点仍是 1024 队列**（`dropped`）。非正整数/不可解析回落默认 |
-| `ATG_EXPORT_WORKERS` | `4` | 导出子系统自有 tokio runtime 的 worker 线程数（序列化并行度，与 pingora `ATG_WORKER_THREADS` 无关）。生效值由 `/__atg/health.export_workers` 与 `atg_export_workers` 自证 |
-| `ATG_SNI` | 上游 host | HTTP/HTTPS 上游 SNI / Host 头覆盖 |
-| `ATG_CAPTURE_MAX_BYTES` | 16 MiB | 单条轨迹内容捕获上限 |
-| `ATG_STITCH_CAPACITY` | 100_000 | 前缀拼接 LRU 容量 |
-| `ATG_WORKER_THREADS` | `1` | pingora worker 线程数。**默认 1 = pingora 自身默认**（v0.3.10 及更早的行为）：accept 循环与全部流的双向泵都在单核上跑。设 >1 可把泵摊到多核（`threads=8` 时跳级吞吐实测 t1→t8 6.3×），但**不是免费**：ATG#1 记录到 8 worker 构建在**多跳部署**下客户端 TTFB p50 退化近一个数量级（而单跳口径反而更快），因此多线程是**显式 opt-in**、不是静默升级。生效值由启动自证行与 `/__atg/health.worker_threads` 报告；非正整数/不可解析回落默认并打一次启动警告 |
-| `ATG_STITCH_TTL_MS` | 24h | 前缀指纹 TTL |
-| `ATG_DRAIN_ON_CANCEL` | 关 | 客户端断开时继续消费上游流到自然结束（sub2api 类"断开也计费"的上游；trace 拿完整 final_output + usage）。默认关闭 = 断开即中止上游，不白烧 token。两种模式 turn 均记 `cancelled=true`（非 fail 口径） |
-| `ATG_DRAIN_TIMEOUT_SECS` | 60 | drain 窗口：上游流超时未结束则放弃（`drain_timed_out` 标记），按已捕获部分记录 |
+v0.4.0 起，**TOML 配置文件是唯一的配置面**：`gateway --config <path>`。所有
+`ATG_*` 环境变量退役——进程对它们**静默忽略**（不告警、不失败），迁移部署时旧
+env 残留不会改变任何行为，但也不会生效。
 
-`ATG_TRACE_MODE`（capture-off 直通档）**不是运行时配置**：它只存在于
-`bench-trace-mode` 编译特性下（默认构建完全不读取该变量，`variant=prod`）。
-理由：该档跳过的正是本仓库的用途，其数字描述的是一个永不部署的配置，
-只能用于功能 debug 隔离。
+### 文件契约
+
+- **完整文件**：18 键缺一不可（没有隐式默认值，不存在"只写想改的键"）；
+- **`version = 1` 必填**：未知版本是硬错误；
+- **未知键拒绝**（每一层 `deny_unknown_fields`）——拼写错误在启动时即暴露；
+- **值域校验**：`stitch.capacity` / `stitch.ttl_ms` 不再接受 `0`（v0.3.13 env
+  语义收紧），`server.worker_threads` / `drain.timeout_secs` / `capture.max_bytes`
+  / `store.*` / `export.max_inflight` / `export.workers` 均 ≥ 1；
+- 启动时任何配置错误都是致命的，统一一行 stderr 并 exit 2：
+  `agent-trace-gateway: config error: <detail> (file: <path>)`。
+
+### 完整示例（生产 canary 18 键）
+
+```toml
+# agent-trace-gateway 配置文件（完整文件契约：18 键缺一不可，未知键拒绝）
+version = 1
+
+[server]
+listen = "0.0.0.0:6180"           # 结构键
+upstream = "http://sub2api:8080"  # 热键：reload 后新请求即切上游
+sni = ""                          # 热键；空 = 取上游 host
+worker_threads = 1                # 结构键；>1 是显式 opt-in（见 ATG#1）
+max_ws_frame_payload = 0          # 热键；0 = 不限
+
+[trace]
+tag = "line:atg"                  # 热键
+mode = "full"                     # 结构键；仅 bench 构建接受 "off"
+
+[drain]
+on_cancel = false                 # 热键
+timeout_secs = 60                 # 热键
+
+[capture]
+max_bytes = 16777216              # 热键（16 MiB）
+
+[store]
+max_records = 1000                # 热键
+max_bytes = 268435456             # 热键（256 MiB）
+
+[stitch]
+capacity = 100000                 # 热键
+ttl_ms = 86400000                 # 热键（24h）
+
+[api_key]
+salt = "<SALT>"                   # 热键；密钥，任何视图/日志中恒为 "***"
+
+[export]
+otlp_endpoint = ""                # 热键；空 = 导出关闭，运行时填入即热启用
+max_inflight = 8                  # 热键（内存上界 = 在途批数 × 批载荷）
+workers = 4                       # 结构键（导出子系统序列化并行度）
+```
+
+（同内容随仓库发布：`deploy/compose/atg/atg.toml`。）
+
+### 热键 vs 结构键
+
+`kill -HUP <pid>` 触发热重载：文件被事务性重读（解析 + 全量校验通过才换
+snapshot），失败则**旧配置继续服务**并计入 `reload_failures`。
+
+| 热键（reload 即时生效） | 结构键（需重启；reload 列入 `restart_required`，运行值不变） |
+|---|---|
+| `server.upstream` | `server.listen` |
+| `server.sni` | `server.worker_threads` |
+| `server.max_ws_frame_payload` | `trace.mode` |
+| `trace.tag` | `export.workers` |
+| `drain.on_cancel` / `drain.timeout_secs` | |
+| `capture.max_bytes` | |
+| `store.max_records` / `store.max_bytes` | |
+| `stitch.capacity` / `stitch.ttl_ms` | |
+| `api_key.salt` | |
+| `export.otlp_endpoint` / `export.max_inflight` | |
+
+`export.workers` 之所以是结构键：导出子系统自有 runtime 的线程数在 `start`
+时定型，运行中重建整个导出池意味着放弃在途批与队列状态——这笔风险不换，改完
+重启即可（`config_generation` 会告诉你进程当前跑的是文件的第几代）。
+
+`trace.mode = "off"`（capture-off 直通档）仍然是 **bench 编译特性**
+（`--features bench-trace-mode`）下的能力：生产构建在配置校验时直接拒绝
+`"off"`。理由不变：该档跳过的正是本仓库的用途，其数字描述的是一个永不部署的
+配置，只能用于功能 debug 隔离。
+
+### 重载操作面
+
+```bash
+# 部署前预检（不启动服务）：解析 + 全量校验，打印指纹与生效值（salt 脱敏）
+./gateway config check /etc/atg/atg.toml
+
+# 改完文件后热重载（热键即时生效；结构键列入 restart_required，不中断服务）
+kill -HUP $(pidof gateway)
+
+# 只读核对：文件指纹、generation、restart_required、生效值（salt 脱敏）
+curl -s http://127.0.0.1:6180/__atg/config | jq .
+```
+
+`GET /__atg/config` 返回三块：`config`（path / sha256 / generation /
+loaded_at_ms / restart_required / reload_failures）、`effective`（18 键生效
+值，`api_key.salt == "***"`）、`structural`（四个结构键的**运行中**值——与文
+件不一致即说明该键在等一次重启）。`/__atg/health` 同步携带
+`config_path` / `config_sha256` / `config_generation` /
+`config_restart_required` / `config_reload_failures`，供告警与巡检直接读。
+
+### 从 env 迁移
+
+v0.3.13 部署升级到 v0.4.0：把 compose/systemd 里的 `ATG_*` 环境变量按上表换算
+成一个完整 `atg.toml`（启动命令改 `--config`），删除全部 `ATG_*` env。旧 env
+即使残留也不会生效——升级的第一步永远是核对 `GET /__atg/config` 的
+`effective` 与文件一致。
 
 ## 设计边界（刻意不做）
 
@@ -175,7 +275,7 @@ ATG_UPSTREAM=sub2api:8080 ATG_OTLP_ENDPOINT='http://pk:sk@langfuse:13000/api/pub
 ## 测试与回归
 
 - `tests/`：行为测试（TDD 主战场）——协议解包、SSE/WS 重组、会话串联、内容保真、体积上限、fail-open、OTLP 导出；
-- bench 变体测试（`tests/trace_mode.rs`）只在 `cargo test --features bench-trace-mode` 下编译运行；默认档的"env 被忽略"不变量由 `tests/trace_mode_env_ignored.rs` 守；
+- bench 变体测试（`tests/trace_mode.rs`）只在 `cargo test --features bench-trace-mode` 下编译运行；默认档的"遗留 env 被忽略"不变量由 `tests/legacy_env_ignored.rs` 守（v0.4.0 起 env 是退役配置面，测试全量走完整配置文件 fixture）；
 - `xtask/harness/`：回归 harness（协议 fixture 上游 + 测试驱动客户端）；
 - `xtask/harness/fixtures/`：真实抓包样本（去凭据，版本库卫生要求）；运行时轨迹按 D4 原样记录，两者互不影响。
 

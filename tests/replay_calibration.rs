@@ -43,7 +43,9 @@ fn read_samples() -> Vec<(String, String, Vec<u8>)> {
 fn replay_calibration() {
     let samples = read_samples();
     assert!(samples.len() >= 8, "expected at least 8 real samples");
-    let stitcher = PrefixStitcher::new();
+    // Production-default stitch limits (the config file's stitch.capacity /
+    // stitch.ttl_ms v0.3.13 defaults).
+    let stitcher = PrefixStitcher::with_limits(100_000, 86_400_000);
     let scope = "calibration-scope";
     let mut explicit = 0usize;
     let mut prefix_assigned = 0usize;

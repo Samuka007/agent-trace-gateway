@@ -52,7 +52,9 @@ fn time_us(iters: u32, mut f: impl FnMut()) -> f64 {
 #[test]
 #[ignore = "cost model instrument: run with --ignored --nocapture"]
 fn per_request_cost_coefficients() {
-    let cap = CaptureCap::new();
+    // Production-default capture bound (16 MiB): the instrument measures
+    // the cost of the shipped configuration.
+    let cap = CaptureCap::new(16 << 20);
     let header_get = |_: &str| -> Option<String> { None };
 
     let iters = 20;

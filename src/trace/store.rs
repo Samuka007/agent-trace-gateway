@@ -12,9 +12,6 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-const DEFAULT_MAX_RECORDS: usize = 1000;
-const DEFAULT_MAX_BYTES: usize = 256 << 20;
-
 #[derive(Clone)]
 pub struct TraceStore {
     records: Arc<Mutex<StoreInner>>,
@@ -28,32 +25,20 @@ struct StoreInner {
     /// per-request cost this serial section adds under N workers).
     lock_wait_ns: AtomicU64,
     lock_hold_ns: AtomicU64,
-    max_records: usize,
-    max_bytes: usize,
+    /// Hot caps (config `store.max_records` / `store.max_bytes`): the
+    /// reload path re-seeds these; every `push` observes the current value,
+    /// and a shrunk cap evicts the oldest records until the budget fits.
+    max_records: AtomicU64,
+    max_bytes: AtomicU64,
 }
 
 impl Default for TraceStore {
     fn default() -> Self {
-        Self::with_caps(DEFAULT_MAX_RECORDS, DEFAULT_MAX_BYTES)
+        Self::with_caps(1000, 256 << 20)
     }
 }
 
 impl TraceStore {
-    /// Env-driven construction (follows the CaptureCap pattern).
-    pub fn new() -> Self {
-        let max_records = std::env::var("ATG_STORE_MAX_RECORDS")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX_RECORDS);
-        let max_bytes = std::env::var("ATG_STORE_MAX_BYTES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX_BYTES);
-        Self::with_caps(max_records, max_bytes)
-    }
-
     pub fn with_caps(max_records: usize, max_bytes: usize) -> Self {
         Self {
             records: Arc::new(Mutex::new(StoreInner {
@@ -62,10 +47,20 @@ impl TraceStore {
                 dropped: AtomicU64::new(0),
                 lock_wait_ns: AtomicU64::new(0),
                 lock_hold_ns: AtomicU64::new(0),
-                max_records: max_records.max(1),
-                max_bytes: max_bytes.max(1),
+                max_records: AtomicU64::new(max_records.max(1) as u64),
+                max_bytes: AtomicU64::new(max_bytes.max(1) as u64),
             })),
         }
+    }
+
+    /// Re-seed both caps (reload path). Values below 1 clamp to 1 — the
+    /// config validation already guarantees >= 1, this is the belt.
+    pub fn set_caps(&self, max_records: u64, max_bytes: u64) {
+        let inner = self.records.lock();
+        inner
+            .max_records
+            .store(max_records.max(1), Ordering::Relaxed);
+        inner.max_bytes.store(max_bytes.max(1), Ordering::Relaxed);
     }
 
     pub fn push(&self, record: TurnRecord) {
@@ -76,9 +71,14 @@ impl TraceStore {
             .fetch_add(wait_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let hold_start = std::time::Instant::now();
         let size = estimate(&record);
+        let max_records = inner.max_records.load(Ordering::Relaxed) as usize;
+        let max_bytes = inner
+            .max_bytes
+            .load(Ordering::Relaxed)
+            .min(usize::MAX as u64) as usize;
         // Enforce both budgets: drop the OLDEST until the new record fits.
-        while inner.deque.len() >= inner.max_records
-            || inner.estimated_bytes.saturating_add(size) > inner.max_bytes
+        while inner.deque.len() >= max_records
+            || inner.estimated_bytes.saturating_add(size) > max_bytes
         {
             match inner.deque.pop_front() {
                 Some(old) => {

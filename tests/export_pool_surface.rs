@@ -37,11 +37,11 @@ async fn export_pool_gauge_and_knobs_are_on_both_health_surfaces() {
 
     start_stack(&[
         (
-            "ATG_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{port}/api/public/otel"),
+            "export.otlp_endpoint",
+            common::cfg::q(&format!("http://127.0.0.1:{port}/api/public/otel")),
         ),
-        ("ATG_EXPORT_MAX_INFLIGHT", "3".to_string()),
-        ("ATG_EXPORT_WORKERS", "2".to_string()),
+        ("export.max_inflight", "3".to_string()),
+        ("export.workers", "2".to_string()),
     ])
     .await;
 
@@ -50,11 +50,11 @@ async fn export_pool_gauge_and_knobs_are_on_both_health_surfaces() {
         serde_json::from_str(&get_text("/__atg/health").await).expect("health JSON");
     assert_eq!(
         health["export_max_inflight"], 3,
-        "ATG_EXPORT_MAX_INFLIGHT must reach the health surface: {health}"
+        "export.max_inflight must reach the health surface: {health}"
     );
     assert_eq!(
         health["export_workers"], 2,
-        "ATG_EXPORT_WORKERS must reach the health surface: {health}"
+        "export.workers must reach the health surface: {health}"
     );
     assert_eq!(
         health["export_inflight"], 0,

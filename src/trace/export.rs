@@ -6,7 +6,7 @@
 //! record) while the expensive half — serializing a ≥0.5 MB batch and POSTing
 //! it (37.6 ms per batch of 32, measured) — runs in a bounded pool of flush
 //! tasks on an export-owned multi-thread runtime. The pool is bounded by a
-//! semaphore (`ATG_EXPORT_MAX_INFLIGHT`), so the loss point stays the
+//! semaphore (config `export.max_inflight`), so the loss point stays the
 //! 1024-slot channel (`dropped`) and memory stays flat: the batcher parks on
 //! a permit instead of spawning without bound.
 // PANIC-AUDIT v0.3.13: audited file — serde_json writing into a locally-owned
@@ -20,10 +20,11 @@
 #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 use atg_model::TurnRecord;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::io::Write;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
@@ -34,18 +35,6 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(500);
 /// Records per flush. Unchanged by ATG #13: the sink's cost is linear in the
 /// batch's bytes, so a larger batch buys +4.8% and nothing else (#12 ruling 2).
 const BATCH_MAX: usize = 32;
-/// `ATG_EXPORT_MAX_INFLIGHT` (default 8): flush tasks in flight, i.e. the
-/// memory bound (`MAX_INFLIGHT × batch payload` ≈ 126 MB at the measured
-/// 15.7 MB/batch). This is a concurrency bound, NOT a queue-size knob: the
-/// queue stays 1024 and remains the drop point.
-const DEFAULT_MAX_INFLIGHT: usize = 8;
-/// `ATG_EXPORT_WORKERS` (default 4): worker threads of the export-owned
-/// runtime — the serialization parallelism (pingora's threads have no ambient
-/// tokio runtime, so the export subsystem owns its own).
-const DEFAULT_WORKERS: usize = 4;
-const MAX_INFLIGHT_ENV: &str = "ATG_EXPORT_MAX_INFLIGHT";
-const WORKERS_ENV: &str = "ATG_EXPORT_WORKERS";
-
 use atg_model::{
     usage_details_json, ATTR_COMPLETION_START_TIME, ATTR_MODEL_NAME, ATTR_OBSERVATION_INPUT,
     ATTR_OBSERVATION_OUTPUT, ATTR_OBSERVATION_TYPE, ATTR_USAGE_DETAILS, ATTR_USER_ID,
@@ -66,77 +55,146 @@ pub struct ExportHealth {
     pub inflight: std::sync::atomic::AtomicU64,
 }
 
+#[derive(Clone)]
 pub struct Exporter {
-    tx: Option<mpsc::Sender<Arc<TurnRecord>>>,
+    tx: mpsc::Sender<Arc<TurnRecord>>,
     pub health: Arc<ExportHealth>,
-    /// Effective pool width as configured at startup; 0 when export is
-    /// disabled (same convention as `queue_capacity`). Self-attestation for
-    /// load windows: a throughput number is only attributable to a knob
-    /// setting if the instance reports the setting it actually ran with.
-    max_inflight: usize,
-    /// Effective export-runtime worker threads (0 when export is disabled).
+    /// Effective pool width (hot: follows `export.max_inflight` via the
+    /// reload path). Self-attestation for load windows: a throughput number
+    /// is only attributable to a knob setting if the instance reports the
+    /// setting it actually ran with. 0 when export is currently disabled.
+    max_inflight: Arc<AtomicU64>,
+    /// Effective export-runtime worker threads, pinned at startup
+    /// (structural; 0 when export started disabled).
     workers: usize,
+    /// The live flush target — `None` while export is disabled (empty
+    /// endpoint). The batcher loads it once per batch (one consistent
+    /// target per batch); the reload path swaps it here.
+    target: Arc<RwLock<Option<Arc<FlushTarget>>>>,
+    /// The shared HTTP client, rebuilt by the reload path when the endpoint
+    /// changes (one client per endpoint generation, never per batch).
+    client: Arc<RwLock<reqwest::Client>>,
+    /// Queued semaphore-width delta from the last reload; the batcher
+    /// applies it (add_permits / forget_permits) before its next dispatch.
+    sema_delta: Arc<AtomicI64>,
+    /// Export enabled? False while the endpoint is empty. `submit()` is a
+    /// no-op then (the pre-v0.4 disabled semantics: no queueing, no
+    /// `dropped` inflation); the runtime stays alive so a reload can
+    /// enable export without a restart.
+    enabled: Arc<AtomicBool>,
 }
 
 impl Exporter {
     /// Create an exporter toward `endpoint` (e.g.
-    /// http://host/api/public/otel). Returns a disabled exporter (tx=None)
-    /// when no endpoint is configured or no tokio runtime is available.
+    /// http://host/api/public/otel). All values come from the config file
+    /// (no env reads). An empty endpoint starts with export disabled:
+    /// `submit()` no-ops and the health surface reports 0 (workers, queue,
+    /// width). The export runtime still starts, so a reload that configures
+    /// an endpoint enables export without a restart (`apply_target`).
     ///
     /// Basic auth may be embedded in the URL userinfo:
     /// `http://user:pass@host/path` → `Authorization: Basic <b64(user:pass)>`
     /// is added to every request and the userinfo stripped from the URL.
-    pub fn start(endpoint: Option<String>) -> Self {
+    pub fn start(endpoint: &str, max_inflight: usize, workers: usize) -> Self {
         let health = Arc::new(ExportHealth::default());
-        let max_inflight = env_positive_usize(MAX_INFLIGHT_ENV, DEFAULT_MAX_INFLIGHT);
-        let workers = env_positive_usize(WORKERS_ENV, DEFAULT_WORKERS);
-        let Some(endpoint) = endpoint.filter(|s| !s.trim().is_empty()) else {
-            return Self {
-                tx: None,
-                health,
-                max_inflight: 0,
-                workers: 0,
-            };
-        };
-        let (endpoint, auth_header) = split_basic_auth(&endpoint);
+        let workers = workers.max(1);
+        let width = max_inflight.max(1);
+        let initial_target = build_target(endpoint);
+        let enabled = Arc::new(AtomicBool::new(initial_target.is_some()));
+        let target = Arc::new(RwLock::new(initial_target));
+        let max_inflight = Arc::new(AtomicU64::new(width as u64));
         let (tx, rx) = mpsc::channel::<Arc<TurnRecord>>(QUEUE_CAPACITY);
         let health2 = health.clone();
+        let sema_delta = Arc::new(AtomicI64::new(0));
+        let permits = Arc::new(Semaphore::new(width));
+        let client = Arc::new(RwLock::new(reqwest_client()));
         // The gateway proxy runs on pingora's threads (no ambient tokio
         // runtime), so the exporter owns a dedicated runtime — multi-threaded
         // since ATG #13: the batcher needs its own task while flush tasks
         // serialize batches in parallel.
+        let loop_target = Arc::clone(&target);
+        let loop_client = Arc::clone(&client);
+        let loop_sema_delta = Arc::clone(&sema_delta);
         std::thread::spawn(move || {
             // PANIC-AUDIT v0.3.8: exporter thread startup — a runtime
             // build failure is fatal by design and must abort the thread
             // (class ii, process startup path).
             #[allow(clippy::expect_used)]
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(workers)
+                .worker_threads(workers.max(1))
                 .enable_all()
                 .build()
                 .expect("export runtime");
             rt.block_on(export_loop(
-                endpoint,
-                auth_header,
+                loop_target,
+                loop_client,
+                permits,
+                loop_sema_delta,
                 rx,
                 health2,
-                max_inflight,
             ));
         });
         Self {
-            tx: Some(tx),
+            tx,
             health,
             max_inflight,
             workers,
+            target,
+            client,
+            sema_delta,
+            enabled,
         }
+    }
+
+    /// Hot-swap the export target and pool width (reload path, called once
+    /// per successful reload, before the next batch is loaded. An endpoint
+    /// change rebuilds the client and the Basic-auth header together (they
+    /// are one URL's properties); a `max_inflight` change is queued as a
+    /// signed delta the batcher applies to the live semaphore before its
+    /// next dispatch. Disabling (empty endpoint) stops the flushes — the
+    /// batcher drops (and counts) instead of sending; re-enabling needs no
+    /// restart.
+    pub fn apply_target(&self, endpoint: &str, max_inflight: usize) {
+        let new_target = build_target(endpoint);
+        let mut t = self.target.write();
+        let changed = match (t.as_ref(), new_target.as_ref()) {
+            // Auth rides the same URL's userinfo: a credential rotation on
+            // the same endpoint must rebuild the target too.
+            (Some(old), Some(new)) => {
+                old.endpoint != new.endpoint || old.auth_header != new.auth_header
+            }
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        if changed {
+            *t = new_target;
+            // One client per endpoint generation: the pool starts fresh
+            // toward the new host (the old client's pooled connections die
+            // with it).
+            *self.client.write() = reqwest_client();
+        }
+        let now_enabled = t.is_some();
+        drop(t);
+        self.enabled.store(now_enabled, Ordering::Relaxed);
+        // Queue the semaphore delta for the batcher (it owns the semaphore
+        // and applies the accumulated delta before its next dispatch).
+        let new_width = max_inflight.max(1);
+        let old_width = self.max_inflight.swap(new_width as u64, Ordering::Relaxed) as usize;
+        let delta = new_width as i64 - old_width as i64;
+        // Accumulate, never overwrite: two reloads can land before the
+        // batcher drains the counter, and the semaphore must move by the
+        // NET delta or a grow-then-shrink would strand the wrong width.
+        self.sema_delta.fetch_add(delta, Ordering::Relaxed);
     }
 
     /// Queue one record for export. Never blocks and never copies the record
     /// (the caller's `Arc` moves into the queue); drops (counted) when the
     /// queue is full or the export thread is gone.
     pub fn submit(&self, record: Arc<TurnRecord>) {
-        let Some(tx) = &self.tx else { return };
-        match tx.try_send(record) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        match self.tx.try_send(record) {
             Ok(()) => {}
             // Full: the 1024-slot queue is the backpressure point (unchanged).
             // Closed: the export thread is gone, so the record is as lost as a
@@ -151,58 +209,53 @@ impl Exporter {
     /// bounded channel; ATG issue #2 priority 4 — export backpressure was
     /// only visible as a drop counter). 0 when export is disabled.
     pub fn queue_depth(&self) -> usize {
-        match &self.tx {
-            Some(tx) => QUEUE_CAPACITY.saturating_sub(tx.capacity()),
-            None => 0,
+        if !self.enabled.load(Ordering::Relaxed) {
+            return 0;
         }
+        QUEUE_CAPACITY.saturating_sub(self.tx.capacity())
     }
 
-    /// Configured export queue capacity (0 when export is disabled).
+    /// Configured export queue capacity. The queue always runs — even with
+    /// export disabled (empty endpoint) records queue and are dropped
+    /// (counted) at the batcher, so a re-enable needs no restart.
     pub fn queue_capacity(&self) -> usize {
-        match &self.tx {
-            Some(_) => QUEUE_CAPACITY,
-            None => 0,
+        if self.enabled.load(Ordering::Relaxed) {
+            QUEUE_CAPACITY
+        } else {
+            0
         }
     }
 
-    /// Effective flush-pool width (`ATG_EXPORT_MAX_INFLIGHT`); 0 = disabled.
+    /// Effective flush-pool width (`export.max_inflight`); 0 = disabled.
     pub fn max_inflight(&self) -> usize {
-        self.max_inflight
+        if !self.enabled.load(Ordering::Relaxed) {
+            return 0;
+        }
+        self.max_inflight.load(Ordering::Relaxed) as usize
     }
 
-    /// Effective export-runtime worker threads (`ATG_EXPORT_WORKERS`); 0 =
-    /// disabled.
+    /// Effective export-runtime worker threads (`export.workers`;
+    /// structural, fixed at startup).
     pub fn workers(&self) -> usize {
-        self.workers
-    }
-}
-
-/// One export knob value: `(effective, fell_back)`. Mirrors
-/// `parse_worker_threads`: a positive integer is taken as-is, anything else
-/// falls back to the default. Zero must fall back — a 0-permit semaphore or a
-/// 0-worker runtime would stall the export subsystem forever, which is the one
-/// failure mode fail-open must not have.
-fn parse_positive_usize(raw: &str, default: usize) -> (usize, bool) {
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n > 0 => (n, false),
-        _ => (default, true),
-    }
-}
-
-/// Read one export knob from the environment; a fallback is reported once at
-/// startup, because a silently ignored knob is how a measurement window ends
-/// up running a setting nobody chose (v0.3.12 `ATG_WORKER_THREADS` precedent).
-fn env_positive_usize(name: &str, default: usize) -> usize {
-    match std::env::var(name) {
-        Err(_) => default,
-        Ok(raw) => {
-            let (value, fell_back) = parse_positive_usize(&raw, default);
-            if fell_back {
-                eprintln!("ATG: {name}={raw:?} is not a positive integer — using {default}");
-            }
-            value
+        if self.enabled.load(Ordering::Relaxed) {
+            self.workers
+        } else {
+            0
         }
     }
+}
+
+/// Build the flush target for an endpoint value: None when empty (export
+/// disabled); otherwise userinfo split out into the Basic-auth header.
+fn build_target(endpoint: &str) -> Option<Arc<FlushTarget>> {
+    if endpoint.trim().is_empty() {
+        return None;
+    }
+    let (endpoint, auth_header) = split_basic_auth(endpoint);
+    Some(Arc::new(FlushTarget {
+        endpoint,
+        auth_header,
+    }))
 }
 
 /// One export destination: the URL (userinfo already split out into the
@@ -214,37 +267,65 @@ struct FlushTarget {
 }
 
 async fn export_loop(
-    endpoint: String,
-    auth_header: Option<String>,
+    target: Arc<RwLock<Option<Arc<FlushTarget>>>>,
+    client: Arc<RwLock<reqwest::Client>>,
+    permits: Arc<Semaphore>,
+    sema_delta: Arc<AtomicI64>,
     mut rx: mpsc::Receiver<Arc<TurnRecord>>,
     health: Arc<ExportHealth>,
-    max_inflight: usize,
 ) {
-    let client = reqwest_client();
-    let target = Arc::new(FlushTarget {
-        endpoint,
-        auth_header,
-    });
     // Memory bound and backpressure in one primitive: while every permit is
     // held the batcher parks on `acquire`, stops draining `rx`, and the
     // 1024-slot channel fills — the same loss point as before, but reached
     // only at the pool's real capacity instead of at a single flusher's.
-    let permits = Arc::new(Semaphore::new(max_inflight));
     let mut pool: JoinSet<()> = JoinSet::new();
     let mut buf: Vec<Arc<TurnRecord>> = Vec::with_capacity(BATCH_MAX);
     let mut last_flush = Instant::now();
+    // Permits a shrink could not forget yet (they were held by in-flight
+    // flushes); the remainder is retried on every pass until the semaphore
+    // reaches the configured width.
+    let mut pending_forget: usize = 0;
     loop {
         match tokio::time::timeout(BATCH_INTERVAL, rx.recv()).await {
             Ok(Some(rec)) => buf.push(rec),
             Ok(None) => break, // channel closed
             Err(_) => {}       // tick: flush if anything buffered
         }
+        // A queued reload delta moves the semaphore toward
+        // `export.max_inflight`: grows add permits now; a shrink forgets the
+        // permits that are free now and keeps retrying the rest (a permit
+        // held by an in-flight flush can only be forgotten after it is
+        // released).
+        let delta = sema_delta.swap(0, Ordering::Relaxed);
+        if delta > 0 {
+            permits.add_permits(delta as usize);
+        } else if delta < 0 {
+            pending_forget += (-delta) as usize;
+        }
+        if pending_forget > 0 {
+            pending_forget -= permits.forget_permits(pending_forget);
+        }
         if buf.is_empty() || last_flush.elapsed() < BATCH_INTERVAL && buf.len() < BATCH_MAX {
             continue;
         }
         let batch = std::mem::replace(&mut buf, Vec::with_capacity(BATCH_MAX));
         last_flush = Instant::now();
-        dispatch_batch(&permits, &mut pool, &client, &target, batch, &health).await;
+        // One target load per batch: every flush task in the batch sees the
+        // same endpoint/auth even across a concurrent reload.
+        let batch_target = target.read().clone();
+        match batch_target {
+            Some(t) => {
+                let client = client.read().clone();
+                dispatch_batch(&permits, &mut pool, &client, &t, batch, &health).await;
+            }
+            None => {
+                // Export disabled: the batch is dropped (counted) — the
+                // loss is observable, the traffic is never blocked.
+                health
+                    .dropped
+                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            }
+        }
         // Reap finished tasks: a JoinSet holds every completed task's output
         // until it is joined, so an unreaped pool would grow without bound.
         while let Some(joined) = pool.try_join_next() {
@@ -256,7 +337,18 @@ async fn export_loop(
     // — the single-flusher code flushed the tail and abandoned whatever was
     // still in flight.
     if !buf.is_empty() {
-        dispatch_batch(&permits, &mut pool, &client, &target, buf, &health).await;
+        // Clone the target OUT of the guard before awaiting: holding the
+        // lock across `dispatch_batch(..).await` would block a concurrent
+        // reload's `apply_target` write for a whole flush.
+        let tail_target = target.read().clone();
+        if let Some(t) = tail_target {
+            let client = client.read().clone();
+            dispatch_batch(&permits, &mut pool, &client, &t, buf, &health).await;
+        } else {
+            health
+                .dropped
+                .fetch_add(buf.len() as u64, Ordering::Relaxed);
+        }
     }
     while let Some(joined) = pool.join_next().await {
         observe_join(joined);
@@ -607,6 +699,17 @@ fn body_size_hint(batch: &[Arc<TurnRecord>]) -> usize {
     })
 }
 
+/// The line:<source> tag is stamped per record at build time (config
+/// `trace.tag`, hot) — an unstamped record (test fixtures) rides the
+/// default so the tag is never silently empty.
+fn record_trace_tag(r: &TurnRecord) -> &str {
+    if r.trace_tag.is_empty() {
+        atg_model::LANGFUSE_TRACE_TAG
+    } else {
+        &r.trace_tag
+    }
+}
+
 /// One turn → one generation span. Attribute order is the pinned byte
 /// contract; attribute *presence* rules (empty ⇒ omitted) are what the shape
 /// tests pin.
@@ -687,14 +790,13 @@ fn span_json(r: &TurnRecord) -> SpanJson<'_> {
         attributes.push(attr("langfuse.session.id", r.session_id.as_str()));
     }
     let tags: Vec<AttrValue<'_>> = if r.harness.is_empty() {
-        vec![AttrValue::Str(Cow::Borrowed(
-            atg_model::langfuse_trace_tag(),
-        ))]
+        vec![AttrValue::Str(Cow::Borrowed(record_trace_tag(r)))]
     } else {
-        // line:<source> rides the resolved ATG_TRACE_TAG; the harness tag is
-        // the orthogonal agent-attribution dimension.
+        // line:<source> rides the tag the record was stamped with (config
+        // `trace.tag`, hot); the harness tag is the orthogonal
+        // agent-attribution dimension.
         vec![
-            AttrValue::Str(Cow::Borrowed(atg_model::langfuse_trace_tag())),
+            AttrValue::Str(Cow::Borrowed(record_trace_tag(r))),
             AttrValue::Str(Cow::Owned(format!("harness:{}", r.harness))),
         ]
     };
@@ -792,10 +894,10 @@ fn build_otlp_json_value_tree(batch: &[TurnRecord]) -> String {
             // langfuse.trace.metadata.{harness,…}.
             let harness_tag = (!r.harness.is_empty()).then(|| format!("harness:{}", r.harness));
             let tags: Vec<&str> = match &harness_tag {
-                // line:<source> rides the resolved ATG_TRACE_TAG; the
-                // harness tag is the orthogonal agent-attribution dimension.
-                Some(t) => vec![atg_model::langfuse_trace_tag(), t.as_str()],
-                None => vec![atg_model::langfuse_trace_tag()],
+                // line:<source> rides the record-stamped tag; the harness
+                // tag is the orthogonal agent-attribution dimension.
+                Some(t) => vec![record_trace_tag(r), t.as_str()],
+                None => vec![record_trace_tag(r)],
             };
             let mut trace_extra: Vec<serde_json::Value> = Vec::new();
             if !r.harness.is_empty() {
@@ -1149,30 +1251,72 @@ mod tests {
             .map(|a| &a["value"])
     }
 
-    // ── ATG #13 A2: the writer path must not move a single byte ─────────────
+    // ── v0.4.0 hot reload: semaphore width and disabled semantics ───────────
 
-    /// Knob nails (ATG #13 S3): the defaults are the ones the ticket
-    /// specifies, a valid value is taken verbatim, and a bad value falls back
-    /// (reported) instead of silently becoming something else.
-    #[test]
-    fn export_knob_parsing_nails() {
-        assert_eq!(DEFAULT_MAX_INFLIGHT, 8, "ATG#13 S3 default");
-        assert_eq!(DEFAULT_WORKERS, 4, "ATG#13 S3 default");
-        assert_eq!(parse_positive_usize("8", DEFAULT_MAX_INFLIGHT), (8, false));
-        assert_eq!(
-            parse_positive_usize(" 12 ", DEFAULT_MAX_INFLIGHT),
-            (12, false),
-            "trimmed"
-        );
-        assert_eq!(parse_positive_usize("2", DEFAULT_WORKERS), (2, false));
-        for bad in ["", "0", "garbage", "-1", "1.5", "99999999999999999999"] {
-            assert_eq!(
-                parse_positive_usize(bad, DEFAULT_MAX_INFLIGHT),
-                (DEFAULT_MAX_INFLIGHT, true),
-                "{bad:?} must fall back and say so"
-            );
-        }
+    /// An exporter with no runtime/thread behind it: the fields are the real
+    /// ones, the receiver is held open, so the hot-path arithmetic can be
+    /// asserted without racing the batcher.
+    fn inert_exporter(max_inflight: usize) -> (Exporter, mpsc::Receiver<Arc<TurnRecord>>) {
+        let (tx, rx) = mpsc::channel::<Arc<TurnRecord>>(QUEUE_CAPACITY);
+        (
+            Exporter {
+                tx,
+                health: Arc::new(ExportHealth::default()),
+                max_inflight: Arc::new(AtomicU64::new(max_inflight as u64)),
+                workers: 1,
+                target: Arc::new(RwLock::new(None)),
+                client: Arc::new(RwLock::new(reqwest_client())),
+                sema_delta: Arc::new(AtomicI64::new(0)),
+                enabled: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
     }
+
+    /// Two reloads can land before the batcher drains the counter: the
+    /// semaphore must move by the NET delta. Overwriting would leave a
+    /// grow-then-shrink pair at the wrong width (and a shrink can even
+    /// forget permits that were never added).
+    #[test]
+    fn sema_delta_accumulates_across_reloads_before_apply() {
+        let (ex, _rx) = inert_exporter(4);
+        ex.apply_target("http://127.0.0.1:1/otel", 8); // +4
+        ex.apply_target("http://127.0.0.1:1/otel", 2); // −6
+        assert_eq!(
+            ex.sema_delta.load(Ordering::Relaxed),
+            -2,
+            "net movement 4→8→2 is −2, not −6"
+        );
+        assert!(ex.enabled.load(Ordering::Relaxed));
+        assert_eq!(ex.max_inflight(), 2);
+        assert_eq!(ex.workers(), 1);
+    }
+
+    /// Disabled (empty endpoint) keeps the pre-v0.4 semantics on the health
+    /// surface and on the submit path: nothing queues, nothing is counted as
+    /// dropped, and the self-attestation reports zeros.
+    #[test]
+    fn disabled_exporter_reports_zero_and_submits_nothing() {
+        let (ex, _rx) = inert_exporter(8);
+        assert_eq!(ex.max_inflight(), 0);
+        assert_eq!(ex.workers(), 0);
+        assert_eq!(ex.queue_capacity(), 0);
+        assert_eq!(ex.queue_depth(), 0);
+        ex.submit(Arc::new(record("sess-disabled")));
+        assert_eq!(ex.queue_depth(), 0, "a disabled exporter never queues");
+        assert_eq!(
+            ex.health.dropped.load(Ordering::Relaxed),
+            0,
+            "disabled must not inflate the drop counter"
+        );
+        // Enabling at runtime flips the surface without a restart.
+        ex.apply_target("http://127.0.0.1:1/otel", 8);
+        assert_eq!(ex.max_inflight(), 8);
+        assert_eq!(ex.workers(), 1);
+        assert_eq!(ex.queue_capacity(), QUEUE_CAPACITY);
+    }
+
+    // ── ATG #13 A2: the writer path must not move a single byte ─────────────
 
     /// Sample batches for the byte-equivalence test: one batch per boundary
     /// shape, so a failure names the shape that broke.
@@ -1563,7 +1707,7 @@ mod tests {
             .and_then(|v| v["arrayValue"]["values"].as_array())
             .unwrap_or_else(|| panic!("tags must be an OTLP array: {span}"));
         assert_eq!(tags[0]["stringValue"], "line:atg");
-        // v0.3.10 combination pin: line:<source> (ATG_TRACE_TAG) and
+        // v0.3.10 combination pin: line:<source> (the record-stamped tag) and
         // harness:<name> are orthogonal dimensions — both ride the same
         // span when a harness is attributed.
         let mut r = record("sess-tags");
@@ -1578,7 +1722,7 @@ mod tests {
         assert_eq!(tags.len(), 2, "line + harness both present: {tags:?}");
         assert!(
             tags.iter().any(|t| t["stringValue"] == "line:atg"),
-            "line:<source> rides ATG_TRACE_TAG resolution (default here)"
+            "line:<source> rides the stamped tag (default here)"
         );
         assert!(
             tags.iter().any(|t| t["stringValue"] == "harness:omp"),

@@ -115,9 +115,9 @@ async fn metrics_surface_attests_and_counts_traffic() {
 
     // Queue/backpressure (ATG issue #2): gauges present, drained after the
     // turns (the scrape counts itself: at most 1), high-water moved, and the
-    // effective worker count is reported. This stack sets no
-    // ATG_WORKER_THREADS => the default 1 (ATG#1 Specification 5); the env
-    // read itself is nailed by tests/worker_threads_env.rs.
+    // effective worker count is reported. The fixture config file ships
+    // server.worker_threads = 1 — the default (ATG#1 Specification 5); the
+    // config read itself is nailed by tests/worker_threads_env.rs.
     let inflight = scalar(&body, "atg_requests_inflight");
     assert!(inflight <= 1, "inflight must release: {body}");
     assert!(

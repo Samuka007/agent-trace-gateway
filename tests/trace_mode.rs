@@ -1,12 +1,16 @@
-// Behavior: ATG_TRACE_MODE=off — the low-cost tap (v0.3.11). With tracing
+// Behavior: trace.mode = "off" — the low-cost tap (v0.3.11). With tracing
 // off, the gateway is a near-pure forward: the response body still passes
 // through to the client untouched, and the record degrades to a
 // timing/protocol shell (no parsing, no raw capture, no error marker).
 // BENCH-ONLY since v0.3.12 (ATG issue #3): the mode is compiled in only
-// under `--features bench-trace-mode`; the production build ignores the
-// variable (see tests/trace_mode_env_ignored.rs).
+// under `--features bench-trace-mode`; the production build rejects
+// `trace.mode = "off"` at validation (the env-ignoring invariant now lives
+// in tests/legacy_env_ignored.rs).
 // [Requirement: 低成本直通档；Scenario: trace off 透明转发 + 壳记录]
 #![cfg(feature = "bench-trace-mode")]
+
+#[path = "common/cfg.rs"]
+mod cfg;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -15,8 +19,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use std::time::Duration;
 
-const UPSTREAM_PORT: u16 = 38991;
-const GW_PORT: u16 = 38990;
+// Below the kernel ephemeral range (32768-60999) — see drain_switch.rs.
+const UPSTREAM_PORT: u16 = 24641;
+const GW_PORT: u16 = 24640;
 
 fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>> {
     Client::builder(TokioExecutor::new()).build_http()
@@ -85,8 +90,10 @@ async fn trace_mode_off_is_transparent_with_shell_records() {
     wait_port(UPSTREAM_PORT).await;
     let gw = format!("127.0.0.1:{GW_PORT}");
     let up = format!("127.0.0.1:{UPSTREAM_PORT}");
-    std::env::set_var("ATG_TRACE_MODE", "off");
-    std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw, &up));
+    let _store = cfg::spawn_gateway(
+        "trace-mode-off",
+        &cfg::build(&gw, &up, &[("trace.mode", cfg::q("off"))]),
+    );
     wait_port(GW_PORT).await;
 
     // A full turn through the gateway: the response passes through

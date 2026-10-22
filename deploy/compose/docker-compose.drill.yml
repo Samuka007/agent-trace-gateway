@@ -1,4 +1,6 @@
 # 自动拉起演练 compose：网关（多阶段容器内构建）+ 极简上游。
+# 网关以完整配置文件启动（v0.4.0 起 ATG_* 环境变量退役）；配置在容器启动时
+# 内联生成到 /etc/atg/atg.toml（upstream 指向本栈的 upstream 服务）。
 services:
   upstream:
     image: python:3.12-slim
@@ -11,9 +13,41 @@ services:
       context: ../..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
-    environment:
-      ATG_LISTEN: "0.0.0.0:6180"
-      ATG_UPSTREAM: "upstream:8000"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /etc/atg
+        cat > /etc/atg/atg.toml <<'EOF'
+        version = 1
+        [server]
+        listen = "0.0.0.0:6180"
+        upstream = "upstream:8000"
+        sni = ""
+        worker_threads = 1
+        max_ws_frame_payload = 0
+        [trace]
+        tag = "line:atg-drill"
+        mode = "full"
+        [drain]
+        on_cancel = false
+        timeout_secs = 60
+        [capture]
+        max_bytes = 16777216
+        [store]
+        max_records = 1000
+        max_bytes = 268435456
+        [stitch]
+        capacity = 100000
+        ttl_ms = 86400000
+        [api_key]
+        salt = "drill-salt-not-a-secret"
+        [export]
+        otlp_endpoint = ""
+        max_inflight = 8
+        workers = 4
+        EOF
+        exec /usr/local/bin/gateway --config /etc/atg/atg.toml
     ports:
       - "16180:6180"
     depends_on:

@@ -57,8 +57,8 @@ fn turn_body(system: &str, user: &str) -> String {
 async fn bounded_stitch_state() {
     // Capacity 2 chains, TTL 300ms — small on purpose to exercise eviction.
     start_stack(&[
-        ("ATG_STITCH_CAPACITY", "2".to_string()),
-        ("ATG_STITCH_TTL_MS", "300".to_string()),
+        ("stitch.capacity", "2".to_string()),
+        ("stitch.ttl_ms", "300".to_string()),
     ])
     .await;
 

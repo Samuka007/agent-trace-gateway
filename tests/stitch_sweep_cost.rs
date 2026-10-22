@@ -21,11 +21,13 @@ fn conversation(head: &str) -> Vec<serde_json::Value> {
 #[test]
 #[ignore = "measurement instrument (ATG#5): run with --ignored --nocapture"]
 fn assign_cost_vs_table_size() {
-    // The pre-populated table must fit: capacity is read at construction.
-    std::env::set_var("ATG_STITCH_CAPACITY", "200000");
+    // The pre-populated table must fit: capacity is a constructor argument
+    // (the config file's stitch.capacity reaches this seam).
+    const CAPACITY: u64 = 200_000;
+    const TTL_MS: u64 = 86_400_000;
     const CALLS: u32 = 200;
     for table in [0usize, 5_000, 20_000, 100_000] {
-        let stitcher = PrefixStitcher::new();
+        let stitcher = PrefixStitcher::with_limits(CAPACITY, TTL_MS);
         for i in 0..table {
             stitcher.assign("scope", &conversation(&format!("head-{i}")));
         }

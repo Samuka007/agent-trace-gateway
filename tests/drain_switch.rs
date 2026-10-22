@@ -3,7 +3,7 @@
 //   (1) drain ON: client drops mid-stream → the upstream stream is still
 //       consumed to its natural end → final_output complete, usage
 //       complete, cancelled=true, no error marker.
-//   (2) drain TIMEOUT: the upstream stalls past ATG_DRAIN_TIMEOUT_SECS →
+//   (2) drain TIMEOUT: the upstream stalls past drain.timeout_secs →
 //       drain abandoned, drain_timed_out=true, partial content, cancelled.
 //   (3) drain OFF (default): client drop aborts the upstream connection
 //       (the fixture sees the gateway close it) → partial content kept,
@@ -16,16 +16,22 @@ use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+#[path = "common/cfg.rs"]
+mod cfg;
+
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const UPSTREAM_PORT: u16 = 39071;
-const GW_DRAIN_ON: u16 = 39070;
-const GW_DRAIN_TIMEOUT: u16 = 39072;
-const GW_DRAIN_OFF: u16 = 39074;
-const GW_DRAIN_BULK: u16 = 39076;
+// Below the kernel's ephemeral range (32768-60999): a fixed port inside that
+// range can be handed out as an outgoing connection's source port and the
+// listener then dies with AddrInUse (observed in a full parallel suite run).
+const UPSTREAM_PORT: u16 = 24611;
+const GW_DRAIN_ON: u16 = 24610;
+const GW_DRAIN_TIMEOUT: u16 = 24612;
+const GW_DRAIN_OFF: u16 = 24614;
+const GW_DRAIN_BULK: u16 = 24616;
 
 fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>> {
     Client::builder(TokioExecutor::new()).build_http()
@@ -141,10 +147,29 @@ fn mini_upstream(saw_upstream_close: Arc<AtomicBool>) {
     }
 }
 
+/// Connect with retry: under a fully parallel suite run (many test binaries
+/// × many gateways in process) a just-booted listener can refuse a handful of
+/// connections before its accept loop is draining; a listener that stays
+/// dead keeps refusing and the budget below runs out.
+fn connect_retryed(port: u16) -> std::net::TcpStream {
+    let addr = format!("127.0.0.1:{port}");
+    let mut last_err = String::new();
+    for _ in 0..40 {
+        match std::net::TcpStream::connect(&addr) {
+            Ok(s) => return s,
+            Err(e) => {
+                last_err = e.to_string();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    panic!("connect {addr} refused for 4s: {last_err}");
+}
+
 /// Send one turn and drop the socket after reading a few stream bytes —
 /// the client-cancellation shape.
 fn read_partial_then_drop(port: u16, input: &str) -> usize {
-    let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    let mut s = connect_retryed(port);
     let body = format!(r#"{{"model":"m","stream":true,"input":"{input}"}}"#);
     let req = format!(
         "POST /responses HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -169,7 +194,7 @@ fn read_partial_then_drop(port: u16, input: &str) -> usize {
 /// Read the COMPLETE response stream from a fresh connection (live
 /// client, no drop) — the throughput-smoke shape. Returns bytes read.
 fn read_all(port: u16, input: &str) -> usize {
-    let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    let mut s = connect_retryed(port);
     let body = format!(r#"{{"model":"m","stream":true,"input":"{input}"}}"#);
     let req = format!(
         "POST /responses HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
@@ -222,15 +247,18 @@ async fn poll_record(port: u16, user_input: &str) -> serde_json::Value {
     panic!("record {user_input} never appeared");
 }
 
-fn spawn_gateway(port: u16) {
-    let gw = format!("127.0.0.1:{port}");
+/// Each drain scenario is its own in-process instance with its own complete
+/// config file: the drain policy is startup state, so the scenarios run
+/// sequentially on dedicated ports (the file is the only config surface —
+/// there are no env vars to race on anymore).
+fn spawn_gateway(port: u16, overrides: &[(&str, String)]) {
+    let listen = format!("127.0.0.1:{port}");
     let up = format!("127.0.0.1:{UPSTREAM_PORT}");
-    std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw, &up));
+    let text = cfg::build(&listen, &up, overrides);
+    let _store = cfg::spawn_gateway("drain", &text);
 }
 
-/// All three drain scenarios run sequentially in one test: the drain
-/// config is read from process env at gateway construction, and env is
-/// process-global — parallel tests would race on it.
+/// All three drain scenarios run sequentially in one test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drain_switch_scenarios() {
     let saw_upstream_close = Arc::new(AtomicBool::new(false));
@@ -241,8 +269,7 @@ async fn drain_switch_scenarios() {
     wait_port(UPSTREAM_PORT).await;
 
     // ---- (1) drain ON: complete content + usage after client death ----
-    std::env::set_var("ATG_DRAIN_ON_CANCEL", "1");
-    spawn_gateway(GW_DRAIN_ON);
+    spawn_gateway(GW_DRAIN_ON, &[("drain.on_cancel", "true".to_string())]);
     wait_port(GW_DRAIN_ON).await;
     let got = tokio::task::spawn_blocking(|| read_partial_then_drop(GW_DRAIN_ON, "drain-full"))
         .await
@@ -265,8 +292,13 @@ async fn drain_switch_scenarios() {
     );
 
     // ---- (2) drain TIMEOUT: stalled upstream abandoned ----
-    std::env::set_var("ATG_DRAIN_TIMEOUT_SECS", "1");
-    spawn_gateway(GW_DRAIN_TIMEOUT);
+    spawn_gateway(
+        GW_DRAIN_TIMEOUT,
+        &[
+            ("drain.on_cancel", "true".to_string()),
+            ("drain.timeout_secs", "1".to_string()),
+        ],
+    );
     wait_port(GW_DRAIN_TIMEOUT).await;
     let got =
         tokio::task::spawn_blocking(|| read_partial_then_drop(GW_DRAIN_TIMEOUT, "drain-stall"))
@@ -292,9 +324,7 @@ async fn drain_switch_scenarios() {
     // the BLOCK-C gate this scenario rides the pingora pump (zero
     // regression) — the assertions are behavior-level, so they pin the
     // observable policy either way. ----
-    std::env::remove_var("ATG_DRAIN_ON_CANCEL");
-    std::env::remove_var("ATG_DRAIN_TIMEOUT_SECS");
-    spawn_gateway(GW_DRAIN_OFF);
+    spawn_gateway(GW_DRAIN_OFF, &[]);
     wait_port(GW_DRAIN_OFF).await;
     let got = tokio::task::spawn_blocking(|| read_partial_then_drop(GW_DRAIN_OFF, "drain-off"))
         .await
@@ -327,8 +357,7 @@ async fn drain_switch_scenarios() {
     // ---- (5) relay throughput smoke (NIT ③): ~6MB SSE through the live
     // relay path with a fully-reading client — no pathological slowdown,
     // complete content at volume. ----
-    std::env::set_var("ATG_DRAIN_ON_CANCEL", "1");
-    spawn_gateway(GW_DRAIN_BULK);
+    spawn_gateway(GW_DRAIN_BULK, &[("drain.on_cancel", "true".to_string())]);
     wait_port(GW_DRAIN_BULK).await;
     let started = std::time::Instant::now();
     let got = tokio::task::spawn_blocking(|| read_all(GW_DRAIN_BULK, "drain-bulk"))

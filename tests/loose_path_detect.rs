@@ -3,6 +3,8 @@
 // 404 on an unknown route mints no fake turn; exact matches keep their
 // record-everything semantics.
 // [Requirement: 协议解包；Scenario: 宽松路径匹配与上游门控]
+#[path = "common/cfg.rs"]
+mod cfg;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -12,8 +14,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 
-const UPSTREAM_PORT: u16 = 37971;
-const GW_PORT: u16 = 37970;
+// Below the kernel ephemeral range (32768-60999) — see drain_switch.rs.
+const UPSTREAM_PORT: u16 = 24631;
+const GW_PORT: u16 = 24630;
 
 fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>> {
     Client::builder(TokioExecutor::new()).build_http()
@@ -128,7 +131,7 @@ async fn loose_path_detect_and_upstream_gating() {
     tokio::spawn(mini_upstream());
     let gw = format!("127.0.0.1:{GW_PORT}");
     let up = format!("127.0.0.1:{UPSTREAM_PORT}");
-    std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw, &up));
+    let _store = cfg::spawn_gateway("loose-path", &cfg::build(&gw, &up, &[]));
     wait_port(UPSTREAM_PORT).await;
     wait_port(GW_PORT).await;
 

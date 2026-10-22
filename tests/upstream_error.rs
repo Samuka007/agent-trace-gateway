@@ -124,10 +124,10 @@ async fn upstream_error_passthrough() {
     let gw_port = gw + 100;
     let listen = format!("127.0.0.1:{gw_port}");
     let dead_upstream = format!("127.0.0.1:{}", common::stack::fixture_port() + 500);
-    let thread_listen = listen.clone();
-    std::thread::spawn(move || {
-        agent_trace_gateway::gateway_app::run(&thread_listen, &dead_upstream);
-    });
+    let _dead_store = common::cfg::spawn_gateway(
+        "upstream-error-dead",
+        &common::cfg::build(&listen, &dead_upstream, &[]),
+    );
     for _ in 0..100 {
         if tokio::net::TcpStream::connect(&listen).await.is_ok() {
             break;

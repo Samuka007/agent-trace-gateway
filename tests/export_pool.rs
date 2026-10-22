@@ -105,7 +105,7 @@ async fn bound_sink(latency: Duration) -> (u16, Arc<SinkStats>) {
 async fn export_pool_bounds_concurrency_and_parallelizes_batches() {
     const RECORDS: u64 = 300;
     let (port, stats) = bound_sink(Duration::from_millis(60)).await;
-    let exporter = Exporter::start(Some(format!("http://127.0.0.1:{port}/api/public/otel")));
+    let exporter = Exporter::start(&format!("http://127.0.0.1:{port}/api/public/otel"), 8, 4);
     let bound = exporter.max_inflight();
     let health = Arc::clone(&exporter.health);
     assert!(bound >= 1, "export must be enabled in this test");
@@ -165,7 +165,7 @@ async fn export_pool_bounds_concurrency_and_parallelizes_batches() {
 async fn export_pool_conserves_a_sustained_run_and_ships_the_tail() {
     const RECORDS: u64 = 2000;
     let (port, stats) = bound_sink(Duration::from_millis(2)).await;
-    let exporter = Exporter::start(Some(format!("http://127.0.0.1:{port}/api/public/otel")));
+    let exporter = Exporter::start(&format!("http://127.0.0.1:{port}/api/public/otel"), 8, 4);
     let health = Arc::clone(&exporter.health);
 
     for i in 0..RECORDS {

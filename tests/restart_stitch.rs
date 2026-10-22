@@ -5,6 +5,8 @@
 
 // Only the fixture server — this test embeds its own gateway stack (below)
 // and must not pull the shared stack helpers (dead_code under clippy).
+#[path = "common/cfg.rs"]
+mod cfg;
 #[path = "common/fixture_server.rs"]
 mod fixture_server;
 
@@ -54,11 +56,11 @@ async fn restart_stitch_state() {
     });
     let gw1 = format!("127.0.0.1:{GW1}");
     let up1 = format!("127.0.0.1:{FIXTURE_PORT}");
-    std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw1, &up1));
+    let _store1 = cfg::spawn_gateway("restart-stitch-1", &cfg::build(&gw1, &up1, &[]));
     // Instance 2 ("restart").
     let gw2 = format!("127.0.0.1:{GW2}");
     let up2 = format!("127.0.0.1:{FIXTURE_PORT}");
-    std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw2, &up2));
+    let _store2 = cfg::spawn_gateway("restart-stitch-2", &cfg::build(&gw2, &up2, &[]));
     for port in [FIXTURE_PORT, GW1, GW2] {
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))

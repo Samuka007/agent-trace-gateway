@@ -388,6 +388,8 @@ impl WsTurnState {
             harness_enrich: Vec::new(),
             session_synthetic: false,
             completion_start_ns: None,
+            // The gateway stamps the config's trace tag after take_record.
+            trace_tag: String::new(),
         }
     }
 }

@@ -50,8 +50,10 @@ async fn export_fail_open() {
     failing_collector(collector_port).await;
 
     common::stack::start_stack(&[(
-        "ATG_OTLP_ENDPOINT",
-        format!("http://127.0.0.1:{collector_port}/api/public/otel"),
+        "export.otlp_endpoint",
+        common::cfg::q(&format!(
+            "http://127.0.0.1:{collector_port}/api/public/otel"
+        )),
     )])
     .await;
     let gw = common::stack::gateway_port();

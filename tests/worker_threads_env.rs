@@ -1,12 +1,13 @@
-// Behavior: ATG_WORKER_THREADS is READ and REACHES pingora — the requested
-// count is both self-attested by /__atg/health and observable as that many
-// OS worker threads. The second check is the point: a build whose env read
-// silently fell back to the default (the failure mode that produced a whole
-// invalid measurement matrix — an env string literal patched in place, the
-// knob parsed to nothing, every "t8" cell really running one thread while
-// still printing a complete-looking result) would pass a self-report-only
-// test if the report were derived from the same broken value. Counting the
-// threads the process actually has cannot be faked that way.
+// Behavior: `server.worker_threads` is READ from the config file and
+// REACHES pingora — the requested count is both self-attested by
+// /__atg/health and observable as that many OS worker threads. The second
+// check is the point: a build whose config read silently fell back to the
+// default (the failure mode that produced a whole invalid measurement
+// matrix — a string literal patched in place, the knob parsed to nothing,
+// every "t8" cell really running one thread while still printing a
+// complete-looking result) would pass a self-report-only test if the report
+// were derived from the same broken value. Counting the threads the process
+// actually has cannot be faked that way.
 // [Requirement: ATG#1 Specification 5；Scenario: env 被读取且真正生效]
 mod common;
 
@@ -52,11 +53,12 @@ fn pingora_worker_threads() -> usize {
         .count()
 }
 
-/// The stack starts with ATG_WORKER_THREADS=3 in the process environment —
-/// the deployment knob under test, set exactly the way an operator would.
+/// The stack starts from a complete config file with `server.worker_threads
+/// = 3` — the deployment knob under test, set exactly the way an operator
+/// would.
 #[tokio::test]
-async fn atg_worker_threads_env_is_read_and_reaches_pingora() {
-    start_stack(&[("ATG_WORKER_THREADS", REQUESTED_THREADS.to_string())]).await;
+async fn server_worker_threads_reaches_pingora() {
+    start_stack(&[("server.worker_threads", REQUESTED_THREADS.to_string())]).await;
 
     // 1. Self-attestation: the deployment can prove its shape from health.
     let h = get_json("/__atg/health").await;
