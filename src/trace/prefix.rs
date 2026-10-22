@@ -9,8 +9,9 @@
 //! - new head                              -> new session, no mark (a different
 //!   conversation cannot be told from a rewrite, so nothing is asserted)
 //!
-//! Bounds: LRU capacity (env ATG_STITCH_CAPACITY, default 100_000) + TTL
-//! (env ATG_STITCH_TTL_MS, default 24h). The TTL expiry pass is AMORTIZED
+//! Bounds: LRU capacity (config stitch.capacity) + TTL (config
+//! stitch.ttl_ms) — both hot, re-seeded by the reload path. The TTL expiry
+//! pass is AMORTIZED
 //! (ATG#5): it runs at most once per SWEEP_INTERVAL_MS instead of on every
 //! request, and expiry is enforced per entry on lookup — an expired chain is
 //! never extended either way, so the observable contract is unchanged.
@@ -31,6 +32,7 @@ use std::time::{Duration, Instant};
 const FINGERPRINT_KIND: &str = "pfx";
 const DEFAULT_CAPACITY: usize = 100_000;
 const DEFAULT_TTL: Duration = Duration::from_secs(24 * 3600);
+const DEFAULT_TTL_MS: u64 = DEFAULT_TTL.as_millis() as u64;
 
 /// TTL sweep cadence (ATG#5). The expiry pass walks the whole table while
 /// holding `states`; running it on EVERY request made the stitcher a
@@ -42,8 +44,12 @@ const SWEEP_INTERVAL_MS: u64 = 30_000;
 
 pub struct PrefixStitcher {
     states: Mutex<HashMap<(String, String), ChainState>>,
-    capacity: usize,
-    ttl: Duration,
+    /// Hot bounds (config `stitch.capacity` / `stitch.ttl_ms`): the reload
+    /// path re-seeds them; every insert/expiry decision reads the current
+    /// value, and a shrunk capacity evicts down to the new cap on the next
+    /// insert's existing LRU logic.
+    capacity: AtomicU64,
+    ttl_ms: AtomicU64,
     next_nonce: AtomicU64,
     /// Chains dropped by TTL expiry / by the capacity LRU since startup
     /// (observability: the table size drives the O(table) sweep cost that
@@ -78,31 +84,17 @@ struct ChainState {
 
 impl Default for PrefixStitcher {
     fn default() -> Self {
-        Self::new()
+        Self::with_limits(DEFAULT_CAPACITY as u64, DEFAULT_TTL_MS)
     }
 }
 
 impl PrefixStitcher {
-    pub fn new() -> Self {
-        let capacity = std::env::var("ATG_STITCH_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_CAPACITY);
-        let ttl = std::env::var("ATG_STITCH_TTL_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(DEFAULT_TTL);
-        Self::with_params(ttl, capacity)
-    }
-
-    /// Explicit-bounds constructor (env parsing lives in `new`); tests pin
-    /// small TTL/capacity without touching process env.
-    fn with_params(ttl: Duration, capacity: usize) -> Self {
+    /// Explicit-bounds constructor (values come from the config file).
+    pub fn with_limits(capacity: u64, ttl_ms: u64) -> Self {
         Self {
             states: Mutex::new(HashMap::new()),
-            capacity,
-            ttl,
+            capacity: AtomicU64::new(capacity.max(1)),
+            ttl_ms: AtomicU64::new(ttl_ms.max(1)),
             next_nonce: AtomicU64::new(0),
             expired: AtomicU64::new(0),
             evicted: AtomicU64::new(0),
@@ -121,9 +113,20 @@ impl PrefixStitcher {
         self.states.lock().len()
     }
 
-    /// Configured LRU capacity (ATG_STITCH_CAPACITY, default 100_000).
+    /// Configured LRU capacity (config stitch.capacity).
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity.load(Ordering::Relaxed).min(usize::MAX as u64) as usize
+    }
+
+    /// Re-seed the hot bounds (reload path).
+    pub fn set_limits(&self, capacity: u64, ttl_ms: u64) {
+        self.capacity.store(capacity.max(1), Ordering::Relaxed);
+        self.ttl_ms.store(ttl_ms.max(1), Ordering::Relaxed);
+    }
+
+    /// The current TTL.
+    fn ttl(&self) -> Duration {
+        Duration::from_millis(self.ttl_ms.load(Ordering::Relaxed).max(1))
     }
 
     /// Chains dropped by TTL expiry since startup.
@@ -179,8 +182,8 @@ impl PrefixStitcher {
         // Amortized TTL sweep (ATG#5): the table-wide pass is O(chains) and
         // used to run while holding this lock on every request — the
         // regression this issue names. It now runs at most once per interval.
+        let ttl = self.ttl();
         if now_ms.saturating_sub(self.last_sweep_ms.load(Ordering::Relaxed)) >= SWEEP_INTERVAL_MS {
-            let ttl = self.ttl;
             let before = states.len();
             states.retain(|_, st| now.duration_since(st.last_used) < ttl);
             self.expired.fetch_add(
@@ -196,7 +199,7 @@ impl PrefixStitcher {
         // (the sweep above may not run for a whole interval).
         if states
             .get(&key)
-            .is_some_and(|st| now.duration_since(st.last_used) >= self.ttl)
+            .is_some_and(|st| now.duration_since(st.last_used) >= self.ttl())
         {
             let _ = states.remove(&key);
         }
@@ -214,7 +217,10 @@ impl PrefixStitcher {
             return (new_session, true);
         }
         // New chain: enforce LRU capacity before inserting.
-        if states.len() >= self.capacity {
+        // A shrunk capacity (hot reload) trims DOWN to the new cap in the
+        // same eviction pass — the bound holds after the next insert.
+        let capacity = self.capacity();
+        while states.len() >= capacity {
             let lru_key = states
                 .iter()
                 .min_by_key(|(_, st)| st.last_used)
@@ -319,7 +325,7 @@ mod tests {
     /// the old per-request `retain` fails this on the first assertion.
     #[test]
     fn ttl_sweep_is_amortized_not_per_request() {
-        let mut stitcher = PrefixStitcher::with_params(Duration::from_secs(3600), 1024);
+        let mut stitcher = PrefixStitcher::with_limits(1024, 3_600_000);
         for i in 0..64 {
             stitcher.assign("scope", &conversation(&format!("head-{i}")));
         }
@@ -341,7 +347,7 @@ mod tests {
     /// A live chain keeps extending between sweeps (no behavioural drift).
     #[test]
     fn live_chain_extends_within_one_interval() {
-        let stitcher = PrefixStitcher::with_params(Duration::from_secs(3600), 1024);
+        let stitcher = PrefixStitcher::with_limits(1024, 3_600_000);
         let (first, bp_first) = stitcher.assign("scope", &conversation("head-x"));
         let (second, bp_second) = stitcher.assign("scope", &conversation("head-x"));
         assert_eq!(first, second, "a live chain must keep its session");
@@ -354,7 +360,7 @@ mod tests {
     /// check on lookup stands in for the per-request purge.
     #[test]
     fn expired_chain_is_not_extended_without_a_sweep() {
-        let stitcher = PrefixStitcher::with_params(Duration::from_millis(20), 1024);
+        let stitcher = PrefixStitcher::with_limits(1024, 20);
         let (first, bp_first) = stitcher.assign("scope", &conversation("head-1"));
         assert!(!bp_first);
         std::thread::sleep(Duration::from_millis(40));
@@ -370,7 +376,7 @@ mod tests {
     /// what the per-request purge used to do).
     #[test]
     fn due_sweep_reclaims_expired_entries() {
-        let mut stitcher = PrefixStitcher::with_params(Duration::from_millis(20), 1024);
+        let mut stitcher = PrefixStitcher::with_limits(1024, 20);
         stitcher.assign("scope", &conversation("head-a"));
         stitcher.assign("scope", &conversation("head-b"));
         std::thread::sleep(Duration::from_millis(40));
@@ -388,7 +394,7 @@ mod tests {
     /// never exceeds `capacity`, and the evicted chain reopens fresh.
     #[test]
     fn capacity_bound_holds_without_the_sweep() {
-        let stitcher = PrefixStitcher::with_params(Duration::from_secs(3600), 2);
+        let stitcher = PrefixStitcher::with_limits(2, 3_600_000);
         let (a1, _) = stitcher.assign("scope", &conversation("a"));
         let (b1, _) = stitcher.assign("scope", &conversation("b"));
         let (c1, _) = stitcher.assign("scope", &conversation("c"));

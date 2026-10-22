@@ -1,4 +1,6 @@
 // agent-trace-gateway library: protocol interpretation + gateway app.
+pub mod config;
+pub mod config_store;
 pub mod engine;
 pub mod metrics;
 pub mod trace;
@@ -15,6 +17,7 @@ pub mod gateway_app {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::config::parse_upstream;
     use crate::trace::store::TraceStore;
     use crate::trace::unpack;
 
@@ -81,37 +84,41 @@ pub mod gateway_app {
     }
 
     pub struct Gateway {
-        pub upstream: String,
-        /// Precomputed relay URL base (scheme://url-host:port). On https
-        /// with ATG_SNI the URL host IS the SNI name (the client's
-        /// resolve() entry pins it to the real address — BLOCK-A).
-        pub upstream_base: String,
+        /// The configuration store: every hot value is read from a
+        /// per-request snapshot (one `snapshot()` per request, taken in
+        /// `new_ctx` and carried in `Ctx`).
+        pub config_store: Arc<crate::config_store::ConfigStore>,
         /// Upstream HTTP client for the owned relay (v0.3.6): pingora's
         /// response pump structurally aborts the upstream the moment the
         /// downstream dies, which makes a client-disconnect policy
         /// (drain switch) unenforceable inside the ProxyHttp hooks — so
         /// LLM API requests are relayed by the gateway itself instead.
+        /// Plain client (no resolve pins); a pinned client for the current
+        /// SNI entry is cached in `pinned_relay` and rebuilt when the
+        /// config's upstream/SNI pair changes.
         pub http: reqwest::Client,
-        /// ATG_DRAIN_ON_CANCEL (default false): after the client
-        /// disconnects mid-response, keep consuming the upstream stream to
-        /// its natural end (sub2api-class upstreams bill the completion
-        /// regardless — the trace gets the full content + usage). false =
-        /// abort the upstream immediately (no wasted tokens).
-        pub drain_on_cancel: bool,
-        /// ATG_DRAIN_TIMEOUT_SECS (default 60): the drain window; an
-        /// upstream stream that has not finished within it is abandoned
-        /// (drain_timed_out marker, partial content recorded).
-        pub drain_timeout: Duration,
-        /// ATG_MAX_WS_FRAME_PAYLOAD (bytes; 0 = unlimited, the default): the
-        /// optional single-frame refusal cap for the WS frame parser.
-        pub ws_max_frame_payload: usize,
-        /// ATG_TRACE_MODE=off: capture and parsing skipped — records degrade
+        /// Cached pinned relay client (BLOCK-A): (SNI name, pinned address)
+        /// → client built with the matching resolve entry. Rebuilt when the
+        /// config's upstream/sni change (hot keys); None while no pinning
+        /// applies.
+        pub pinned_relay:
+            parking_lot::RwLock<Option<((String, std::net::SocketAddr), reqwest::Client)>>,
+        /// Capture mode (structural, compile-time domain): trace.mode=off
+        /// (bench builds only) skips capture and parsing — records degrade
         /// to timing/error/cancel shells, the body path is a near-pure
-        /// forward (low-cost tap, v0.3.11).
+        /// forward (low-cost tap, v0.3.11). Pinned at startup; a reload
+        /// reports a change as restart_required.
         pub trace_off: bool,
+        /// The running listen address (structural, pinned at startup —
+        /// the structural self-attestation for /__atg/config).
+        pub listen: String,
+        /// Hot knobs whose CURRENT values ride atomics re-seeded by the
+        /// reload path (the per-request reads come from the ctx snapshot;
+        /// these are the values the components apply without a snapshot
+        /// round-trip).
+        pub cap: Arc<crate::trace::capture::CaptureCap>,
+        pub stitcher: Arc<crate::trace::prefix::PrefixStitcher>,
         pub store: TraceStore,
-        pub stitcher: crate::trace::prefix::PrefixStitcher,
-        pub cap: crate::trace::capture::CaptureCap,
         pub exporter: crate::trace::export::Exporter,
         /// Frames that failed JSON parse during SSE unpack (observability;
         /// fail-open — never blocks).
@@ -178,7 +185,10 @@ pub mod gateway_app {
         fn mark_upstream_head(&self, ctx: &mut Ctx) {
             if ctx.upstream_head_ns.is_none() {
                 ctx.upstream_head_ns = Some(now_ns());
-                let _ = self.awaiting_upstream.fetch_update(
+                // `try_update` is the current spelling: CI tracks `rust:1`
+                // (newer than the local devshell), where `fetch_update` is
+                // deprecated and `-D warnings` makes it fatal.
+                let _ = self.awaiting_upstream.try_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
                     |v| Some(v.saturating_sub(1)),
@@ -195,13 +205,13 @@ pub mod gateway_app {
             use std::sync::atomic::Ordering::Relaxed;
             let _ = self
                 .inflight
-                .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1)));
+                .try_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1)));
             if ctx.upstream_head_ns.is_none() {
                 // Upstream headers never arrived (connect failure, client
                 // abort during upload, ...): release the awaiting slot here.
                 let _ = self
                     .awaiting_upstream
-                    .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1)));
+                    .try_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1)));
             }
             if !identified {
                 return;
@@ -229,6 +239,7 @@ pub mod gateway_app {
         /// instance, the labels attest what was scraped).
         fn render_metrics(&self) -> String {
             use std::sync::atomic::Ordering::Relaxed;
+            let snap = self.config_store.snapshot();
             let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
             let (store_wait_ns, store_hold_ns) = self.store.lock_ns_totals();
             let mut out = String::with_capacity(4096);
@@ -243,9 +254,7 @@ pub mod gateway_app {
             out.push_str("\",trace_mode=\"");
             out.push_str(trace_mode_label(self.trace_off));
             out.push_str("\",trace_tag=\"");
-            out.push_str(&crate::metrics::escape_label_value(
-                atg_model::langfuse_trace_tag(),
-            ));
+            out.push_str(&crate::metrics::escape_label_value(&snap.cfg.trace.tag));
             out.push_str("\"} 1\n");
             let gauges: [(&str, &str, u64); 11] = [
                 (
@@ -280,17 +289,17 @@ pub mod gateway_app {
                 ),
                 (
                     "atg_export_inflight",
-                    "OTLP export batches currently in the flush pool (gauge; bounded by ATG_EXPORT_MAX_INFLIGHT).",
+                    "OTLP export batches currently in the flush pool (gauge; bounded by export.max_inflight).",
                     self.exporter.health.inflight(),
                 ),
                 (
                     "atg_export_max_inflight",
-                    "Effective flush-pool width (ATG_EXPORT_MAX_INFLIGHT; 0 = export disabled).",
+                    "Effective flush-pool width (export.max_inflight; 0 = export disabled).",
                     self.exporter.max_inflight() as u64,
                 ),
                 (
                     "atg_export_workers",
-                    "Effective export-runtime worker threads (ATG_EXPORT_WORKERS; 0 = export disabled).",
+                    "Effective export-runtime worker threads (export.workers; structural, fixed at startup).",
                     self.exporter.workers() as u64,
                 ),
                 (
@@ -431,7 +440,7 @@ pub mod gateway_app {
                 crate::engine::drain_feed(&mut acc, d, &mut ctx.drain_tail, &ctx.resp_buf);
                 ctx.drain_acc = Some(acc);
             }
-            tokio::time::Instant::now() + self.drain_timeout
+            tokio::time::Instant::now() + Duration::from_secs(ctx.snap.cfg.drain.timeout_secs)
         }
 
         /// Bounded raw capture during drain (v0.3.8 helper): bytes stop at
@@ -445,6 +454,54 @@ pub mod gateway_app {
             let take = room.min(bytes.len());
             ctx.resp_buf.extend_from_slice(&bytes[..take]);
             ctx.drain_overflow += (bytes.len() - take) as u64;
+        }
+
+        /// The relay target for one request, computed from its snapshot:
+        /// (URL base, SNI Host override, HTTP client). On https with an SNI
+        /// override the URL host IS the SNI name and the client carries the
+        /// resolve() pin to the real address (BLOCK-A) — the pinned client
+        /// is cached and rebuilt only when the (upstream, sni) pair changes.
+        fn relay_target(&self, ctx: &Ctx) -> (String, Option<String>, reqwest::Client) {
+            let cfg = &ctx.snap.cfg;
+            let sni = cfg.server.sni.trim();
+            let sni = if sni.is_empty() { None } else { Some(sni) };
+            let (scheme, host, port, path) = parse_upstream(&cfg.server.upstream);
+            match sni_resolve_entry(&cfg.server.upstream, sni) {
+                Some((name, addr)) => {
+                    let base = format!("{scheme}://{name}:{port}{path}");
+                    let client = {
+                        let cached = self.pinned_relay.read();
+                        match cached.as_ref() {
+                            Some(((k_name, k_addr), client))
+                                if *k_name == name && *k_addr == addr =>
+                            {
+                                client.clone()
+                            }
+                            _ => {
+                                drop(cached);
+                                let built = reqwest::Client::builder()
+                                    // BLOCK-B (RustGate §H): ambient
+                                    // HTTPS_PROXY/HTTP_PROXY env vars would
+                                    // otherwise silently hijack the LLM data
+                                    // path (same reasoning as the exporter's
+                                    // client).
+                                    .no_proxy()
+                                    .resolve(&name, addr)
+                                    .build()
+                                    .unwrap_or_else(|_| self.http.clone());
+                                *self.pinned_relay.write() =
+                                    Some(((name.clone(), addr), built.clone()));
+                                built
+                            }
+                        }
+                    };
+                    (base, Some(name), client)
+                }
+                None => {
+                    let base = format!("{scheme}://{host}:{port}{path}");
+                    (base, sni.map(str::to_string), self.http.clone())
+                }
+            }
         }
 
         /// Owned request relay (v0.3.6): forwards one LLM API request to
@@ -498,13 +555,16 @@ pub mod gateway_app {
                 .path_and_query()
                 .map(|pq| pq.as_str().to_string())
                 .unwrap_or_else(|| req_head.uri.path().to_string());
-            // The URL base carries the SNI name on https (BLOCK-A: the
-            // client's resolve() entry pins it to the real address); on
-            // http it is the upstream host and this Host header carries the
-            // ATG_SNI override — pump parity.
-            let url = format!("{}{}", self.upstream_base, path_and_query);
-            let host = std::env::var("ATG_SNI").ok().filter(|s| !s.is_empty());
-            let mut out = self.http.request(method, &url);
+            // The URL base and the Host header are computed from THIS
+            // request's snapshot (hot keys server.upstream / server.sni —
+            // a mid-process reload redirects new requests without a
+            // restart). The URL base carries the SNI name on https (BLOCK-A:
+            // the pinned client's resolve() entry ties it to the real
+            // address); on http it is the upstream host and this Host
+            // header carries the SNI override — pump parity.
+            let (url, host, client) = self.relay_target(ctx);
+            let url = format!("{url}{path_and_query}");
+            let mut out = client.request(method, &url);
             if let Some(sni_host) = host {
                 out = out.header("host", sni_host);
             }
@@ -578,7 +638,7 @@ pub mod gateway_app {
                 let path = session.req_header().uri.path();
                 eprintln!("ATG: client cancelled mid-turn (path={path}) — head write failed: {e}");
                 ctx.client_dead = true;
-                if !self.drain_on_cancel {
+                if !ctx.snap.cfg.drain.on_cancel {
                     ctx.relay_done = true;
                     return;
                 }
@@ -626,7 +686,7 @@ pub mod gateway_app {
                                         "ATG: client cancelled mid-turn (path={path}) — downstream gone"
                                     );
                                     ctx.client_dead = true;
-                                    if !self.drain_on_cancel {
+                                    if !ctx.snap.cfg.drain.on_cancel {
                                         break; // abort: dropping `resp` closes the upstream
                                     }
                                     drain_deadline = Some(self.begin_drain(ctx, d));
@@ -672,12 +732,12 @@ pub mod gateway_app {
                             "ATG: client cancelled mid-turn (path={path}) — downstream write failed: {e}"
                         );
                         ctx.client_dead = true;
-                        if !self.drain_on_cancel {
+                        if !ctx.snap.cfg.drain.on_cancel {
                             break; // abort: dropping `resp` closes the upstream
                         }
                         drain_deadline = Some(self.begin_drain(ctx, d));
                     }
-                } else if self.drain_on_cancel {
+                } else if ctx.snap.cfg.drain.on_cancel {
                     // Draining: forward nothing, capture bounded, parse
                     // incrementally so final_output/usage survive the cap.
                     self.drain_capture(ctx, &bytes);
@@ -712,17 +772,12 @@ pub mod gateway_app {
     }
 
     /// Salted API-credential fingerprint: sha256(salt || key), first 16
-    /// hex chars. The salt defaults to a compile-time value and can be
-    /// overridden via ATG_APIKEY_SALT (rotating the salt invalidates
-    /// cross-version correlation but never exposes the key). The raw key
-    /// is dropped immediately — no log, record or export path ever sees
-    /// the plaintext.
-    pub fn api_key_fp(key: &str) -> String {
+    /// hex chars. The salt comes from the config file (`api_key.salt`,
+    /// passed explicitly — rotating it invalidates cross-version
+    /// correlation but never exposes the key). The raw key is dropped
+    /// immediately — no log, record or export path ever sees the plaintext.
+    pub fn api_key_fp(key: &str, salt: &str) -> String {
         use sha2::Digest;
-        let salt = std::env::var("ATG_APIKEY_SALT")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "atg-apikey-fp-salt-v1".to_string());
         let mut hasher = sha2::Sha256::new();
         hasher.update(salt.as_bytes());
         hasher.update(key.as_bytes());
@@ -733,7 +788,11 @@ pub mod gateway_app {
     /// anthropic.messages -> x-api-key header; openai.* -> Authorization
     /// Bearer. None when the request carried no credential (internal
     /// probes) — no error, no field.
-    fn request_api_key_fp(protocol: &str, header_get: &dyn Fn(&str) -> Option<String>) -> String {
+    fn request_api_key_fp(
+        protocol: &str,
+        header_get: &dyn Fn(&str) -> Option<String>,
+        salt: &str,
+    ) -> String {
         let key = if protocol == "anthropic.messages" {
             header_get("x-api-key")
         } else {
@@ -745,7 +804,7 @@ pub mod gateway_app {
             })
         };
         match key {
-            Some(k) if !k.trim().is_empty() => api_key_fp(k.trim()),
+            Some(k) if !k.trim().is_empty() => api_key_fp(k.trim(), salt),
             _ => String::new(),
         }
     }
@@ -790,80 +849,6 @@ pub mod gateway_app {
             })
     }
 
-    /// Default pingora worker-thread count.
-    ///
-    /// This is pingora's own `ServerConf::default().threads` and the
-    /// behaviour of every release up to and including v0.3.11's predecessor:
-    /// ONE worker runs the accept loop and every stream's duplex pumps.
-    ///
-    /// Raising it is NOT a free win and must not be a silent upgrade
-    /// (ATG#1 Specification 5): an 8-worker build measured faster at the ATG
-    /// hop in isolation while client-observed TTFB p50 in a multi-hop
-    /// deployment regressed by roughly an order of magnitude, so the
-    /// multi-worker shape is an explicit opt-in —
-    /// `ATG_WORKER_THREADS=<n>` — with the effective value self-attested by
-    /// the startup line and `/__atg/health`.
-    const DEFAULT_WORKER_THREADS: usize = 1;
-
-    /// ATG_WORKER_THREADS parse: absent → `DEFAULT_WORKER_THREADS`;
-    /// a positive integer is honoured; unparsable, empty or 0 → the default
-    /// plus a `true` fallback flag so the caller can say so once at startup
-    /// (a silently ignored knob is how a whole measurement matrix once ran a
-    /// thread count nobody asked for).
-    fn parse_worker_threads(env: Option<&str>) -> (usize, bool) {
-        match env {
-            None => (DEFAULT_WORKER_THREADS, false),
-            Some(v) => match v.trim().parse::<usize>() {
-                Ok(n) if n > 0 => (n, false),
-                _ => (DEFAULT_WORKER_THREADS, true),
-            },
-        }
-    }
-
-    /// ATG_MAX_WS_FRAME_PAYLOAD parse (bytes): absent → (0, false) — the
-    /// default is UNLIMITED; unparsable or 0 → fall back to 0 with the
-    /// startup-log flag; a positive value enables the refusal cap.
-    fn parse_ws_frame_cap(env: Option<&str>) -> (usize, bool) {
-        match env {
-            None => (0, false),
-            Some(v) => match v.trim().parse::<usize>() {
-                Ok(n) if n > 0 => (n, false),
-                _ => (0, true),
-            },
-        }
-    }
-
-    /// Effective capture mode (v0.3.12, ATG issue #3): capture-off is a
-    /// BENCH-ONLY capability. This is the production arm — compiled without
-    /// the `bench-trace-mode` feature and it does NOT read `ATG_TRACE_MODE`
-    /// at all: no env access, no parse, the variable's name does not occur
-    /// on the production code path (grep-verifiable). Capture-off numbers
-    /// describe a configuration that is never deployed; making the knob
-    /// unrepresentable in production is the fix for that.
-    #[cfg(not(feature = "bench-trace-mode"))]
-    fn trace_off_from_env() -> bool {
-        false
-    }
-
-    /// Effective capture mode, bench arm (`cargo build --features
-    /// bench-trace-mode`): `ATG_TRACE_MODE=off` (case/space tolerant)
-    /// disables capture and parsing — records degrade to timing/error/cancel
-    /// shells and the body path becomes a near-pure forward (functional
-    /// debug isolation only; never cite its numbers). Any other value
-    /// (including absent) = full tracing.
-    #[cfg(feature = "bench-trace-mode")]
-    fn trace_off_from_env() -> bool {
-        parse_trace_mode(std::env::var("ATG_TRACE_MODE").ok().as_deref())
-    }
-
-    /// `ATG_TRACE_MODE` parse — compiled only into bench builds (the default
-    /// build has no call site, so this function does not exist there).
-    #[cfg(feature = "bench-trace-mode")]
-    fn parse_trace_mode(env: Option<&str>) -> bool {
-        env.map(|v| v.trim().eq_ignore_ascii_case("off"))
-            .unwrap_or(false)
-    }
-
     /// Effective capture mode as self-attested by health, metrics and the
     /// startup line. The production build can only ever report `full`.
     fn trace_mode_label(trace_off: bool) -> &'static str {
@@ -887,44 +872,6 @@ pub mod gateway_app {
     #[cfg(not(feature = "bench-trace-mode"))]
     fn variant_label() -> &'static str {
         "prod"
-    }
-
-    /// Parsed ATG_UPSTREAM: (scheme, host, port, base_path). "host:port"
-    /// defaults to http with the port present; scheme prefixes override; a
-    /// missing port defaults to 80/443 by scheme. An optional base path is
-    /// preserved (leading '/', trailing slashes trimmed) — the relay's
-    /// earlier construction only trimmed trailing slashes, and base-path
-    /// upstreams must keep resolving to the same URLs.
-    fn parse_upstream(upstream: &str) -> (String, String, u16, String) {
-        let (scheme, rest) = match upstream.split_once("://") {
-            Some((s, r)) => (s.to_ascii_lowercase(), r),
-            None => ("http".to_string(), upstream),
-        };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], rest[i..].trim_end_matches('/').to_string()),
-            None => (rest, String::new()),
-        };
-        let default_port = if scheme == "https" { 443 } else { 80 };
-        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-            // Bracketed IPv6: [::1] or [::1]:8443.
-            match v6.split_once(']') {
-                Some((h, tail)) => (
-                    h,
-                    tail.strip_prefix(':')
-                        .and_then(|p| p.parse::<u16>().ok())
-                        .unwrap_or(default_port),
-                ),
-                None => (v6, default_port),
-            }
-        } else {
-            match authority.rsplit_once(':') {
-                Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
-                    (h, p.parse::<u16>().unwrap_or(default_port))
-                }
-                _ => (authority, default_port),
-            }
-        };
-        (scheme, host.to_string(), port, path)
     }
 
     /// BLOCK-A (RustGate §H): the relay's TLS SNI is the URL host — reqwest
@@ -956,6 +903,10 @@ pub mod gateway_app {
     }
 
     pub struct Ctx {
+        /// The request's config snapshot — taken ONCE in `new_ctx` and read
+        /// for the request's whole lifetime (hot values never straddle a
+        /// reload inside one request).
+        pub snap: Arc<crate::config_store::Snapshot>,
         pub req_buf: Vec<u8>,
         pub resp_buf: Vec<u8>,
         pub resp_content_type: String,
@@ -1022,17 +973,21 @@ pub mod gateway_app {
             // request, and logging exactly once at its end — the bracket the
             // inflight/awaiting gauges rely on.
             self.enter_request();
+            // THE config read for this request: one snapshot, carried in
+            // ctx and read by every hook below (hot values are consistent
+            // within the request even across a concurrent reload).
+            let snap = self.config_store.snapshot();
+            let ws_cap = snap.cfg.server.max_ws_frame_payload.min(usize::MAX as u64) as usize;
             Ctx {
+                snap,
                 req_buf: Vec::new(),
                 resp_buf: Vec::new(),
                 resp_content_type: String::new(),
                 ws_client_parser: atg_protocol::openai::live::WsFrameParser::with_max_payload(
-                    true,
-                    self.ws_max_frame_payload,
+                    true, ws_cap,
                 ),
                 ws_server_parser: atg_protocol::openai::live::WsFrameParser::with_max_payload(
-                    false,
-                    self.ws_max_frame_payload,
+                    false, ws_cap,
                 ),
                 ws_turn: atg_protocol::openai::live::WsTurnState::default(),
                 start_ns: now_ns(),
@@ -1055,40 +1010,54 @@ pub mod gateway_app {
         async fn upstream_peer(
             &self,
             _session: &mut Session,
-            _ctx: &mut Self::CTX,
+            ctx: &mut Self::CTX,
         ) -> Result<Box<HttpPeer>> {
-            let tls = self.upstream.starts_with("https://");
-            let host = self
-                .upstream
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .to_string();
-            // ATG_SNI overrides SNI so an upstream given as a bare IP can still
-            // complete TLS with the correct hostname.
-            let sni = std::env::var("ATG_SNI")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| host.split(':').next().unwrap_or("").to_string());
-            Ok(Box::new(HttpPeer::new(host, tls, sni)))
+            // Per-request snapshot (hot keys server.upstream / server.sni).
+            let cfg = &ctx.snap.cfg;
+            let (scheme, host, port, _) = parse_upstream(&cfg.server.upstream);
+            let tls = scheme == "https";
+            // server.sni overrides SNI so an upstream given as a bare IP can
+            // still complete TLS with the correct hostname; empty = the
+            // upstream host itself.
+            let sni = match cfg.server.sni.trim() {
+                "" => host.clone(),
+                s => s.to_string(),
+            };
+            let addr = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            Ok(Box::new(HttpPeer::new(addr, tls, sni)))
         }
 
         // Rewrite the Host header so the real upstream routes the request
-        // correctly. Uses ATG_SNI when set, else the upstream host.
+        // correctly. Uses server.sni when set, else the upstream host.
         async fn upstream_request_filter(
             &self,
             _session: &mut Session,
             upstream_request: &mut pingora::http::RequestHeader,
-            _ctx: &mut Self::CTX,
+            ctx: &mut Self::CTX,
         ) -> Result<()> {
-            let default_host = self
-                .upstream
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .to_string();
-            let host = std::env::var("ATG_SNI")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(default_host);
+            let cfg = &ctx.snap.cfg;
+            let host = match cfg.server.sni.trim() {
+                "" => {
+                    // The upstream authority AS WRITTEN (scheme stripped,
+                    // base path dropped): an implicit port stays implicit
+                    // and an explicit one stays explicit — byte-identical to
+                    // the pre-v0.4 Host header for every deployed upstream.
+                    cfg.server
+                        .upstream
+                        .trim()
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .split('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                }
+                s => s.to_string(),
+            };
             let _ = upstream_request.insert_header(http::header::HOST, host);
             Ok(())
         }
@@ -1136,6 +1105,7 @@ pub mod gateway_app {
                 return Ok(true);
             }
             if session.req_header().uri.path() == "/__atg/health" {
+                let snap = self.config_store.snapshot();
                 let (exported, failed, dropped, panicked) = self.exporter.health.snapshot();
                 let (store_wait_ns, store_hold_ns) = self.store.lock_ns_totals();
                 let failed_frames = self
@@ -1206,7 +1176,48 @@ pub mod gateway_app {
                     "awaiting_upstream": self
                         .awaiting_upstream
                         .load(std::sync::atomic::Ordering::Relaxed),
-                    "worker_threads": self.worker_threads
+                    "worker_threads": self.worker_threads,
+                    // Config provenance (v0.4.0, ADDITIVE — only new keys):
+                    // which file is live, what generation, what still needs a
+                    // restart, and how many reloads failed.
+                    "config_path": snap.path.display().to_string(),
+                    "config_sha256": hex::encode(snap.sha256),
+                    "config_generation": snap.generation,
+                    "config_loaded_at_ms": u64::try_from(snap.loaded_at_ms).unwrap_or(u64::MAX),
+                    "config_restart_required": snap.restart_required,
+                    "config_reload_failures": self.config_store.reload_failures(),
+                })
+                .to_string();
+                let mut resp = ResponseHeader::build(200, None)?;
+                resp.insert_header("content-type", "application/json")?;
+                resp.insert_header("content-length", body.len().to_string())?;
+                session.write_response_header(Box::new(resp), false).await?;
+                session
+                    .write_response_body(Some(Bytes::from(body)), true)
+                    .await?;
+                return Ok(true);
+            }
+            if session.req_header().uri.path() == "/__atg/config" {
+                // Read-only config view (v0.4.0): file provenance, the
+                // effective values (salt redacted to "***"), and the
+                // structural RUNNING values vs the file.
+                let snap = self.config_store.snapshot();
+                let body = serde_json::json!({
+                    "config": {
+                        "path": snap.path.display().to_string(),
+                        "sha256": hex::encode(snap.sha256),
+                        "generation": snap.generation,
+                        "loaded_at_ms": u64::try_from(snap.loaded_at_ms).unwrap_or(u64::MAX),
+                        "restart_required": snap.restart_required,
+                        "reload_failures": self.config_store.reload_failures(),
+                    },
+                    "effective": crate::config::redacted_json(&snap.cfg),
+                    "structural": {
+                        "server.listen": self.listen,
+                        "server.worker_threads": self.worker_threads,
+                        "export.workers": self.exporter.workers(),
+                        "trace.mode": trace_mode_label(self.trace_off),
+                    }
                 })
                 .to_string();
                 let mut resp = ResponseHeader::build(200, None)?;
@@ -1235,7 +1246,7 @@ pub mod gateway_app {
                 .get(http::header::UPGRADE)
                 .is_some()
                 || session.req_header().method == http::Method::CONNECT;
-            if self.drain_on_cancel && !is_ws_upgrade {
+            if ctx.snap.cfg.drain.on_cancel && !is_ws_upgrade {
                 if let Some(matched) = detect_path_fail_open(path) {
                     self.relay(session, ctx, matched.descriptor).await;
                     return Ok(true);
@@ -1268,7 +1279,7 @@ pub mod gateway_app {
                         ctx.ws_client_parser =
                             atg_protocol::openai::live::WsFrameParser::with_max_payload(
                                 true,
-                                self.ws_max_frame_payload,
+                                ctx.snap.cfg.server.max_ws_frame_payload as usize,
                             );
                         ctx.ws_turn = atg_protocol::openai::live::WsTurnState::default();
                     }
@@ -1328,6 +1339,7 @@ pub mod gateway_app {
                                 record.start_ns = ctx.start_ns;
                                 record.end_ns = ctx.end_ns;
                                 record.completion_start_ns = ctx.first_output_ns.take();
+                                record.trace_tag = ctx.snap.cfg.trace.tag.clone();
                                 self.push_record(record);
                             }
                         }
@@ -1339,7 +1351,7 @@ pub mod gateway_app {
                         ctx.ws_server_parser =
                             atg_protocol::openai::live::WsFrameParser::with_max_payload(
                                 false,
-                                self.ws_max_frame_payload,
+                                ctx.snap.cfg.server.max_ws_frame_payload as usize,
                             );
                         ctx.ws_turn = atg_protocol::openai::live::WsTurnState::default();
                     }
@@ -1443,7 +1455,7 @@ pub mod gateway_app {
                 ctx.end_ns = now_ns();
                 self.turns_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.push_record(atg_model::TurnRecord {
+                let mut shell = atg_model::TurnRecord {
                     protocol: protocol.to_string(),
                     error: http_error,
                     cancelled: client_cancelled,
@@ -1452,7 +1464,9 @@ pub mod gateway_app {
                     end_ns: ctx.end_ns,
                     completion_start_ns: ctx.first_output_ns,
                     ..Default::default()
-                });
+                };
+                shell.trace_tag = ctx.snap.cfg.trace.tag.clone();
+                self.push_record(shell);
                 return;
             }
             // Fail-open record assembly (v0.3.8): everything below is
@@ -1496,7 +1510,8 @@ pub mod gateway_app {
                     .unwrap_or_default();
                 // Salted API-credential fingerprint (correlation without the
                 // key; plaintext never enters any downstream path).
-                let api_key_fp = request_api_key_fp(protocol, &header_get);
+                let api_key_fp =
+                    request_api_key_fp(protocol, &header_get, ctx.snap.cfg.api_key.salt());
                 // Request-side facts: ONE descriptor lookup + ONE pass over
                 // the parsed body (F6 single entry; the old scattered
                 // detect_by_name calls and the messages re-parse are gone).
@@ -1633,6 +1648,7 @@ pub mod gateway_app {
                         error: error.or(http_error),
                         cancelled: client_cancelled,
                         drain_timed_out: ctx.drain_timed_out,
+                        trace_tag: ctx.snap.cfg.trace.tag.clone(),
                     });
                     return;
                 }
@@ -1652,6 +1668,7 @@ pub mod gateway_app {
                         record.error = record.error.take().or(http_error);
                         record.cancelled = client_cancelled;
                         record.drain_timed_out = ctx.drain_timed_out;
+                        record.trace_tag = ctx.snap.cfg.trace.tag.clone();
                         record.raw_request = raw_request;
                         record.raw_response = raw_response;
                         ctx.end_ns = now_ns();
@@ -1687,6 +1704,7 @@ pub mod gateway_app {
                             end_ns: ctx.end_ns,
                             cancelled: client_cancelled,
                             drain_timed_out: ctx.drain_timed_out,
+                            trace_tag: ctx.snap.cfg.trace.tag.clone(),
                             model_name: tf
                                 .as_ref()
                                 .map(|f| f.model_name.clone())
@@ -1764,93 +1782,112 @@ pub mod gateway_app {
         }
     }
 
-    /// Start the gateway on `listen`, forwarding to `upstream`. Blocks.
-    /// `upstream` accepts "host:port", "http://host:port" or "https://host:port".
-    pub fn run(listen: &str, upstream: &str) {
-        // ATG_TRACE_TAG (v0.3.10): the line:<source> trace tag. An empty
-        // value falls back to the default — warn so a misconfiguration is
-        // never silent (the resolution itself lives in atg-model, read
-        // once).
-        if let Some(v) = std::env::var("ATG_TRACE_TAG").ok().as_deref() {
-            if v.trim().is_empty() {
-                eprintln!(
-                    "ATG: ATG_TRACE_TAG is empty — falling back to the default '{}'",
-                    atg_model::LANGFUSE_TRACE_TAG
-                );
+    /// The component handles the reload path updates in place after a
+    /// successful `store.reload()` — shared Arcs / atomics, so no per-request
+    /// snapshot plumbing is involved. Per-request reads come from the ctx
+    /// snapshot; these are the component-owned currents the batcher, the
+    /// stitcher and the capture bound consult without a snapshot read.
+    #[derive(Clone)]
+    struct HotApply {
+        cap: Arc<crate::trace::capture::CaptureCap>,
+        store: TraceStore,
+        stitcher: Arc<crate::trace::prefix::PrefixStitcher>,
+        exporter: crate::trace::export::Exporter,
+    }
+
+    impl HotApply {
+        fn apply(&self, cfg: &crate::config::Config) {
+            self.cap
+                .set_max(cfg.capture.max_bytes.min(usize::MAX as u64) as usize);
+            self.store
+                .set_caps(cfg.store.max_records, cfg.store.max_bytes);
+            self.stitcher
+                .set_limits(cfg.stitch.capacity, cfg.stitch.ttl_ms);
+            self.exporter
+                .apply_target(&cfg.export.otlp_endpoint, cfg.export.max_inflight as usize);
+        }
+    }
+
+    /// The SIGHUP background service: re-reads the config file in place
+    /// (transactionally — a failed reload keeps serving the old values and
+    /// counts the failure). The hot-apply itself rides the store's
+    /// `on_reload` hook (registered in `run()`), so the swap and the
+    /// component re-seed happen atomically inside `reload()` — for SIGHUP
+    /// and for in-process reload callers alike.
+    struct ConfigReloadService {
+        store: Arc<crate::config_store::ConfigStore>,
+    }
+
+    #[async_trait]
+    impl pingora::services::background::BackgroundService for ConfigReloadService {
+        async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut hup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("ATG: SIGHUP listener unavailable — config hot reload disabled: {e}");
+                    return;
+                }
+            };
+            loop {
+                tokio::select! {
+                    _ = hup.recv() => {
+                        // The audit line (generation, applied keys,
+                        // restart_required) is emitted by reload(), which
+                        // also hot-applies via the registered hook.
+                        let _ = self.store.reload();
+                    }
+                    _ = shutdown.changed() => return,
+                }
             }
         }
-        // Drain switch (v0.3.6): per-upstream client-disconnect policy.
-        // ATG_DRAIN_ON_CANCEL: truthy (1/true/yes/on) = keep consuming the
-        // upstream stream after the client disconnects; default = abort.
-        let drain_on_cancel = std::env::var("ATG_DRAIN_ON_CANCEL")
-            .ok()
-            .map(|v| {
-                matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false);
-        // ATG_DRAIN_TIMEOUT_SECS: drain window (default 60s).
-        let drain_timeout = std::env::var("ATG_DRAIN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(60);
-        let sni = std::env::var("ATG_SNI").ok().filter(|s| !s.is_empty());
-        // BLOCK-A (RustGate §H): https bare-IP upstreams — URLs carry the
-        // SNI name, the resolve entry pins it to the real address.
-        let upstream_base = match sni_resolve_entry(upstream, sni.as_deref()) {
-            Some((name, _addr)) => {
-                let (scheme, _, port, path) = parse_upstream(upstream);
-                format!("{scheme}://{name}:{port}{path}")
-            }
-            None => {
-                let (scheme, host, port, path) = parse_upstream(upstream);
-                format!("{scheme}://{host}:{port}{path}")
-            }
-        };
-        let mut builder = reqwest::Client::builder()
+    }
+
+    /// Start the gateway from a loaded config store. Blocks (pingora's
+    /// `run_forever`). Structural values (listen, worker threads, capture
+    /// mode, export workers) are pinned here; every hot value is read per
+    /// request from the store's snapshot, and SIGHUP (the
+    /// `config-reload` background service) re-reads the file in place.
+    pub fn run(store: Arc<crate::config_store::ConfigStore>) {
+        let snap = store.snapshot();
+        let cfg = &snap.cfg;
+        let listen = cfg.server.listen.clone();
+        // Worker-pool size (ATG#1): a structural knob, ≥ 1 by validation.
+        // Raising it is NOT a free win and must not be a silent upgrade
+        // (ATG#1 Specification 5): the 8-worker shape regressed multi-hop
+        // client-observed TTFB p50 by ~10x while being faster at the ATG hop
+        // alone. The effective value is self-attested below and in
+        // /__atg/health.
+        let worker_threads = cfg.server.worker_threads as usize;
+        // Capture mode (structural): prod builds only ever validate to
+        // "full"; bench builds may run "off" (near-pure forward, records
+        // degrade to shells).
+        let trace_off = cfg.trace.mode == "off";
+        let http = match reqwest::Client::builder()
             // BLOCK-B (RustGate §H): ambient HTTPS_PROXY/HTTP_PROXY env vars
             // would otherwise silently hijack the LLM data path — same
             // reasoning as the exporter's client (export.rs, explicit
-            // no_proxy precedent).
-            .no_proxy();
-        if let Some((name, addr)) = sni_resolve_entry(upstream, sni.as_deref()) {
-            builder = builder.resolve(&name, addr);
-        }
-        let http = match builder.build() {
+            // no_proxy precedent). The SNI resolve pins are per-request
+            // (cached in Gateway::pinned_relay), so the base client carries
+            // none.
+            .no_proxy()
+            .build()
+        {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("agent-trace-gateway: upstream HTTP client init failed: {e}");
                 std::process::exit(2);
             }
         };
-        let (ws_max_frame_payload, ws_cap_fallback) =
-            parse_ws_frame_cap(std::env::var("ATG_MAX_WS_FRAME_PAYLOAD").ok().as_deref());
-        if ws_cap_fallback {
-            eprintln!("ATG: ATG_MAX_WS_FRAME_PAYLOAD invalid — frame cap disabled (unlimited)");
-        }
-        let trace_off = trace_off_from_env();
-        // Worker-pool size (ATG#1). Read once at startup; the effective
-        // value is self-attested below and in /__atg/health so a deployment
-        // (or a measurement arm) can prove which shape it ran.
-        let (worker_threads, worker_threads_fallback) =
-            parse_worker_threads(std::env::var("ATG_WORKER_THREADS").ok().as_deref());
-        if worker_threads_fallback {
-            eprintln!(
-                "ATG: ATG_WORKER_THREADS invalid — using the default {DEFAULT_WORKER_THREADS} \
-                 worker thread(s); set a positive integer to override"
-            );
-        }
         // PANIC-AUDIT v0.3.8: process startup — a pingora bootstrap failure
         // is fatal by design and must abort the process (class ii).
         #[allow(clippy::unwrap_used)]
         let mut server = Server::new(Some(Opt::default())).unwrap();
         // pingora's ServerConf default is threads: 1 — the whole proxy
         // (accept plus every stream's duplex pumps) runs on one core. The
-        // v0.3.11 hot-fix force-set 8; that is now the opt-in value of
-        // ATG_WORKER_THREADS, not the default (ATG#1 Specification 5).
+        // v0.3.11 hot-fix force-set 8; the thread count is now the
+        // structural config key server.worker_threads (ATG#1 Specification
+        // 5: the multi-worker shape is an explicit opt-in).
         let worker_threads = match Arc::get_mut(&mut server.configuration) {
             Some(conf) => {
                 conf.threads = worker_threads;
@@ -1865,32 +1902,51 @@ pub mod gateway_app {
                 1
             }
         };
-        // Self-attestation line (v0.3.12, ATG issues #2/#3): one line at
-        // startup that names the binary (version), the build variant, the
-        // EFFECTIVE capture mode, the runtime shape and the forwarding
-        // target — a deployment proves its configuration from logs alone.
-        // `trace_mode` reports what the binary does, not what the env says:
-        // in a production build ATG_TRACE_MODE is not read, so a
-        // misconfigured deployment shows `full` here
-        // (and in /__atg/health, /__atg/metrics).
+        // Self-attestation line (v0.3.12, ATG issues #2/#3, extended by the
+        // v0.4.0 config contract): one line at startup that names the binary
+        // (version), the build variant, the EFFECTIVE capture mode, the
+        // runtime shape and the loaded FILE with its digest and generation —
+        // a deployment proves its configuration from logs alone.
         eprintln!(
-            "ATG: version={} variant={} trace_mode={} worker_threads={} drain_on_cancel={} upstream={}",
+            "ATG: version={} variant={} trace_mode={} worker_threads={} config={} sha256={} generation={} upstream={}",
             env!("CARGO_PKG_VERSION"),
             variant_label(),
             trace_mode_label(trace_off),
             worker_threads,
-            drain_on_cancel,
-            upstream
+            snap.path.display(),
+            hex::encode(snap.sha256),
+            snap.generation,
+            cfg.server.upstream
         );
         server.bootstrap();
+        let trace_store = TraceStore::with_caps(
+            cfg.store.max_records.min(usize::MAX as u64) as usize,
+            cfg.store.max_bytes.min(usize::MAX as u64) as usize,
+        );
+        let stitcher = Arc::new(crate::trace::prefix::PrefixStitcher::with_limits(
+            cfg.stitch.capacity,
+            cfg.stitch.ttl_ms,
+        ));
+        let cap = Arc::new(crate::trace::capture::CaptureCap::new(
+            cfg.capture.max_bytes.min(usize::MAX as u64) as usize,
+        ));
+        let exporter = crate::trace::export::Exporter::start(
+            &cfg.export.otlp_endpoint,
+            cfg.export.max_inflight as usize,
+            cfg.export.workers as usize,
+        );
+        let hot = HotApply {
+            cap: cap.clone(),
+            store: trace_store.clone(),
+            stitcher: stitcher.clone(),
+            exporter: exporter.clone(),
+        };
         let gateway = Gateway {
-            upstream: upstream.to_string(),
-            upstream_base,
-            ws_max_frame_payload,
+            config_store: store.clone(),
             trace_off,
+            listen: listen.clone(),
             http,
-            drain_on_cancel,
-            drain_timeout: Duration::from_secs(drain_timeout),
+            pinned_relay: parking_lot::RwLock::new(None),
             failed_frames: std::sync::atomic::AtomicU64::new(0),
             turns_total: std::sync::atomic::AtomicU64::new(0),
             loose_path_matches: std::sync::atomic::AtomicU64::new(0),
@@ -1904,13 +1960,26 @@ pub mod gateway_app {
             stage_time_to_first_byte: crate::metrics::Histogram::new(),
             stage_delivery: crate::metrics::Histogram::new(),
             stage_finalize: crate::metrics::Histogram::new(),
-            store: TraceStore::new(),
-            stitcher: crate::trace::prefix::PrefixStitcher::new(),
-            cap: crate::trace::capture::CaptureCap::new(),
-            exporter: crate::trace::export::Exporter::start(
-                std::env::var("ATG_OTLP_ENDPOINT").ok(),
-            ),
+            store: trace_store,
+            stitcher,
+            cap,
+            exporter,
         };
+        // In-process SIGHUP → store.reload() → component hot-apply. A
+        // background service on the pingora server (the same shape as the
+        // exporter's thread): no HTTP write endpoint, no watcher thread of
+        // our own.
+        // Hot-apply wiring: the reload hook carries the SIGHUP semantics —
+        // every successful reload re-seeds cap/store/stitcher/exporter from
+        // the new snapshot, in-process and real binary alike.
+        store.set_on_reload(Box::new(move |cfg| hot.apply(cfg)));
+        let reloader = ConfigReloadService {
+            store: store.clone(),
+        };
+        server.add_service(pingora::services::background::background_service(
+            "config-reload",
+            reloader,
+        ));
         let mut http_proxy = http_proxy(&server.configuration, gateway);
         let mut opts = pingora::apps::HttpServerOptions::default();
         opts.h2c = true;
@@ -1919,7 +1988,7 @@ pub mod gateway_app {
             "agent-trace-gateway".to_string(),
             http_proxy,
         );
-        svc.add_tcp(listen);
+        svc.add_tcp(&listen);
         server.add_service(svc);
         server.run_forever();
     }
@@ -2008,20 +2077,6 @@ pub mod gateway_app {
             assert!(sni_resolve_entry("http://1.2.3.4:8443", Some("api.example.com")).is_none());
         }
 
-        /// ATG_TRACE_MODE parse nails (v0.3.11; bench-build only since
-        /// v0.3.12 — the parser is compiled out of production builds):
-        /// "off" (case/space tolerant) disables tracing; absent or anything
-        /// else = full.
-        #[cfg(feature = "bench-trace-mode")]
-        #[test]
-        fn parse_trace_mode_nails() {
-            assert!(!parse_trace_mode(None), "absent = full tracing");
-            assert!(!parse_trace_mode(Some("full")));
-            assert!(!parse_trace_mode(Some("")), "empty = full tracing");
-            assert!(parse_trace_mode(Some("off")));
-            assert!(parse_trace_mode(Some(" OFF ")), "case/space tolerant");
-        }
-
         /// Build-variant attestation nails (v0.3.12, ATG issue #2): the
         /// label is a compile-time property of the binary and must match the
         /// compiled feature — health, metrics and the startup line all quote
@@ -2035,66 +2090,11 @@ pub mod gateway_app {
         }
 
         /// Capture-mode self-attestation (v0.3.12, ATG issue #3): the label
-        /// reports the effective mode, and the production build ignores the
-        /// environment entirely — the bench arm is the only reader of
-        /// ATG_TRACE_MODE. (The cross-process invariant lives in
-        /// tests/trace_mode_env_ignored.rs.)
+        /// reports the effective mode.
         #[test]
-        fn trace_mode_labels_and_prod_env_ignored() {
+        fn trace_mode_labels() {
             assert_eq!(trace_mode_label(false), "full");
             assert_eq!(trace_mode_label(true), "off");
-            #[cfg(not(feature = "bench-trace-mode"))]
-            assert!(
-                !trace_off_from_env(),
-                "production build must not read ATG_TRACE_MODE"
-            );
-        }
-
-        /// ATG_MAX_WS_FRAME_PAYLOAD parse (v0.3.8 final ruling): absent or
-        /// unset → 0 = UNLIMITED (no frame refusal; memory grows with the
-        /// bytes actually received); unparsable or 0 → falls back to 0 with
-        /// the startup-log flag; a positive value enables the cap.
-        #[test]
-        fn parse_ws_frame_cap_defaults_to_unlimited() {
-            assert_eq!(
-                parse_ws_frame_cap(None),
-                (0, false),
-                "absent env = unlimited"
-            );
-            assert_eq!(parse_ws_frame_cap(Some("65536")), (65536, false));
-            assert_eq!(
-                parse_ws_frame_cap(Some("0")),
-                (0, true),
-                "explicit 0 falls back with the startup log"
-            );
-            assert_eq!(
-                parse_ws_frame_cap(Some("garbage")),
-                (0, true),
-                "unparsable falls back with the startup log"
-            );
-        }
-
-        /// ATG_WORKER_THREADS parse (ATG#1 Specification 5): absent = the
-        /// pre-change single-worker behaviour; a positive integer is
-        /// honoured; empty/0/garbage fall back to the default WITH the flag
-        /// (a knob that is silently ignored is how a measurement matrix once
-        /// ran a thread count nobody requested).
-        #[test]
-        fn parse_worker_threads_nails() {
-            assert_eq!(
-                parse_worker_threads(None),
-                (1, false),
-                "absent env = the pre-change single-worker behaviour"
-            );
-            assert_eq!(parse_worker_threads(Some("8")), (8, false));
-            assert_eq!(parse_worker_threads(Some(" 3 ")), (3, false), "trimmed");
-            for bad in ["", "0", "garbage", "-1", "1.5"] {
-                assert_eq!(
-                    parse_worker_threads(Some(bad)),
-                    (1, true),
-                    "{bad:?} must fall back to the default and say so"
-                );
-            }
         }
     }
 }

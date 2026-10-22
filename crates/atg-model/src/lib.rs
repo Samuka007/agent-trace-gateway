@@ -10,20 +10,12 @@ use serde::Serialize;
 pub const LANGFUSE_TRACE_NAME: &str = "agent.turn";
 pub const LANGFUSE_TRACE_TAG: &str = "line:atg";
 
-/// The `line:<source>` trace tag, resolved ONCE from `ATG_TRACE_TAG`
-/// (empty/whitespace-only falls back to [`LANGFUSE_TRACE_TAG`] — a silent
-/// empty tag would break UI filtering). Multi-instance deployments set
-/// their own source tag (e.g. `line:atg-newapi`). The `harness:<name>` tag
-/// is a separate, orthogonal dimension and unaffected.
-pub fn langfuse_trace_tag() -> &'static str {
-    static TAG: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        resolve_trace_tag(std::env::var("ATG_TRACE_TAG").ok().as_deref())
-    });
-    TAG.as_str()
-}
-
-/// Pure resolution pinned by unit tests: None or empty/whitespace-only →
-/// the default tag.
+/// Pure resolution of the `line:<source>` trace tag (kept for callers that
+/// still hold a raw source string): None or empty/whitespace-only → the
+/// default tag. The gateway now resolves the tag through the config file
+/// (`trace.tag`) and stamps it per record; multi-instance deployments set
+/// their own source tag there (e.g. `line:atg-newapi`). The `harness:<name>`
+/// tag is a separate, orthogonal dimension and unaffected.
 pub fn resolve_trace_tag(env: Option<&str>) -> String {
     match env {
         Some(v) if !v.trim().is_empty() => v.trim().to_string(),
@@ -204,7 +196,7 @@ pub struct TurnRecord {
     pub cancelled: bool,
     /// Drain-mode guard fired: the client had disconnected (cancelled=true)
     /// and the upstream stream did not finish within the drain window
-    /// (ATG_DRAIN_TIMEOUT_SECS) — the drain was abandoned and the turn
+    /// (config drain.timeout_secs) — the drain was abandoned and the turn
     /// records whatever partial content was captured. Not an error: the
     /// cancellation itself is not a failure (see `cancelled`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -237,6 +229,11 @@ pub struct TurnRecord {
     /// langfuse.observation.completion_start_time (generation-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_start_ns: Option<u64>,
+    /// The `line:<source>` trace tag stamped at record build time (config
+    /// `trace.tag`, hot-reloadable). Export and metrics read THIS value —
+    /// never a process-global — so a tag change lands on the next record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trace_tag: String,
 }
 
 /// One tool invocation observed in a turn.
@@ -250,7 +247,7 @@ pub struct ToolCall {
 mod tests {
     use super::*;
 
-    /// ATG_TRACE_TAG resolution nails (v0.3.10): absent env = zero change;
+    /// Raw-string trace-tag resolution nails (v0.3.10): absent = zero change;
     /// a configured source tag takes effect; empty/whitespace falls back.
     #[test]
     fn resolve_trace_tag_nails() {

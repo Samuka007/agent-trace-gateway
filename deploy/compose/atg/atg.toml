@@ -1,0 +1,44 @@
+# agent-trace-gateway 配置文件示例（完整文件契约：18 键缺一不可，未知键拒绝）。
+# 挂载方式：docker-compose.yml 把本目录（deploy/compose/atg/）挂到容器
+# /etc/atg/ —— 目录挂载而非单文件挂载：单文件 bind mount 下用 mv 替换文件
+# 会换 inode，容器内看到的仍是旧内容（配置热重载的经典陷阱）。
+# 部署前必改：
+#   - [api_key] salt：换成真实密钥（占位符 <SALT> 不是密钥）；
+#   - [server] upstream：sub2api 容器名:端口（compose 内网 DNS）；
+#   - [export] otlp_endpoint：按需填 Langfuse 采集端（空 = 导出关闭）。
+# 热键 / 结构键与重载说明见仓库 README「配置」章。
+version = 1
+
+[server]
+listen = "0.0.0.0:6180"
+upstream = "http://sub2api:8080"
+sni = ""
+worker_threads = 1
+max_ws_frame_payload = 0
+
+[trace]
+tag = "line:atg"
+mode = "full"
+
+[drain]
+on_cancel = false
+timeout_secs = 60
+
+[capture]
+max_bytes = 16777216
+
+[store]
+max_records = 1000
+max_bytes = 268435456
+
+[stitch]
+capacity = 100000
+ttl_ms = 86400000
+
+[api_key]
+salt = "<SALT>"
+
+[export]
+otlp_endpoint = ""
+max_inflight = 8
+workers = 4

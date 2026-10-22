@@ -98,11 +98,12 @@ async fn api_key_fingerprint_wire() {
     assert_ne!(fp(&a), fp(&c), "different key => different fingerprint");
     assert!(fp(&d).is_empty(), "no credential => no field: {d:?}");
 
-    // CLI recomputation guarantee: the `gateway key-fp` subcommand calls
-    // the same public function the runtime uses — with the default salt
-    // (env cleared), its output equals the record's fingerprint exactly.
-    std::env::remove_var("ATG_APIKEY_SALT");
-    let cli_style = agent_trace_gateway::gateway_app::api_key_fp("sk-shared-1");
+    // CLI recomputation guarantee: the `gateway key-fp --config` subcommand
+    // calls the same public function the runtime uses — with the salt from
+    // the fixture config file, its output equals the record's fingerprint
+    // exactly.
+    let cli_style =
+        agent_trace_gateway::gateway_app::api_key_fp("sk-shared-1", common::cfg::DEFAULT_SALT);
     assert_eq!(
         cli_style,
         fp(&a),
@@ -155,10 +156,8 @@ fn salt_shape_and_rotation() {
 }
 
 /// Salt-injected variant of the PUBLIC fingerprint function (the runtime
-/// reads the env; this pins the formula under a controlled salt).
+/// reads `api_key.salt` from the config file; this pins the formula under a
+/// controlled salt).
 fn api_key_fp_with_salt(key: &str, salt: &str) -> String {
-    std::env::set_var("ATG_APIKEY_SALT", salt);
-    let fp = agent_trace_gateway::gateway_app::api_key_fp(key);
-    std::env::remove_var("ATG_APIKEY_SALT");
-    fp
+    agent_trace_gateway::gateway_app::api_key_fp(key, salt)
 }

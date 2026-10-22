@@ -17,4 +17,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/gateway /usr/local/bin/gateway
 EXPOSE 6180
-CMD ["/usr/local/bin/gateway"]
+# 配置文件是唯一配置面（v0.4.0）：compose/运维侧挂载 /etc/atg/atg.toml。
+CMD ["/usr/local/bin/gateway", "--config", "/etc/atg/atg.toml"]

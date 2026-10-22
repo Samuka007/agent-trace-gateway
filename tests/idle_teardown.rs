@@ -2,6 +2,9 @@
 // connection) is observability noise, not a proxy failure — the completed
 // turn exports clean; mid-response RSTs still fail.
 // [Requirement: 透明转发；Scenario: 空闲拆除分类]
+#[path = "common/cfg.rs"]
+mod cfg;
+
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
@@ -11,8 +14,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-const UPSTREAM_PORT: u16 = 38971;
-const GW_PORT: u16 = 38970;
+// Below the kernel ephemeral range (32768-60999) — see drain_switch.rs.
+const UPSTREAM_PORT: u16 = 24621;
+const GW_PORT: u16 = 24620;
 
 fn client() -> Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>> {
     Client::builder(TokioExecutor::new()).build_http()
@@ -187,7 +191,7 @@ async fn idle_teardown_classification() {
     std::thread::spawn(mini_upstream);
     let gw = format!("127.0.0.1:{GW_PORT}");
     let up = format!("127.0.0.1:{UPSTREAM_PORT}");
-    std::thread::spawn(move || agent_trace_gateway::gateway_app::run(&gw, &up));
+    let _store = cfg::spawn_gateway("idle-teardown", &cfg::build(&gw, &up, &[]));
     wait_port(UPSTREAM_PORT).await;
     wait_port(GW_PORT).await;
 

@@ -1,18 +1,18 @@
 # agent-trace-gateway 部署（阶段 1 双跑形态）
 # Caddy 模型路由指向网关；网关上游指向 sub2api 容器。
 # 回滚：Caddy 路由切回直指 sub2api，本网关可 stop 不影响业务。
+# 配置：./atg/ 以只读目录卷挂载为 /etc/atg/（v0.4.0 起配置文件是唯一配置面，
+# ATG_* 环境变量已退役）；目录挂载而非单文件挂载，改配置永远落到同一路径。
+# 热键改动后 `docker kill -s HUP <container>` 即生效。
 services:
   agent-trace-gateway:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
-    environment:
-      ATG_LISTEN: "0.0.0.0:6180"
-      ATG_UPSTREAM: "${ATG_UPSTREAM:?set upstream host:port}"
-      # 可选：ATG_OTLP_ENDPOINT / ATG_CAPTURE_MAX_BYTES / ATG_STITCH_CAPACITY / ATG_STITCH_TTL_MS
-      # 可选：ATG_DRAIN_ON_CANCEL（客户端断开后续读上游流；上游断开也计费时开）/ ATG_DRAIN_TIMEOUT_SECS（默认 60）
-      ATG_OTLP_ENDPOINT: "${ATG_OTLP_ENDPOINT:-}"
+    command: ["/usr/local/bin/gateway", "--config", "/etc/atg/atg.toml"]
+    volumes:
+      - ./atg:/etc/atg:ro
     ports:
       - "6180:6180"
     healthcheck:
