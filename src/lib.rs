@@ -133,6 +133,10 @@ pub mod gateway_app {
         pub loose_path_matches: std::sync::atomic::AtomicU64,
         pub turns_with_session: std::sync::atomic::AtomicU64,
         pub turns_with_harness: std::sync::atomic::AtomicU64,
+        /// Header-evidence entries dropped by the per-turn byte budget
+        /// (`HDR_EVIDENCE_BUDGET`). The allowlist is closed, but values are
+        /// client-controlled, so overflow must be countable — not silent.
+        pub hdr_evidence_dropped: std::sync::atomic::AtomicU64,
         /// Effective pingora worker-thread count at startup (self-attestation
         /// for health/metrics; see run()).
         pub worker_threads: usize,
@@ -316,7 +320,7 @@ pub mod gateway_app {
             for (name, help, value) in gauges {
                 crate::metrics::render_gauge(&mut out, name, help, value);
             }
-            let counters: [(&str, &str, u64); 16] = [
+            let counters: [(&str, &str, u64); 17] = [
                 (
                     "atg_turns_total",
                     "Requests that produced a traced turn record.",
@@ -331,6 +335,11 @@ pub mod gateway_app {
                     "atg_turns_with_harness_total",
                     "Turns attributed to a known harness identity.",
                     self.turns_with_harness.load(Relaxed),
+                ),
+                (
+                    "atg_hdr_evidence_dropped_total",
+                    "Header-evidence entries dropped by the per-turn byte budget.",
+                    self.hdr_evidence_dropped.load(Relaxed),
                 ),
                 (
                     "atg_loose_path_matches_total",
@@ -771,6 +780,58 @@ pub mod gateway_app {
         }
     }
 
+    /// Headers that never enter the evidence map (issue #32 ruling: keep ALL
+    /// request headers except a blacklist). Names are lowercase — the
+    /// `HeaderMap` normalises — and this list is the security boundary: a
+    /// header that carries a credential belongs here.
+    const HDR_EVIDENCE_DENY: &[&str] = &[
+        // credential carriers
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "x-goog-api-key",
+        // cookies
+        "cookie",
+        "set-cookie",
+        // hop-by-hop transport headers (README: transport noise is stripped)
+        "connection",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ];
+    /// Defence in depth for client-invented credential headers: a name that
+    /// contains any of these markers is dropped even when it is not listed
+    /// above (`x-auth-token`, `x-custom-secret`, ...). Documented false
+    /// positives: rate-limit headers whose names mention tokens.
+    const HDR_EVIDENCE_DENY_MARKERS: &[&str] = &[
+        "authorization",
+        "cookie",
+        "secret",
+        "password",
+        "credential",
+        "signature",
+        "token",
+        "bearer",
+        "api-key",
+        "apikey",
+        "access-key",
+        "private-key",
+    ];
+    /// Header names longer than this are dropped: name bytes are
+    /// client-controlled and would otherwise eat the budget.
+    const HDR_NAME_CAP: usize = 64;
+    /// Per-value cap, in chars on a char boundary — same rule as `client_ua`
+    /// (the attribute is unbounded otherwise: header values are client input).
+    const HDR_VALUE_CAP: usize = 256;
+    /// Per-turn entry cap — a client cannot inflate the metadata map.
+    const HDR_EVIDENCE_MAX_ENTRIES: usize = 32;
+    /// Per-turn budget across the evidence entries (name + value bytes).
+    const HDR_EVIDENCE_BUDGET: usize = 4096;
+
     /// Salted API-credential fingerprint: sha256(salt || key), first 16
     /// hex chars. The salt comes from the config file (`api_key.salt`,
     /// passed explicitly — rotating it invalidates cross-version
@@ -782,6 +843,64 @@ pub mod gateway_app {
         hasher.update(salt.as_bytes());
         hasher.update(key.as_bytes());
         hex::encode(hasher.finalize())[..16].to_string()
+    }
+
+    /// Cap a header value at `max` chars without splitting a codepoint
+    /// (`char_indices().nth` gives the byte offset of the (max+1)-th char).
+    fn truncate_header_value(value: &str, max: usize) -> &str {
+        match value.char_indices().nth(max) {
+            Some((i, _)) => &value[..i],
+            None => value,
+        }
+    }
+
+    /// Whether a request header is barred from the evidence map.
+    fn hdr_evidence_denied(name: &str) -> bool {
+        HDR_EVIDENCE_DENY.contains(&name)
+            || HDR_EVIDENCE_DENY_MARKERS
+                .iter()
+                .any(|marker| name.contains(*marker))
+    }
+
+    /// Collect one turn's header evidence: every request header except the
+    /// deny list, values trimmed and capped at `HDR_VALUE_CAP` chars,
+    /// over-long names skipped, bounded by `HDR_EVIDENCE_MAX_ENTRIES` and
+    /// `HDR_EVIDENCE_BUDGET`. Returns the kept entries and how many headers
+    /// the bounds dropped (callers count that in health; deny-list hits are
+    /// policy, not overflow, and are not counted).
+    fn collect_hdr_evidence(headers: &http::HeaderMap) -> (Vec<(String, String)>, u32) {
+        let mut kept: Vec<(String, String)> = Vec::with_capacity(16);
+        let mut used = 0usize;
+        let mut dropped = 0u32;
+        for (name, raw) in headers {
+            let name = name.as_str();
+            if hdr_evidence_denied(name) {
+                continue;
+            }
+            if name.len() > HDR_NAME_CAP {
+                dropped = dropped.saturating_add(1);
+                continue;
+            }
+            // Non-UTF-8 values cannot be carried as JSON strings; skip them
+            // (not an overflow, so not counted).
+            let Ok(raw) = raw.to_str() else {
+                continue;
+            };
+            let value = truncate_header_value(raw.trim(), HDR_VALUE_CAP);
+            if value.is_empty() {
+                continue;
+            }
+            let cost = name.len().saturating_add(value.len());
+            if kept.len() >= HDR_EVIDENCE_MAX_ENTRIES
+                || used.saturating_add(cost) > HDR_EVIDENCE_BUDGET
+            {
+                dropped = dropped.saturating_add(1);
+                continue;
+            }
+            used = used.saturating_add(cost);
+            kept.push((name.to_string(), value.to_string()));
+        }
+        (kept, dropped)
     }
 
     /// Extract the request's API credential and fingerprint it:
@@ -1166,6 +1285,11 @@ pub mod gateway_app {
                     "loose_path_matches": loose_path_matches,
                     "turns_with_session": turns_with_session,
                     "turns_with_harness": turns_with_harness,
+                    // Header evidence (issue #32): entries dropped by the
+                    // per-turn byte budget — overflow is countable.
+                    "hdr_evidence_dropped": self
+                        .hdr_evidence_dropped
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     // Queue/backpressure (v0.3.12): requests inside the
                     // gateway, the subset still waiting on the upstream, the
                     // monotonic max, and the effective worker-thread count.
@@ -1340,6 +1464,18 @@ pub mod gateway_app {
                                 record.end_ns = ctx.end_ns;
                                 record.completion_start_ns = ctx.first_output_ns.take();
                                 record.trace_tag = ctx.snap.cfg.trace.tag.clone();
+                                // WS turns get the same header evidence as
+                                // HTTP turns (the upgrade request's headers
+                                // are still on the session).
+                                let (evidence, dropped) =
+                                    collect_hdr_evidence(&session.req_header().headers);
+                                if dropped > 0 {
+                                    self.hdr_evidence_dropped.fetch_add(
+                                        u64::from(dropped),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                }
+                                record.hdr_evidence = evidence;
                                 self.push_record(record);
                             }
                         }
@@ -1503,11 +1639,19 @@ pub mod gateway_app {
                 // 256 bytes on a char boundary (unbounded header attribute).
                 let client_ua = ua
                     .as_deref()
-                    .map(|u| match u.char_indices().nth(256) {
-                        Some((i, _)) => u[..i].to_string(),
-                        None => u.to_string(),
-                    })
+                    .map(|u| truncate_header_value(u, HDR_VALUE_CAP).to_string())
                     .unwrap_or_default();
+                // Header evidence (issue #32): every request header except
+                // the deny list, with the values the client actually sent.
+                // Values are trimmed and capped exactly like the UA; the
+                // entry/byte bounds drop the overflow (counted) so a client
+                // cannot inflate the record.
+                let (hdr_evidence, hdr_dropped) =
+                    collect_hdr_evidence(&session.req_header().headers);
+                if hdr_dropped > 0 {
+                    self.hdr_evidence_dropped
+                        .fetch_add(u64::from(hdr_dropped), std::sync::atomic::Ordering::Relaxed);
+                }
                 // Salted API-credential fingerprint (correlation without the
                 // key; plaintext never enters any downstream path).
                 let api_key_fp =
@@ -1521,6 +1665,13 @@ pub mod gateway_app {
                 let mut session_id = tf
                     .as_ref()
                     .and_then(|f| f.session_id.clone())
+                    .unwrap_or_default();
+                // Provenance for the trace (issue #32): which source supplied
+                // the id — a header name, a body path, or the stitcher. Empty
+                // without a session (never invented).
+                let mut session_source = tf
+                    .as_ref()
+                    .map(|f| f.session_source.clone())
                     .unwrap_or_default();
                 let mut session_synthetic = false;
                 // F3 tightening (user ruling): the stitcher runs ONLY for
@@ -1554,6 +1705,7 @@ pub mod gateway_app {
                         let scope = header_get("authorization").unwrap_or_default();
                         let (synthetic, is_bp) = self.stitcher.assign(&scope, messages);
                         session_id = synthetic;
+                        session_source = "stitcher".to_string();
                         breakpoint = is_bp;
                         session_synthetic = !session_id.is_empty();
                     }
@@ -1639,6 +1791,8 @@ pub mod gateway_app {
                         harness,
                         dialect: dialect.clone(),
                         client_ua: client_ua.clone(),
+                        hdr_evidence,
+                        session_source,
                         api_key_fp: api_key_fp.clone(),
                         harness_candidates,
                         harness_anomaly: hfacts.protocol_anomaly,
@@ -1659,6 +1813,8 @@ pub mod gateway_app {
                         record.harness = harness;
                         record.dialect = dialect;
                         record.client_ua = client_ua;
+                        record.hdr_evidence = hdr_evidence;
+                        record.session_source = session_source;
                         record.api_key_fp = api_key_fp;
                         record.harness_candidates = harness_candidates;
                         record.harness_anomaly = hfacts.protocol_anomaly;
@@ -1699,6 +1855,8 @@ pub mod gateway_app {
                             harness_anomaly: hfacts.protocol_anomaly,
                             harness_enrich,
                             session_synthetic,
+                            hdr_evidence,
+                            session_source,
                             error: http_error,
                             start_ns: ctx.start_ns,
                             end_ns: ctx.end_ns,
@@ -1952,6 +2110,7 @@ pub mod gateway_app {
             loose_path_matches: std::sync::atomic::AtomicU64::new(0),
             turns_with_session: std::sync::atomic::AtomicU64::new(0),
             turns_with_harness: std::sync::atomic::AtomicU64::new(0),
+            hdr_evidence_dropped: std::sync::atomic::AtomicU64::new(0),
             worker_threads,
             inflight: std::sync::atomic::AtomicU64::new(0),
             inflight_high_water: std::sync::atomic::AtomicU64::new(0),
@@ -1991,6 +2150,29 @@ pub mod gateway_app {
         svc.add_tcp(&listen);
         server.add_service(svc);
         server.run_forever();
+    }
+
+    /// Header-evidence boundary pins (issue #32): the cap counts CHARS and
+    /// never splits a codepoint. Header values reaching this helper are
+    /// visible ASCII by construction (`HeaderValue::to_str`), so the
+    /// multibyte arm is a defensive property of the shared `client_ua` path.
+    #[cfg(test)]
+    mod header_evidence_tests {
+        use super::*;
+
+        #[test]
+        fn truncate_counts_chars_on_a_codepoint_boundary() {
+            assert_eq!(truncate_header_value("", 256), "");
+            let ascii_256 = "a".repeat(256);
+            assert_eq!(truncate_header_value(&ascii_256, 256), ascii_256);
+            let ascii_257 = "a".repeat(257);
+            assert_eq!(truncate_header_value(&ascii_257, 256), "a".repeat(256));
+            let mixed = format!("{}{}{}", "a".repeat(255), '\u{4e2d}', 'x');
+            let cut = truncate_header_value(&mixed, 256);
+            assert_eq!(cut.chars().count(), 256);
+            assert!(cut.ends_with('\u{4e2d}'));
+            assert_eq!(cut.len(), 258, "255 ASCII + one 3-byte codepoint");
+        }
     }
 
     #[cfg(test)]

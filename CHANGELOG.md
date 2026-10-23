@@ -48,6 +48,16 @@
   max_inflight 热调）、`config_sighup.rs`（真二进制 SIGHUP 链路）、
   `legacy_env_ignored.rs`（env 静默忽略不变量）、`readme_config_example.rs`
   （README 示例可被 `config::load` 解析的守护）。
+- **Header 证据面（#32）**：**除黑名单外全部**请求 header 原值进 trace
+  metadata — `langfuse.trace.metadata.hdr.<name>`（每值按字符截前 256；单
+  turn 上限 32 条 / 4096 字节 / 名字 64 字符，溢出计入
+  `hdr_evidence_dropped`）。黑名单 = 凭据载体（authorization / x-api-key /
+  api-key / proxy-authorization / x-goog-api-key）、cookie（cookie /
+  set-cookie）、逐跳传输头，以及名字含 token/secret/password/credential/
+  signature/bearer/api-key/access-key/private-key 的 header。新增
+  `langfuse.trace.metadata.session_source` 标注 `session.id` 的来源
+  （`body:*` / `header:*` / `harness-header:*` / `stitcher`）。凭据只有
+  `client_key_fp` 一个 trace 侧代表。
 
 ## [0.3.13] - 2026-09-17
 

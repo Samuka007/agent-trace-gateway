@@ -57,3 +57,31 @@ Review log with signatures: see the session review report
 (`.tmp-atg-rust-review.md` in the working workspace) — §D/§E/§F contain the
 full BLOCK/AMBIGUITY history of the descriptor, P0-semantics, and three-layer
 batches.
+
+## Observability contract: header evidence (issue #32)
+
+The trace carries **every request header except the blacklist**
+(`HDR_EVIDENCE_DENY` + `HDR_EVIDENCE_DENY_MARKERS`): credential carriers,
+cookies, and hop-by-hop framing. Each value is capped at **256 chars on a
+char boundary** (shared helper with `client_ua`); per turn the map is bounded
+by **32 entries**, a **4096-byte** name+value budget, and a **64-char** header
+name cap. Bound overflow is counted in `hdr_evidence_dropped` (health) /
+`atg_hdr_evidence_dropped_total` (metrics) — never silently. Blacklist hits
+are policy, not overflow: they are not counted.
+
+Rules a reviewer must enforce:
+
+- **The blacklist is the security boundary.** Any header that can carry a
+  credential belongs in `HDR_EVIDENCE_DENY` (explicit) or in the marker list
+  (substring defence for client-invented names). Removing an entry is a
+  security change, not a code tweak. Known false positive: rate-limit headers
+  whose names mention tokens.
+- **Credential plaintext never reaches a surface.** `client_key_fp` is the
+  only trace-side representative; wire tests assert sentinel plaintext is
+  absent from both `/__atg/records` and the OTLP payload.
+- **Bounds are part of the contract** (32 entries / 4096 bytes / 64-char
+  names / 256-char values): a change to any of them is a spec change — the
+  metadata map must stay bounded for client-controlled input.
+- **`session_source` names the winner** (`body:<path>`, `body:harness`,
+  `header:<name>`, `harness-header:<name>`, `stitcher`); an empty source with
+  a non-empty `session.id` is a bug.

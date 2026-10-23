@@ -265,9 +265,18 @@ impl ProtocolDescriptor {
 
     /// Session id from body sources in priority order (body before header).
     pub fn session_from_body(&self, body: &Value) -> Option<String> {
+        self.session_from_body_with_source(body).map(|(sid, _)| sid)
+    }
+
+    /// Same read, plus the winning source's path — the trace-side
+    /// provenance marker (`session_source=body:metadata.session_id`).
+    pub fn session_from_body_with_source(
+        &self,
+        body: &Value,
+    ) -> Option<(String, &'static [&'static str])> {
         for src in self.body_sources {
             if let Some(sid) = read_source(body, src) {
-                return Some(sid);
+                return Some((sid, src.path));
             }
         }
         None
@@ -275,9 +284,19 @@ impl ProtocolDescriptor {
 
     /// Session id from headers (lowercased names, in order).
     pub fn session_from_headers(&self, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        self.session_from_headers_with_source(get)
+            .map(|(sid, _)| sid)
+    }
+
+    /// Same read, plus the header that won — the trace-side provenance
+    /// marker (`session_source=header:x-grok-conv-id`).
+    pub fn session_from_headers_with_source(
+        &self,
+        get: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<(String, &'static str)> {
         for name in self.header_sources {
             if let Some(v) = get(name).filter(|s| !s.trim().is_empty()) {
-                return Some(v.trim().to_string());
+                return Some((v.trim().to_string(), name));
             }
         }
         None

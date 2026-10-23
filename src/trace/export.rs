@@ -719,7 +719,8 @@ fn span_json(r: &TurnRecord) -> SpanJson<'_> {
     // not invent one on either line. Trace-level attributes (session/tags/
     // name) are copied onto every span in the trace (spec section 3) and are
     // appended AFTER the fixed block, in the pinned push order.
-    let mut trace_extra: Vec<Attr<'_>> = Vec::with_capacity(12);
+    // 12 fixed metadata pairs + up to 6 header-evidence entries + constants.
+    let mut trace_extra: Vec<Attr<'_>> = Vec::with_capacity(20);
     // F2 harness wire (trace-level): tag harness:<name> +
     // langfuse.trace.metadata.{harness,…}.
     if !r.harness.is_empty() {
@@ -735,6 +736,17 @@ fn span_json(r: &TurnRecord) -> SpanJson<'_> {
         trace_extra.push(attr(
             "langfuse.trace.metadata.client_ua",
             r.client_ua.as_str(),
+        ));
+    }
+    // Header evidence (issue #32): every request header the gateway saw
+    // (deny list excluded), name-keyed (`hdr.<header-name>`); the value is
+    // already capped at 256 chars on a char boundary at capture time and the
+    // entry count/budget are bounded there — absent headers are absent
+    // attributes.
+    for (name, value) in &r.hdr_evidence {
+        trace_extra.push(attr(
+            format!("langfuse.trace.metadata.hdr.{name}"),
+            value.as_str(),
         ));
     }
     // Client cancelled mid-turn (three-way error taxonomy): the turn records
@@ -761,6 +773,13 @@ fn span_json(r: &TurnRecord) -> SpanJson<'_> {
     // Langfuse-side queries can exclude them from hit-rate numerators.
     if r.session_synthetic {
         trace_extra.push(attr("langfuse.trace.metadata.session_synthetic", "true"));
+    }
+    // Session provenance (issue #32): which source supplied session.id.
+    if !r.session_source.is_empty() {
+        trace_extra.push(attr(
+            "langfuse.trace.metadata.session_source",
+            r.session_source.as_str(),
+        ));
     }
     if r.harness_candidates.len() > 1 {
         trace_extra.push(attr(
@@ -912,6 +931,10 @@ fn build_otlp_json_value_tree(batch: &[TurnRecord]) -> String {
             if !r.client_ua.is_empty() {
                 trace_extra.push(kv("langfuse.trace.metadata.client_ua", &r.client_ua));
             }
+            // Header evidence (issue #32) — mirrors `span_json`.
+            for (name, value) in &r.hdr_evidence {
+                trace_extra.push(kv(&format!("langfuse.trace.metadata.hdr.{name}"), value));
+            }
             // Client cancelled mid-turn (three-way error taxonomy): the
             // turn records normally with partial content; the marker is
             // reconciliation material (upstream may have drained/billed).
@@ -934,6 +957,12 @@ fn build_otlp_json_value_tree(batch: &[TurnRecord]) -> String {
             // Langfuse-side queries can exclude them from hit-rate numerators.
             if r.session_synthetic {
                 trace_extra.push(kv("langfuse.trace.metadata.session_synthetic", "true"));
+            }
+            if !r.session_source.is_empty() {
+                trace_extra.push(kv(
+                    "langfuse.trace.metadata.session_source",
+                    &r.session_source,
+                ));
             }
             if r.harness_candidates.len() > 1 {
                 let joined = r.harness_candidates.join(",");
@@ -1430,6 +1459,16 @@ mod tests {
             .push(("cc_account".to_string(), "acc-1".to_string()));
         h.harness_enrich
             .push(("odd key\u{1}".to_string(), "v\"1".to_string()));
+        // Header evidence rides the same byte contract: name-keyed keys with
+        // hyphens plus a multibyte value.
+        h.hdr_evidence = vec![
+            ("x-grok-conv-id".to_string(), "conv-1".to_string()),
+            (
+                "x-opencode-session".to_string(),
+                "oc-\u{4e2d}\u{6587}".to_string(),
+            ),
+        ];
+        h.session_source = "header:x-grok-conv-id".to_string();
         batches.push(("harness-metadata", vec![h]));
 
         // 9. Harness tag alone; one candidate must be omitted (not joined).

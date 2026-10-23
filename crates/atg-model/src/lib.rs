@@ -187,6 +187,20 @@ pub struct TurnRecord {
     /// from what reached ATG).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client_ua: String,
+    /// Request headers seen at the gateway (name → value, each capped at 256
+    /// chars on a char boundary). Evidence audit: the UA alone could not
+    /// answer "which header family spoke and what did it carry". The gateway
+    /// keeps every header except its deny list (credential carriers,
+    /// cookies, hop-by-hop framing), bounded by an entry cap and a byte
+    /// budget per turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hdr_evidence: Vec<(String, String)>,
+    /// Which source supplied `session_id`: `body:<path>`, `body:harness`,
+    /// `header:<name>`, `harness-header:<name>` or `stitcher`. Empty when
+    /// the turn carries no session (never invented — same rule as the
+    /// session attribute itself).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_source: String,
     /// The CLIENT actively disconnected mid-turn (downstream-sourced
     /// session error after the request was accepted): the turn records
     /// normally with its partial content and a cancelled=true metadata

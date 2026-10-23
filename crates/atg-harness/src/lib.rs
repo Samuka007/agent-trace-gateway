@@ -245,11 +245,20 @@ pub fn session_from_headers(
     facts: &HarnessFacts,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
+    session_from_headers_with_source(facts, get).map(|(sid, _)| sid)
+}
+
+/// Same read, plus the mount that won — the trace-side provenance marker
+/// (`session_source=harness-header:x-session-id`).
+pub fn session_from_headers_with_source(
+    facts: &HarnessFacts,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, &'static str)> {
     let name = facts.identity?;
     let d = HARNESSES.iter().find(|h| h.name == name)?;
     for mount in d.session_header_mounts {
         if let Some(v) = get(mount).filter(|s| !s.trim().is_empty()) {
-            return Some(v.trim().to_string());
+            return Some((v.trim().to_string(), mount));
         }
     }
     None
